@@ -5,11 +5,12 @@
   advisory). Shape errors (which depend on an input shape) are reported by
   `torch.core/summary`; this namespace checks the static structure of the model
   itself — well-formed layers, known types, sane arity."
-  (:require [torch.model :as model]
+  (:require [kotoba.dsl.problem :as problem]
+            [torch.model :as model]
             [torch.ports :as ports]))
 
-(defn- problem [severity code path msg]
-  {:torch/severity severity :torch/code code :torch/path path :torch/msg msg})
+(defn- torch-problem [severity code path msg]
+  (problem/problem :torch :path severity code path msg))
 
 (def ^:private min-arity
   "Minimum positional-arg count for built-in layer types that need args."
@@ -23,8 +24,8 @@
             (range) (:torch/layers (model/normalize lyr)))
 
     (not (model/layer-type lyr))
-    [(problem :error :layer/malformed path
-              (str "not a one-key {type args} layer: " (pr-str lyr)))]
+    [(torch-problem :error :layer/malformed path
+                    (str "not a one-key {type args} layer: " (pr-str lyr)))]
 
     :else
     (let [t    (model/layer-type lyr)
@@ -32,12 +33,12 @@
           need (get min-arity t)]
       (cond-> []
         (not (ports/custom-layer? ports* t))
-        (conj (problem :error :layer/unknown path (str "unknown layer type: " t)))
+        (conj (torch-problem :error :layer/unknown path (str "unknown layer type: " t)))
 
         (and need (or (not (vector? args)) (< (count args) need)))
-        (conj (problem :error :layer/arity path
-                       (str t " needs ≥ " need " positional args, got "
-                            (pr-str args))))))))
+        (conj (torch-problem :error :layer/arity path
+                             (str t " needs ≥ " need " positional args, got "
+                                  (pr-str args))))))))
 
 (defn problems
   "All structural problems in `model`, as a vector of problem maps. Validates
@@ -48,10 +49,10 @@
      (vec
       (concat
        (when-not (= :sequential (:torch/module norm))
-         [(problem :error :module/unknown ""
-                   (str "unsupported module kind: " (:torch/module norm)))])
+         [(torch-problem :error :module/unknown ""
+                         (str "unsupported module kind: " (:torch/module norm)))])
        (when (empty? (:torch/layers norm))
-         [(problem :warn :module/empty "" "model has no layers")])
+         [(torch-problem :warn :module/empty "" "model has no layers")])
        (mapcat (fn [i l] (check-layer ports* (str i) l))
                (range) (:torch/layers norm)))))))
 
@@ -59,4 +60,4 @@
   "True iff `model` has no :error-level structural problems."
   ([model*] (valid? ports/default-ports model*))
   ([ports* model*]
-   (empty? (filterv #(= :error (:torch/severity %)) (problems ports* model*)))))
+   (problem/valid? :torch (problems ports* model*))))

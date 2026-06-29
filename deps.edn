@@ -3,7 +3,8 @@
  ;; A neural-network module IS data ({layer args} maps, JSONLogic-shaped) — the
  ;; library propagates shapes and counts parameters; it never runs tensor math
  ;; (real execution is a host-injected IBackend port).
- :deps {}
+ :deps {io.github.kotoba-lang/dsl-core
+        {:git/sha "9bedd2b9d05133a2d9b0656a55135f142ab11a36"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
