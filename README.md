@@ -1,5 +1,7 @@
 # torch-clj — ニューラルネット module graph を EDN データとして
 
+[![CI](https://github.com/kotoba-lang/torch/actions/workflows/ci.yml/badge.svg)](https://github.com/kotoba-lang/torch/actions/workflows/ci.yml)
+
 A PyTorch-style neural-network module graph defined as **plain EDN data**, with
 a pure shape-&-parameter engine. Like its sibling libraries, torch-clj treats
 the model as data — a `{layer args}` map is the same shape as a JSONLogic rule —
