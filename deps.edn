@@ -8,7 +8,7 @@
         ;; Includes differentiable NCHW convolution, GroupNorm, SiLU,
         ;; multi-head attention, typed Metal tensors, and UNet autograd.
         io.github.kotoba-lang/num
-        {:git/sha "9eb57f0674c2e9f2b50367094810663f924f4d46"}}
+        {:local/root "../num"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
@@ -21,6 +21,12 @@
         :main-opts ["-m" "cljs.main"
                     "-co" "{:optimizations :simple :target :nodejs :main torch.deno-autocast-verify :output-to \"target/deno-autocast-verify.cjs\"}"
                     "-c" "torch.deno-autocast-verify"]}
+       :deno-metal-train-verify
+       {:extra-paths ["test"]
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-metal-train-verify :output-to \"target/deno-metal-train-verify.cjs\"}"
+                    "-c" "torch.deno-metal-train-verify"]}
        ;; clj-kondo as a Clojars lib (no Homebrew/system install needed).
        :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
          :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"
