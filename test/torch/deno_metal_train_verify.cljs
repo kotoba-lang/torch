@@ -1,8 +1,11 @@
 (ns torch.deno-metal-train-verify
   "Live forward/backward/SGD parity on Deno WebGPU -> Apple Metal."
-  (:require [num.deno-gpu :as gpu]
+  (:require [num.array :as arr]
+            [num.cpu :as cpu]
+            [num.deno-gpu :as gpu]
             [torch.metal-train :as metal]
-            [torch.model :as model]))
+            [torch.model :as model]
+            [torch.train :as train]))
 
 (defn- approx? [left right tolerance]
   (and (= (count left) (count right))
@@ -34,7 +37,20 @@
                   nil
                   {:w [-0.10745441076046353 -0.29133051804988724 -0.08767095078486066
                        -0.4714664691375835 0.4692368135382779 0.05369974449253077]
-                   :b [0.003580244855327465 -0.10343405567822177]}]]
+                   :b [0.003580244855327465 -0.10343405567822177]}]
+        cpu-backend (cpu/cpu-backend)
+        cpu-weights [{:w (arr/from-vec cpu-backend (get-in initial [0 :w]) [2 3])
+                      :b (arr/from-vec cpu-backend (get-in initial [0 :b]) [3])}
+                     nil
+                     {:w (arr/from-vec cpu-backend (get-in initial [2 :w]) [3 2])
+                      :b (arr/from-vec cpu-backend (get-in initial [2 :b]) [2])}]
+        cpu-step (train/sgd-step model* cpu-weights
+                                 (arr/from-vec cpu-backend input [2 2])
+                                 (arr/from-vec cpu-backend target [2 2]) 0.1)
+        cljs-expected (mapv (fn [weight]
+                              (when weight {:w (arr/->vec (:w weight))
+                                            :b (arr/->vec (:b weight))}))
+                            (:weights cpu-step))]
     (-> (gpu/request-device)
         (.then (fn [device]
                  (-> (metal/train-step! device model* initial input target
@@ -43,16 +59,18 @@
                               (let [parity? (and
                                              (< (Math/abs (- (:loss first-step)
                                                              expected-loss)) 1.0e-4)
-                                             (approx? (get-in expected [0 :w])
+                                             (< (Math/abs (- (:loss cpu-step) expected-loss)) 1.0e-9)
+                                             (approx? (get-in cljs-expected [0 :w])
                                                       (get-in first-step [:weights 0 :w]) 1.0e-4)
-                                             (approx? (get-in expected [0 :b])
+                                             (approx? (get-in cljs-expected [0 :b])
                                                       (get-in first-step [:weights 0 :b]) 1.0e-4)
-                                             (approx? (get-in expected [2 :w])
+                                             (approx? (get-in cljs-expected [2 :w])
                                                       (get-in first-step [:weights 2 :w]) 1.0e-4)
-                                             (approx? (get-in expected [2 :b])
+                                             (approx? (get-in cljs-expected [2 :b])
                                                       (get-in first-step [:weights 2 :b]) 1.0e-4))]
                                 (when-not parity?
-                                  (println "expected loss/weights:" expected-loss expected)
+                                  (println "JVM expected loss/weights:" expected-loss expected)
+                                  (println "CLJS expected loss/weights:" (:loss cpu-step) cljs-expected)
                                   (println "Metal loss/weights:" (:loss first-step)
                                            (:weights first-step)))
                                 (when-not parity?

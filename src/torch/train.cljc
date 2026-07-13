@@ -3,7 +3,7 @@
   Supports dense and UNet/transformer reference training on synchronous num
   arrays, returning new immutable weight maps after one SGD step."
   (:require [num.array :as arr]
-            [num.autograd :as ag]
+            [num.autograd :as ag :include-macros true]
             [torch.model :as model]
             [torch.optim :as optim]))
 
