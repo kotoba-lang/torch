@@ -58,6 +58,25 @@
     (is (nil? (nth (:gradients first-pass) 3)))
     (is (< (:loss trained) (:loss first-pass)))))
 
+(deftest transformer-style-layernorm-model-runs-and-trains
+  (let [model (m/sequential (m/linear 4 4) (m/layernorm 4) (m/gelu)
+                            (m/linear 4 2))
+        input (arr/from-vec backend
+                            [0.2 -0.1 0.3 0.4, -0.2 0.1 0.5 -0.3,
+                             0.6 0.2 -0.4 0.1] [3 4])
+        target (arr/from-vec backend [0.1 -0.2, 0.3 0.0, -0.1 0.4] [3 2])
+        initial (nb/random-weights backend model 47)
+        inference (core/run (nb/num-backend backend initial) model input)
+        first-pass (train/loss-and-gradients model initial input target)
+        trained (last (take 41 (iterate (fn [{:keys [weights]}]
+                                          (train/sgd-step model weights input target 0.05))
+                                        {:weights initial})))]
+    (is (= (arr/->vec inference) (arr/->vec (:prediction first-pass))))
+    (is (= [4] (:shape (:w (second initial)))))
+    (is (= [4] (:shape (:w (second (:gradients first-pass))))))
+    (is (nil? (nth (:gradients first-pass) 2)))
+    (is (< (:loss trained) (:loss first-pass)))))
+
 (deftest training-contract-rejects-ambiguous-input
   (let [x (arr/from-vec backend [1 2] [1 2])]
     (is (thrown? #?(:clj Exception :cljs js/Error)

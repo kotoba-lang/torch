@@ -15,6 +15,7 @@
 (defn -main [& _]
         (let [model* (model/sequential (model/conv2d 2 4 3 1 1)
                                  (model/groupnorm 2 4)
+                                 (model/layernorm 4)
                                  (model/silu) (model/sigmoid) (model/tanh) (model/gelu))
         input-values (mapv #(- (* 0.03 %) 0.4) (range 32))
         cpu-backend (cpu/cpu-backend)
@@ -37,7 +38,7 @@
              (.then (arr/->vec output)
                     (fn [actual]
                       (let [ok? (approx-vec? expected actual 0.03)]
-                        (println (str "torch conv→GroupNorm→SiLU→sigmoid→tanh→GELU f16: "
+                        (println (str "torch conv→GroupNorm→LayerNorm→activations f16: "
                                       (if ok? "passed" "failed")))
                         (when-not ok? (.exit js/Deno 1))))))))
         (.catch (fn [error]

@@ -5,7 +5,7 @@
   throwing \"torch-clj is shape-only here\".
 
   SCOPE (deliberately not full PyTorch-layer coverage): `:linear`, `:relu`,
-  `:silu`, `:sigmoid`, `:tanh`, `:gelu`, `:softmax`, affine `:groupnorm`, and full NCHW `:conv2d` execute
+  `:silu`, `:sigmoid`, `:tanh`, `:gelu`, `:softmax`, affine `:layernorm`/`:groupnorm`, and full NCHW `:conv2d` execute
   through verified num ops. Convolution supports batches, groups/depthwise,
   bias, stride, padding, and dilation. Learned `:multihead-attention` supports
   batch-first inputs plus causal, key-padding, and separate context sequences
@@ -57,7 +57,8 @@
   parameterless layers) on `backend`, seeded from `seed` for reproducibility.
   `:linear [in out]` -> `{:w [in out] :b [out]}`; `:conv2d` ->
   `{:w [out-ch in-ch/groups kh kw] :b [out-ch]}`; `:groupnorm` -> affine
-  `{:w [channels] :b [channels]}`; `:attention` has no weights
+  `{:w [channels] :b [channels]}`; `:layernorm` uses the same affine layout;
+  `:attention` has no weights
   (parameter-free) regardless of num-heads, so it's `nil` here like any other
   parameterless layer."
   ([backend model* seed] (random-weights backend model* seed {}))
@@ -82,6 +83,9 @@
                 :groupnorm (let [[_groups channels] a]
                              {:w (upload (repeat channels 1.0) [channels])
                               :b (upload (repeat channels 0.0) [channels])})
+                :layernorm (let [[features] a]
+                             {:w (upload (repeat features 1.0) [features])
+                              :b (upload (repeat features 0.0) [features])})
                 :multihead-attention
                 (let [[embed _heads] a
                       matrix (fn [] (upload (next-vec! (* embed embed)) [embed embed]))
@@ -168,8 +172,9 @@
       :groupnorm (let [[groups _channels eps] largs]
                    (t/group-norm-nchw x groups (:w weights) (:b weights)
                                       (or eps 1.0e-5)))
+      :layernorm (t/layer-norm-last x (:w weights) (:b weights) 1.0e-5)
       (throw (ex-info (str "torch.num-backend: layer type not supported: " t')
-                      {:layer lyr :supported #{:linear :relu :silu :sigmoid :tanh :gelu :softmax :flatten :conv2d
+                      {:layer lyr :supported #{:linear :relu :silu :sigmoid :tanh :gelu :softmax :flatten :conv2d :layernorm
                                                :groupnorm :attention
                                                :multihead-attention}})))))
 
@@ -194,11 +199,11 @@
                layer-options (or (:layer-options options)
                                  (repeat (count lyrs) nil))
                unsupported (when autocast-dtype
-                             (seq (remove #{:linear :relu :silu :sigmoid :tanh :gelu :flatten :conv2d :groupnorm}
+                             (seq (remove #{:linear :relu :silu :sigmoid :tanh :gelu :flatten :conv2d :groupnorm :layernorm}
                                           (map model/layer-type lyrs))))]
            (when unsupported
              (throw (ex-info
-                     "torch.num-backend: autocast supports linear/relu/silu/sigmoid/tanh/gelu/flatten/conv2d/groupnorm"
+                     "torch.num-backend: autocast supports linear/relu/silu/sigmoid/tanh/gelu/flatten/conv2d/groupnorm/layernorm"
                      {:unsupported (vec unsupported) :dtype autocast-dtype})))
            (when-not (= (count lyrs) (count layer-options))
              (throw (ex-info "torch.num-backend: layer-options count mismatch"

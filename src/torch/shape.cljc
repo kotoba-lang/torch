@@ -120,8 +120,16 @@
 
 ;; --- norms (shape-preserving, but check feature dim) ------------------------
 
-(doseq [t [:batchnorm :layernorm]]
-  (defmethod layer-shape t [_ _ in] [:ok in]))
+(defmethod layer-shape :batchnorm [_ _ in] [:ok in])
+
+(defmethod layer-shape :layernorm [_ args in]
+  (let [features (nth-arg args 0 nil)]
+    (cond
+      (not (pos-int? features)) [:error "layernorm expects a positive feature count"]
+      (empty? in) [:error "layernorm expects rank >= 1"]
+      (not= features (last in))
+      [:error (str "layernorm features " features " differs from input " (last in))]
+      :else [:ok in])))
 
 (defmethod layer-shape :groupnorm [_ args in]
   (let [groups (nth-arg args 0 nil)
