@@ -179,10 +179,14 @@ partial block. Its FIFO scheduler admits work up to a configured running batch,
 leaves an oversized head request queued transactionally when memory is exhausted,
 and immediately admits waiting work after a completed sequence releases blocks.
 Allocator invariants are executable through `valid?` and covered on JVM and by
-CLJS compilation. This is currently the portable ownership/scheduling contract;
-the K/V payload still uses the contiguous Metal cache above. Device-side block
-tables, paged-attention kernels, and request cancellation/timeouts remain to be
-connected before claiming Ollama-equivalent continuous serving.
+CLJS compilation. `torch.paged-runtime` consumes allocator placements and submits
+prefix-copy before token-write on the storage queue, then passes each sequence's
+logical block table to its attention callback. The corresponding physical
+write/copy/paged-GQA kernels are implemented and independently live-verified in
+`num.deno-gpu`; publishing that new num revision and wiring the complete Llama
+step to this bridge are still required. Request cancellation/timeouts and a
+production concurrent HTTP server also remain before claiming Ollama-equivalent
+continuous serving.
 
 A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
 blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding
