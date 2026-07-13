@@ -36,3 +36,52 @@
       (is (thrown? #?(:clj Exception :cljs js/Error)
                    (train/loss-and-gradients
                     (m/sequential (m/linear 2 2)) [] x x))))))
+
+(deftest nchw-conv-groupnorm-silu-model-trains
+  (testing "the public UNet-style layer description updates convolution and
+            GroupNorm parameters through one connected autograd graph"
+    (let [model (m/sequential (m/conv2d 1 2 3 1 1)
+                              (m/groupnorm 1 2)
+                              (m/silu))
+          input (arr/from-vec backend
+                              [0.1 0.2 -0.1 0.4 0.3 0.2 -0.2 0.5 0.1]
+                              [1 1 3 3])
+          target (arr/from-vec backend (repeat 18 0.25) [1 2 3 3])
+          initial (nb/random-weights backend model 29)
+          first-result (train/loss-and-gradients model initial input target)
+          trained (last (take 16
+                              (iterate (fn [{:keys [weights]}]
+                                         (train/sgd-step model weights input target 0.05))
+                                       {:weights initial})))]
+      (is (= [1 2 3 3] (:shape (:prediction first-result))))
+      (is (= [2 1 3 3] (:shape (:w (first (:gradients first-result))))))
+      (is (= [2] (:shape (:w (second (:gradients first-result))))))
+      (is (nil? (nth (:gradients first-result) 2)))
+      (is (< (:loss trained) (:loss first-result)))
+      (is (not= (arr/->vec (:w (first initial)))
+                (arr/->vec (:w (first (:weights trained)))))))))
+
+(deftest multi-head-attention-model-trains
+  (testing "two-head attention participates in a trainable sequential graph"
+    (let [model (m/sequential (m/linear 4 4) (m/attention 2) (m/linear 4 4))
+          input (arr/from-vec backend
+                              [0.2 -0.1 0.3 0.4
+                               -0.2 0.1 0.5 -0.3
+                               0.6 0.2 -0.4 0.1]
+                              [3 4])
+          target (arr/from-vec backend
+                               [0.1 0.0 0.2 -0.1
+                                0.0 0.2 -0.1 0.3
+                                0.2 -0.2 0.1 0.0]
+                               [3 4])
+          initial (nb/random-weights backend model 41)
+          first-result (train/loss-and-gradients model initial input target)
+          trained (last (take 21
+                              (iterate (fn [{:keys [weights]}]
+                                         (train/sgd-step model weights input target 0.1))
+                                       {:weights initial})))]
+      (is (= [3 4] (:shape (:prediction first-result))))
+      (is (nil? (second (:gradients first-result))))
+      (is (< (:loss trained) (:loss first-result)))
+      (is (not= (arr/->vec (:w (nth initial 2)))
+                (arr/->vec (:w (nth (:weights trained) 2))))))))

@@ -1,13 +1,18 @@
 (ns torch.train
-  "Small, explicit bridge from a torch.model sequential description to
-  num.autograd.  This is CPU-oriented reference training, not a general
-  optimizer framework: it supports :linear, :relu and :softmax with MSE loss
-  and returns new immutable weight maps after one SGD step."
+  "Bridge from a torch.model sequential description to num.autograd.
+  Supports dense and UNet/transformer reference training on synchronous num
+  arrays, returning new immutable weight maps after one SGD step."
   (:require [num.array :as arr]
             [num.autograd :as ag]
             [torch.model :as model]))
 
-(def supported-layers #{:linear :relu :softmax})
+(def supported-layers
+  #{:linear :conv2d :groupnorm :relu :silu :softmax :attention})
+
+(def parameter-keys
+  {:linear #{:w :b}
+   :conv2d #{:w :b}
+   :groupnorm #{:w :b}})
 
 (defn- fail [message data]
   (throw (ex-info (str "torch.train: " message) data)))
@@ -21,35 +26,71 @@
       (when-not (contains? supported-layers layer-type)
         (fail (str "unsupported layer type: " layer-type)
               {:index index :layer layer :supported supported-layers}))
-      (if (= :linear layer-type)
-        (when-not (and (:w weight) (:b weight))
-          (fail "linear layers require :w and :b arrays"
-                {:index index :layer layer}))
+      (if-let [required (get parameter-keys layer-type)]
+        (when-not (and (map? weight) (every? #(some? (get weight %)) required))
+          (fail (str (name layer-type) " layers require :w and :b arrays")
+                {:index index :layer layer :required required}))
         (when (some? weight)
           (fail "parameterless layers require a nil weight entry"
                 {:index index :layer layer :weight weight}))))))
+
+(defn- track [state value parameters]
+  (-> state
+      (assoc :value value)
+      (update :parameters conj parameters)))
 
 (defn- forward-layer [state [layer weight]]
   (case (model/layer-type layer)
     :linear
     (let [w (ag/value (:w weight))
           b (ag/value (:b weight))]
-      {:value (ag/add-bias* (ag/matmul* (:value state) w) b)
-       :parameters (conj (:parameters state) {:w w :b b})})
+      (track state (ag/add-bias* (ag/matmul* (:value state) w) b)
+             {:w w :b b}))
+
+    :conv2d
+    (let [[_in _out _k stride padding dilation groups] (model/layer-args layer)
+          w (ag/value (:w weight))
+          b (ag/value (:b weight))]
+      (track state
+             (ag/conv2d-nchw* (:value state) w b
+                              {:stride (or stride 1)
+                               :padding (or padding 0)
+                               :dilation (or dilation 1)
+                               :groups (or groups 1)})
+             {:w w :b b}))
+
+    :groupnorm
+    (let [[groups _channels eps] (model/layer-args layer)
+          w (ag/value (:w weight))
+          b (ag/value (:b weight))]
+      (track state
+             (ag/group-norm-nchw* (:value state) groups w b (or eps 1.0e-5))
+             {:w w :b b}))
 
     :relu
-    (assoc state :value (ag/relu* (:value state)))
+    (track state (ag/relu* (:value state)) nil)
+
+    :silu
+    (track state (ag/silu* (:value state)) nil)
 
     :softmax
-    (assoc state :value (ag/softmax* (:value state)))))
+    (track state (ag/softmax* (:value state)) nil)
+
+    :attention
+    (let [args (model/layer-args layer)
+          heads (if (and (vector? args) (seq args)) (first args) 1)]
+      (track state
+             (ag/multi-head-attention* (:value state) (:value state)
+                                       (:value state) heads)
+             nil))))
 
 (defn loss-and-gradients
   "Run `model*` with `input`, calculate MSE against `target`, and return the
   scalar loss, prediction and gradients. Gradients use the same one-entry-per-
   layer layout as torch.num-backend weights; parameterless entries are nil.
 
-  This reference path supports only flat sequential models containing
-  :linear/:relu/:softmax and synchronous num arrays."
+  The path supports flat sequential models containing the layer types in
+  `supported-layers` and synchronous num arrays."
   [model* weights input target]
   (let [layers (model/layers model*)]
     (validate-weights! layers weights)
@@ -62,14 +103,11 @@
                :parameters (:parameters state)}))]
       (ag/backward! (:loss result)
                     (arr/from-vec (:backend input) [1.0] []) tape)
-      (let [params (atom (seq (:parameters result)))
-            gradients
-            (mapv (fn [layer]
-                    (when (= :linear (model/layer-type layer))
-                      (let [{:keys [w b]} (first @params)]
-                        (swap! params next)
-                        {:w @(:grad w) :b @(:grad b)})))
-                  layers)]
+      (let [gradients
+            (mapv (fn [parameters]
+                    (when parameters
+                      (into {} (map (fn [[key value]] [key @(:grad value)])) parameters)))
+                  (:parameters result))]
         {:loss (arr/->scalar (:data (:loss result)))
          :prediction (:data (:prediction result))
          :gradients gradients}))))
@@ -92,7 +130,9 @@
         (loss-and-gradients model* weights input target)
         updated (mapv (fn [weight gradient]
                         (when weight
-                          {:w (descend learning-rate (:w weight) (:w gradient))
-                           :b (descend learning-rate (:b weight) (:b gradient))}))
+                          (into {} (map (fn [[key parameter]]
+                                         [key (descend learning-rate parameter
+                                                       (get gradient key))]))
+                                weight)))
                       weights gradients)]
     (assoc result :weights updated)))

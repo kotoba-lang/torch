@@ -57,17 +57,19 @@ bare vector, read as an implicit sequential). Builders are threadable data:
 ```
 
 Built-in layer types: `:linear :conv2d :maxpool2d :avgpool2d :embedding
-:batchnorm :layernorm :dropout :flatten :relu :gelu :sigmoid :tanh :softmax
-:attention`.
+:batchnorm :layernorm :groupnorm :dropout :flatten :relu :silu :gelu
+:sigmoid :tanh :softmax :attention`.
 
 `:attention` means parameter-free self-attention over a single
 `[sequence embedding]` tensor — `(m/attention)` is single-head,
 `(m/attention num-heads)` splits `embedding` evenly across heads (an error if
 it doesn't divide). It has no batch axis, mask, or learned QKV projections;
-those remain explicit future work. `:conv2d` supports any channel count
-(`(m/conv2d in-ch out-ch k)`), batch=1 only — `torch.num-backend/random-weights`
-produces a `[out-ch in-ch k k]` kernel; hand-supplied rank-2 `[k k]` kernels
-(the original in_ch=out_ch=1 form) still work unchanged.
+those remain explicit future work. `:conv2d` executes full NCHW batches and
+supports scalar/pair kernels, stride, padding, dilation, groups, depthwise
+convolution, and bias. `torch.num-backend/random-weights` produces a
+`[out-ch in-ch/groups kh kw]` kernel; hand-supplied rank-2 `[kh kw]` kernels
+(the original single-channel form) still work unchanged. `:groupnorm` uses
+`(m/groupnorm num-groups num-channels)` and `:silu` uses `(m/silu)`.
 
 ## Shape & parameter engine (`torch.shape`, `torch.core`)
 
@@ -154,10 +156,15 @@ drive reverse-mode autodiff and immutable SGD updates directly:
 (:weights step) ; new arrays; the original weights remain unchanged
 ```
 
-This path intentionally supports only flat sequential
-`:linear/:relu/:softmax` models with MSE and positive-rate SGD. It is a tested
-integration seam, not yet a replacement for PyTorch optimizers, GPU autograd,
-convolution/attention backward passes, checkpoint loading, or mixed precision.
+The reference path supports flat sequential models composed from
+`:linear/:conv2d/:groupnorm/:relu/:silu/:softmax/:attention`, with MSE and
+positive-rate SGD. NCHW grouped convolution, affine GroupNorm, SiLU, and
+multi-head self-attention all have real reverse-mode gradients; tests verify
+both finite-difference agreement in `num` and decreasing loss through the
+public torch model/weight representation. It remains a synchronous reference
+trainer, not yet a replacement for PyTorch's optimizer catalog, GPU autograd,
+batched/masked learned-projection attention, checkpoint loading, or mixed
+precision.
 
 ## Test
 
