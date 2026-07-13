@@ -73,16 +73,34 @@
              nil))
 
     :multihead-attention
-    (let [[_embed heads] (model/layer-args layer)
+    (let [[embed heads opts] (model/layer-args layer)
+          input-value (:value state)
+          input-shape (:shape (:data input-value))
+          rank (count input-shape)
+          [batch sequence] (if (= rank 3) (take 2 input-shape)
+                               [1 (first input-shape)])
+          flat-input (if (= rank 3)
+                       (ag/reshape* input-value [(* batch sequence) embed])
+                       input-value)
+          restore (fn [value]
+                    (if (= rank 3)
+                      (ag/reshape* value [batch sequence embed]) value))
           parameters (into {} (map (fn [[key array]] [key (ag/value array)]) weight))
           project (fn [weight-key bias-key]
-                    (ag/add-bias*
-                     (ag/matmul* (:value state) (get parameters weight-key))
-                     (get parameters bias-key)))
+                    (restore
+                     (ag/add-bias*
+                      (ag/matmul* flat-input (get parameters weight-key))
+                      (get parameters bias-key))))
           query (project :qw :qb) key (project :kw :kb) value (project :vw :vb)
-          attended (ag/multi-head-attention* query key value heads)
-          output (ag/add-bias* (ag/matmul* attended (:ow parameters))
-                               (:ob parameters))]
+          attended (if (seq opts)
+                     (ag/multi-head-attention* query key value heads opts)
+                     (ag/multi-head-attention* query key value heads))
+          attended-flat (if (= rank 3)
+                          (ag/reshape* attended [(* batch sequence) embed])
+                          attended)
+          output (restore
+                  (ag/add-bias* (ag/matmul* attended-flat (:ow parameters))
+                                (:ob parameters)))]
       (track state output parameters))))
 
 (defn- forward-graph [layers weights input]

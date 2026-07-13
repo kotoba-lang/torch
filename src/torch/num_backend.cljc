@@ -115,12 +115,26 @@
                                      {:shape (:shape x)})))
                    (t/multi-head-attention x x x num-heads))
       :multihead-attention
-      (let [[_embed num-heads] largs
-            project (fn [wk bk] (t/add (nm/matmul x (get weights wk))
-                                       (get weights bk)))
+      (let [[embed num-heads opts] largs
+            rank (count (:shape x))
+            [batch sequence] (if (= rank 3)
+                               (take 2 (:shape x))
+                               [1 (first (:shape x))])
+            flat (if (= rank 3) (t/reshape x [(* batch sequence) embed]) x)
+            restore (fn [array]
+                      (if (= rank 3)
+                        (t/reshape array [batch sequence embed]) array))
+            project (fn [wk bk]
+                      (restore (t/add (nm/matmul flat (get weights wk))
+                                      (get weights bk))))
             q (project :qw :qb) k (project :kw :kb) v (project :vw :vb)
-            attended (t/multi-head-attention q k v num-heads)]
-        (t/add (nm/matmul attended (:ow weights)) (:ob weights)))
+            attended (if (seq opts)
+                       (t/multi-head-attention q k v num-heads opts)
+                       (t/multi-head-attention q k v num-heads))
+            attended-flat (if (= rank 3)
+                             (t/reshape attended [(* batch sequence) embed])
+                             attended)]
+        (restore (t/add (nm/matmul attended-flat (:ow weights)) (:ob weights))))
       :conv2d (let [[_in _out _k stride padding dilation groups] largs
                     weight (:w weights)
                     weight (if (= 2 (count (:shape weight)))

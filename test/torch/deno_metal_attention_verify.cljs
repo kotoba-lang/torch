@@ -8,13 +8,18 @@
             [torch.train :as train]))
 
 (def input-values
-  [0.2 -0.1 0.3 0.4, -0.2 0.1 0.5 -0.3, 0.6 0.2 -0.4 0.1])
+  [0.2 -0.1 0.3 0.4, -0.2 0.1 0.5 -0.3, 0.6 0.2 -0.4 0.1,
+   -0.1 0.4 0.2 -0.5, 0.3 -0.2 0.1 0.6, -0.4 0.5 0.2 0.0])
 
 (def upstream-values
-  [0.3 -0.2 0.5 0.1, -0.4 0.6 -0.1 0.2, 0.2 -0.3 0.4 -0.5])
+  [0.3 -0.2 0.5 0.1, -0.4 0.6 -0.1 0.2, 0.2 -0.3 0.4 -0.5,
+   -0.2 0.1 0.3 0.4, 0.5 -0.4 0.2 -0.1, 0.1 0.2 -0.3 0.6])
 
 (def target-values
-  [0.1 0.0 0.2 -0.1, 0.0 0.2 0.1 0.3, -0.2 0.1 0.0 0.2])
+  [0.1 0.0 0.2 -0.1, 0.0 0.2 0.1 0.3, -0.2 0.1 0.0 0.2,
+   0.0 -0.1 0.3 0.2, 0.2 0.1 -0.2 0.0, -0.1 0.3 0.1 0.2])
+
+(def input-shape [2 3 4])
 
 (def parameter-names [:qw :qb :kw :kb :vw :vb :ow :ob])
 
@@ -27,19 +32,19 @@
   (let [weights (nb/random-weights backend model* 29)]
     (train/prediction-and-gradients
      model* weights
-     (arr/from-vec backend input-values [3 4])
-     (arr/from-vec backend upstream-values [3 4]))))
+     (arr/from-vec backend input-values input-shape)
+     (arr/from-vec backend upstream-values input-shape))))
 
 (defn- run-mse [backend model*]
   (let [weights (nb/random-weights backend model* 29)]
     (train/loss-and-gradients
      model* weights
-     (arr/from-vec backend input-values [3 4])
-     (arr/from-vec backend target-values [3 4]))))
+     (arr/from-vec backend input-values input-shape)
+     (arr/from-vec backend target-values input-shape))))
 
 (defn- run-training [backend model* steps]
-  (let [input (arr/from-vec backend input-values [3 4])
-        target (arr/from-vec backend target-values [3 4])]
+  (let [input (arr/from-vec backend input-values input-shape)
+        target (arr/from-vec backend target-values input-shape)]
     (loop [step 0
            weights (nb/random-weights backend model* 29)
            losses []]
@@ -61,7 +66,8 @@
   (if (instance? js/Promise value) value (js/Promise.resolve value)))
 
 (defn -main [& _]
-  (let [model* (model/sequential (model/multihead-attention 4 2))
+  (let [model* (model/sequential
+                (model/multihead-attention 4 2 {:causal? true}))
         cpu-backend (cpu/cpu-backend)
         expected-vjp (into {}
                             (map (fn [[label array]] [label (arr/->vec array)]))

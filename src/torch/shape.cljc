@@ -72,8 +72,9 @@
 (defmethod layer-shape :multihead-attention [_ args in]
   (let [[embed-dim num-heads] args]
     (cond
-      (not= 2 (count in))
-      [:error (str "multihead-attention expects [sequence embedding], got " in)]
+      (not (#{2 3} (count in)))
+      [:error (str "multihead-attention expects [sequence embedding] or "
+                   "[batch sequence embedding], got " in)]
       (not (and (pos-int? embed-dim) (pos-int? num-heads)))
       [:error "multihead-attention expects positive embed-dim and num-heads"]
       (not= embed-dim (last in))

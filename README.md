@@ -65,8 +65,11 @@ Built-in layer types: `:linear :conv2d :maxpool2d :avgpool2d :embedding
 `(m/attention num-heads)` splits `embedding` evenly across heads (an error if
 it doesn't divide). It has no batch axis, mask, or learned QKV projections;
 `(m/multihead-attention embed-dim num-heads)` adds independent learned Q/K/V
-and output weight/bias projections in the same data-first model form. Batched
-and masked attention remain future work. `:conv2d` executes full NCHW batches and
+and output weight/bias projections in the same data-first model form. Learned
+attention accepts `[sequence embedding]` or batch-first
+`[batch sequence embedding]`; `(m/multihead-attention d h {:causal? true})`
+enables causal masking. Cross-attention and runtime padding-mask plumbing through
+the sequential model API remain future work. `:conv2d` executes full NCHW batches and
 supports scalar/pair kernels, stride, padding, dilation, groups, depthwise
 convolution, and bias. `torch.num-backend/random-weights` produces a
 `[out-ch in-ch/groups kh kw]` kernel; hand-supplied rank-2 `[kh kw]` kernels
@@ -252,7 +255,8 @@ until final verification readback. The Apple M4 check covers explicit VJP plus
 ordinary MSE training, comparing prediction, input gradient, loss, and every
 projection weight/bias gradient against the CPU backend. It then performs eight
 public `sgd-step` iterations, checks the complete loss trajectory and all final
-weights against CPU, and confirms loss decreases from `0.11552` to `0.07441`
+weights against CPU, and confirms a two-batch causal model decreases loss from
+`0.11980` to `0.08037`
 (29/29 checks):
 
 ```sh
