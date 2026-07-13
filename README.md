@@ -215,6 +215,39 @@ values skip the update and back off the scale, and stable steps grow it at the
 configured interval. Unscaled gradients and optimizer state remain f32; this
 is the control path used by the mixed-precision training API below.
 
+### Checkpoints and PyTorch state dictionaries
+
+`torch.safetensors/save-weights!` and `load-weights` write and read stable
+PyTorch-style parameter names. Linear and attention projection matrices are
+transposed at the file boundary (`[out,in]` externally, `[in,out]` internally),
+while convolution and normalization tensors retain their native layout. Loading
+is strict by default: missing and unexpected tensors fail before execution.
+
+For restartable training, `torch.checkpoint/save-checkpoint!` stores model
+weights, every AdamW first/second moment, optimizer step/options, GradScaler
+state, and caller-owned JSON training position in one safetensors file. The
+write uses a sibling temporary file, fsync, and atomic replacement where the
+filesystem supports it. `load-checkpoint` validates the schema and complete
+tensor set before returning state accepted directly by the next training step:
+
+```clojure
+(require '[torch.checkpoint :as checkpoint])
+
+(checkpoint/save-checkpoint!
+ "run.safetensors" model weights
+ {:optimizer-state optimizer-state
+  :optimizer-options {:learning-rate 1.0e-3}
+  :scaler scaler
+  :training-state {:epoch 3 :batch 120}})
+
+(def resumed (checkpoint/load-checkpoint "run.safetensors" backend model))
+```
+
+Training checkpoints use F64 storage to preserve the CPU reference backend's
+double intermediates even for logically-f32 arrays. Tests interrupt an
+AdamW+GradScaler run, reload it, and prove that every subsequent loss, weight,
+moment, variance, and scaler value is exactly equal to uninterrupted training.
+
 `torch.train/mixed-precision-adamw-step` now connects these pieces for
 conv2d/GroupNorm/SiLU/ReLU models: it casts the forward pass to f16 or bf16,
 computes f32 gradients, unscales and checks them, then updates immutable f32
@@ -228,10 +261,9 @@ The reference path supports flat sequential models composed from
 positive-rate SGD plus immutable AdamW. NCHW grouped convolution, affine GroupNorm, SiLU, and
 multi-head self-attention all have real reverse-mode gradients; tests verify
 both finite-difference agreement in `num` and decreasing loss through the
-public torch model/weight representation. It remains a synchronous reference
-trainer, not yet a replacement for PyTorch's broader optimizer catalog, GPU autograd,
-batched/masked attention, checkpoint loading, or mixed
-precision coverage for every layer.
+public torch model/weight representation. It is not yet a replacement for
+PyTorch's broader optimizer catalog, general GPU autograd, or mixed-precision
+coverage for every layer.
 
 For an explicit vector-Jacobian product, `prediction-and-gradients` accepts an
 upstream tensor with the prediction's shape. This is equivalent to PyTorch's
