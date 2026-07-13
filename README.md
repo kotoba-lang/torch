@@ -225,6 +225,23 @@ This is real continuous paged execution but still serializes request steps withi
 each scheduling tick. A fused multi-request paged-attention dispatch, cancellation,
 timeouts, backpressure, metrics, and an HTTP compatibility surface remain.
 
+The lower execution API also provides `llama-lm-paged-batch-step`: QKV and FFN
+projections remain batch tensors while each layer resolves request-specific RoPE
+positions and performs one fused ragged paged-attention dispatch. A length-1 and
+length-2 prefix advanced together match both ordinary full causal sequences on
+CPU and Apple Metal:
+
+```sh
+clojure -M:deno-paged-batch-llama-verify
+deno run --allow-all target/deno-paged-batch-llama-verify.cjs
+# Apple M4: ragged fused paged Llama parity: passed
+#           batched physical pools release: passed
+```
+
+The continuous scheduler still calls single-request steps; selecting runnable
+requests into this batch API is the remaining orchestration change before the
+fused dispatch is used automatically by serving ticks.
+
 A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
 blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding
 Q4_K-packed, tied LM head, causal prefill, and fixed-capacity KV-cache decode.

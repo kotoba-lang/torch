@@ -48,6 +48,32 @@
                       {:sequence-id sequence-id})))
     ((get-in runtime* [:storage :attention]) query blocks length)))
 
+(defn append-kv-many!
+  "Append one K/V token for each sequence through one shared physical pool.
+  Writes are submitted in `sequence-ids` order and return one updated runtime."
+  [runtime* sequence-ids keys values]
+  (when-not (= (count sequence-ids) (count keys) (count values))
+    (throw (ex-info "paged multi-append inputs must have equal counts"
+                    {:sequences (count sequence-ids) :keys (count keys)
+                     :values (count values)})))
+  (reduce (fn [{:keys [runtime placements]} [sequence-id key value]]
+            (let [result (append-kv! runtime sequence-id key value)]
+              {:runtime (:runtime result)
+               :placements (conj placements (:placement result))}))
+          {:runtime runtime* :placements []}
+          (map vector sequence-ids keys values)))
+
+(defn attention-many
+  "Run one fused attention callback for multiple logical sequence tables."
+  [runtime* sequence-ids query]
+  (let [callback (get-in runtime* [:storage :attention-many])]
+    (when-not (fn? callback)
+      (throw (ex-info "paged storage runtime lacks :attention-many callback" {})))
+    (let [entries (mapv #(kv/block-table (:pool runtime*) %) sequence-ids)]
+      (when (some #(zero? (:length %)) entries)
+        (throw (ex-info "cannot attend an empty paged sequence" {})))
+      (callback query (mapv :blocks entries) (mapv :length entries)))))
+
 (defn release-sequence
   "Release logical ownership. Physical storage remains one bounded pool and is
   reused; the storage runtime therefore needs no per-sequence destruction."

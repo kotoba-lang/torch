@@ -4,6 +4,7 @@
             [num.cpu :as cpu]
             [num.tensor :as t]
             [torch.continuous :as continuous]
+            [torch.core :as core]
             [torch.kv-cache :as kv]
             [torch.model :as model]
             [torch.num-backend :as nb]
@@ -13,7 +14,18 @@
 
 (defn- cpu-storage [block-count block-size heads kv-heads]
   (let [keys (atom (vec (repeat block-count (vec (repeat block-size nil)))))
-        values (atom (vec (repeat block-count (vec (repeat block-size nil)))))]
+        values (atom (vec (repeat block-count (vec (repeat block-size nil)))))
+        attend (fn [query blocks length]
+                 (let [addresses (for [position (range length)]
+                                   [(nth blocks (quot position block-size))
+                                    (mod position block-size)])
+                       key-data (vec (mapcat #(get-in @keys %) addresses))
+                       value-data (vec (mapcat #(get-in @values %) addresses))
+                       kv-width (quot (count key-data) length)]
+                   (t/multi-head-attention
+                    query (arr/from-vec backend key-data [length kv-width])
+                    (arr/from-vec backend value-data [length kv-width])
+                    heads {:kv-heads kv-heads})))]
     {:write! (fn [key value block offset]
                (swap! keys assoc-in [block offset] (arr/->vec key))
                (swap! values assoc-in [block offset] (arr/->vec value)))
@@ -24,17 +36,17 @@
                       (swap! values assoc-in [destination offset]
                              (get-in @values [source offset]))))
      :attention
-     (fn [query blocks length]
-       (let [addresses (for [position (range length)]
-                         [(nth blocks (quot position block-size))
-                          (mod position block-size)])
-             key-data (vec (mapcat #(get-in @keys %) addresses))
-             value-data (vec (mapcat #(get-in @values %) addresses))
-             kv-width (quot (count key-data) length)]
-         (t/multi-head-attention
-          query (arr/from-vec backend key-data [length kv-width])
-          (arr/from-vec backend value-data [length kv-width])
-          heads {:kv-heads kv-heads})))}))
+     attend
+     :attention-many
+     (fn [query block-tables lengths]
+       (let [output
+             (t/cat (mapv (fn [index]
+                            (attend
+                             (t/squeeze
+                              (t/slice-axis query 0 index (inc index)) 0)
+                             (nth block-tables index) (nth lengths index)))
+                          (range (count lengths))) 0)]
+         (t/reshape output [(count lengths) 1 (last (:shape output))])))}))
 
 (deftest ragged-continuous-paged-llama-admits-releases-and-reuses
   (let [model* (model/sequential
@@ -97,3 +109,44 @@
     (is (= [:large :small] (mapv :id (:waiting engine))))
     (is (= #{0} (set (get-in engine [:runtimes 0 :pool :free]))))
     (is (kv/valid? (get-in engine [:runtimes 0 :pool])))))
+
+(deftest fused-batch-paged-llama-matches-ragged-full-sequences
+  (let [model* (model/sequential
+                (model/embedding 6 4)
+                (model/llama-block 4 2 8 {:kv-heads 1})
+                (model/llama-block 4 2 8 {:kv-heads 1})
+                (model/rmsnorm 4) (model/lm-head 4 6))
+        weights (nb/random-weights backend model* 91)
+        runtimes (mapv (fn [_]
+                         (-> (paged/runtime (kv/pool 5 2)
+                                            (cpu-storage 5 2 2 1))
+                             (paged/allocate-sequence :a)
+                             (paged/allocate-sequence :b)))
+                       (range 2))
+        prefill-a (nb/llama-lm-paged-step
+                   model* weights (arr/from-vec backend [2] [1]) runtimes :a)
+        prefill-b1 (nb/llama-lm-paged-step
+                    model* weights (arr/from-vec backend [1] [1])
+                    (:runtimes prefill-a) :b)
+        prefill-b2 (nb/llama-lm-paged-step
+                    model* weights (arr/from-vec backend [3] [1])
+                    (:runtimes prefill-b1) :b)
+        batch-step (nb/llama-lm-paged-batch-step
+                    model* weights (arr/from-vec backend [0 2] [2 1])
+                    (:runtimes prefill-b2) [:a :b])
+        ;; Compare against ordinary full causal runs, selecting each final row.
+        full-a (arr/->vec
+                (core/run (nb/num-backend backend weights) model*
+                          (arr/from-vec backend [2 0] [2])))
+        full-b (arr/->vec
+                (core/run (nb/num-backend backend weights) model*
+                          (arr/from-vec backend [1 3 2] [3])))
+        expected (vec (concat (subvec full-a 6 12) (subvec full-b 12 18)))]
+    (is (= [2 1 6] (:shape (:logits batch-step))))
+    (is (every? #(< (Math/abs %) 1.0e-5)
+                (map - expected (arr/->vec (:logits batch-step)))))
+    (is (= [[2 3] [2 3]]
+           (mapv (fn [runtime*]
+                   [(get-in runtime* [:pool :sequences :a :length])
+                    (get-in runtime* [:pool :sequences :b :length])])
+                 (:runtimes batch-step))))))

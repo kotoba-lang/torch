@@ -458,6 +458,60 @@
           output (t/add residual (linear (nm/mul gate up) :down))]
       {:output output :runtime runtime* :placement (:placement appended)})))
 
+(defn llama-block-paged-batch-step
+  "Execute one token for several paged sequences. Projection/FFN tensors remain
+  batched and the storage runtime performs one fused multi-request attention."
+  [layer weights input runtime* sequence-ids]
+  (let [[embed heads _hidden opts] (model/layer-args layer)
+        opts (merge {:causal? true :rope? true} opts)
+        kv-heads (long (or (:kv-heads opts) heads))
+        shape (:shape input)
+        batch (first shape)
+        lengths (mapv #(get-in runtime* [:pool :sequences % :length]) sequence-ids)
+        eps (or (:eps opts) 1.0e-5)]
+    (when-not (and (= :llama-block (model/layer-type layer))
+                   (= [batch 1 embed] shape) (= batch (count sequence-ids))
+                   (every? some? lengths))
+      (throw (ex-info "paged batched Llama step requires registered sequences and [batch,1,embed]"
+                      {:shape shape :sequence-ids sequence-ids})))
+    (let [linear (fn [array weight-key]
+                   (let [flat (t/reshape array [batch (last (:shape array))])
+                         projected (matmul-weight flat (get weights weight-key))]
+                     (t/reshape projected [batch 1 (last (:shape projected))])))
+          normalized (t/rms-norm-last input (:attn-norm weights) eps)
+          q0 (linear normalized :qw)
+          k0 (linear normalized :kw)
+          value (linear normalized :vw)
+          ;; RoPE offsets differ per request. Apply it row-wise, then concatenate;
+          ;; the expensive attention itself remains one fused dispatch.
+          rotate-rows
+          (fn [array head-count]
+            (let [rows (mapv (fn [index]
+                               (let [row (t/slice-axis array 0 index (inc index))]
+                                 (t/rotary-embedding
+                                  row head-count
+                                  {:theta (or (:rope-theta opts) 10000.0)
+                                   :position-offset
+                                   (+ (or (:position-offset opts) 0)
+                                      (nth lengths index))})))
+                             (range batch))]
+              (t/cat rows 0)))
+          query (rotate-rows q0 heads)
+          key (rotate-rows k0 kv-heads)
+          key-rows (mapv #(t/slice-axis key 0 % (inc %)) (range batch))
+          value-rows (mapv #(t/slice-axis value 0 % (inc %)) (range batch))
+          appended (paged/append-kv-many! runtime* sequence-ids
+                                            key-rows value-rows)
+          _ (arr/release-all! (concat key-rows value-rows))
+          runtime* (:runtime appended)
+          attended (paged/attention-many runtime* sequence-ids query)
+          residual (t/add input (linear attended :ow))
+          ffn-input (t/rms-norm-last residual (:ffn-norm weights) eps)
+          gate (t/silu (linear ffn-input :gate))
+          up (linear ffn-input :up)
+          output (t/add residual (linear (nm/mul gate up) :down))]
+      {:output output :runtime runtime* :placements (:placements appended)})))
+
 (defn llama-lm-paged-step
   "Execute one token ID through Embedding, paged Llama blocks, final norm, and
   LM head. `runtimes` contains one independently backed paged runtime per block."
@@ -478,6 +532,35 @@
             (recur (next remaining) (:output step) (inc runtime-index)
                    (conj updated (:runtime step))
                    (conj placements (:placement step))))
+          (recur (next remaining) (layer-forward layer weight value nil)
+                 runtime-index updated placements))
+        (do
+          (when-not (= runtime-index (count runtimes))
+            (throw (ex-info "unused paged Llama runtimes"
+                            {:used runtime-index :provided (count runtimes)})))
+          {:logits value :runtimes updated :placements placements})))))
+
+(defn llama-lm-paged-batch-step
+  "Batched twin of `llama-lm-paged-step`. `token` is `[batch,1]`; each block
+  consumes one shared runtime and performs one multi-request paged attention."
+  [model* weights token runtimes sequence-ids]
+  (let [layers (model/execution-layers model*)]
+    (when-not (and (= (count layers) (count weights))
+                   (= (first (:shape token)) (count sequence-ids)))
+      (throw (ex-info "batched paged Llama inputs do not align" {})))
+    (loop [remaining (seq (map vector layers weights))
+           value token runtime-index 0 updated [] placements []]
+      (if-let [[layer weight] (first remaining)]
+        (if (= :llama-block (model/layer-type layer))
+          (let [runtime* (nth runtimes runtime-index nil)
+                _ (when-not runtime*
+                    (throw (ex-info "missing per-block paged runtime"
+                                    {:runtime-index runtime-index})))
+                step (llama-block-paged-batch-step
+                      layer weight value runtime* sequence-ids)]
+            (recur (next remaining) (:output step) (inc runtime-index)
+                   (conj updated (:runtime step))
+                   (conj placements (:placements step))))
           (recur (next remaining) (layer-forward layer weight value nil)
                  runtime-index updated placements))
         (do
