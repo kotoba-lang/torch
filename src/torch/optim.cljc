@@ -133,3 +133,54 @@
              (adamw-step weights gradients optimizer-state options)]
          {:weights weights :optimizer-state state
           :scaler next-scaler :skipped? false})))))
+
+(defn- device-unscale-gradients [gradients scale]
+  (let [results
+        (mapv (fn [gradient]
+                (when gradient
+                  (into {} (map (fn [[key value]]
+                                  [key (t/unscale-gradient value scale)]))
+                        gradient)))
+              gradients)]
+    {:gradients
+     (mapv (fn [gradient]
+             (when gradient
+               (into {} (map (fn [[key result]] [key (:gradient result)]))
+                     gradient)))
+           results)
+     :flags (vec (mapcat (fn [gradient]
+                           (map (comp :found-inf val) gradient))
+                         (remove nil? results)))}))
+
+(defn scaled-adamw-step-async
+  "Asynchronously unscale/check gradients and apply AdamW without tensor readback.
+
+  On ClojureScript this returns a Promise. Device backends download only one
+  scalar overflow flag per parameter; unscaled gradients, weights, and AdamW
+  slots remain device-resident. JVM returns an already-completed
+  CompletableFuture with the same result shape."
+  ([weights scaled-gradients optimizer-state scaler]
+   (scaled-adamw-step-async weights scaled-gradients optimizer-state scaler {}))
+  ([weights scaled-gradients optimizer-state scaler options]
+   (let [{:keys [gradients flags]}
+         (device-unscale-gradients scaled-gradients (:scale scaler))
+         finish
+         (fn [flag-values]
+           (let [found-inf? (boolean (some #(pos? (first %)) flag-values))
+                 next-scaler (update-grad-scaler scaler found-inf?)]
+             (if found-inf?
+               {:weights weights :optimizer-state optimizer-state
+                :scaler next-scaler :skipped? true}
+               (let [{:keys [weights state]}
+                     (adamw-step weights gradients optimizer-state options)]
+                 {:weights weights :optimizer-state state
+                  :scaler next-scaler :skipped? false}))))]
+     #?(:cljs
+        (.then (js/Promise.all
+                (into-array
+                 (map (fn [flag]
+                        (js/Promise.resolve (arr/->vec flag))) flags)))
+               (fn [values] (finish (vec (js/Array.from values)))))
+        :clj
+        (java.util.concurrent.CompletableFuture/completedFuture
+         (finish (mapv arr/->vec flags)))))))

@@ -217,6 +217,11 @@ gradients to the optimizer. Gradients are unscaled before AdamW, non-finite
 values skip the update and back off the scale, and stable steps grow it at the
 configured interval. Unscaled gradients and optimizer state remain f32; this
 is the control path used by the mixed-precision training API below.
+For an asynchronous GPU backend, `scaled-adamw-step-async` performs unscale and
+non-finite detection in one device dispatch per parameter, reads back only the
+one-scalar flags, then either launches fused GPU AdamW or skips every update and
+backs off the scale. It returns a Promise in ClojureScript and a completed
+`CompletableFuture` on the JVM.
 
 ### Checkpoints and PyTorch state dictionaries
 
@@ -287,8 +292,10 @@ immutable `sgd-step` update is composed from device elementwise multiply/subtrac
 so parameter and gradient buffers are never downloaded. AdamW now follows the same
 GPU-resident path: four learned-attention steps on Apple M4 verify every final
 weight, first moment, variance, and the decreasing loss trajectory against CPU.
-Mixed-precision gradient unscaling/overflow detection remains a host-side reference
-path.
+The Apple M4 verifier covers both the finite async update and an injected infinity:
+the finite path advances AdamW and GradScaler, while overflow leaves weights and
+optimizer state unchanged and halves the scale. Only scalar control flags cross the
+device boundary.
 
 Learned MultiheadAttention is verified on both JVM and compiled ClojureScript:
 all eight projection tensors receive gradients, a Q-weight gradient matches a

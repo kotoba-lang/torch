@@ -105,6 +105,16 @@
                       (get-in slots [key :variance])]])
                   parameter-names))))
 
+(defn- scaled-fixture [backend model*]
+  (let [weights (nb/random-weights backend model* 29)
+        scaler (optim/grad-scaler {:initial-scale 8.0 :growth-interval 2})
+        result (train/loss-and-gradients
+                model* weights
+                (arr/from-vec backend input-values input-shape)
+                (arr/from-vec backend target-values input-shape)
+                (assoc (execution-options backend) :loss-scale (:scale scaler)))]
+    {:weights weights :gradients (:gradients result) :scaler scaler}))
+
 (defn- flatten-result [result]
   (merge {:prediction (:prediction result)
           :input-gradient (:input-gradient result)
@@ -130,6 +140,11 @@
         cpu-mse (run-mse cpu-backend model*)
         cpu-training (run-training cpu-backend model* 8)
         cpu-adamw (run-adamw-training cpu-backend model* 4)
+        cpu-scaled-fixture (scaled-fixture cpu-backend model*)
+        cpu-scaled (optim/scaled-adamw-step
+                    (:weights cpu-scaled-fixture)
+                    (:gradients cpu-scaled-fixture) nil
+                    (:scaler cpu-scaled-fixture) adamw-options)
         expected-adamw (into {} (map (fn [[label array]]
                                        [label (arr/->vec array)]))
                              (adamw-arrays cpu-adamw))
@@ -155,6 +170,7 @@
                  actual-mse-pass (run-mse backend model*)
                  actual-training (run-training backend model* 8)
                  actual-adamw (run-adamw-training backend model* 4)
+                 gpu-scaled-fixture (scaled-fixture backend model*)
                  actual-mse
                  (prefix-keys "mse-"
                               (into {:prediction (:prediction actual-mse-pass)
@@ -218,11 +234,46 @@
                                      (< (last actual-losses) (first actual-losses)))
                         (throw (js/Error. "Metal AdamW loss trajectory diverged")))
                       (swap! passed inc)
-                      (println "✓ adamw-losses" actual-losses))))]
+                      (println "✓ adamw-losses" actual-losses))))
+                 scaled-control-check
+                 (.then
+                  (optim/scaled-adamw-step-async
+                   (:weights gpu-scaled-fixture)
+                   (:gradients gpu-scaled-fixture) nil
+                   (:scaler gpu-scaled-fixture) adamw-options)
+                  (fn [finite]
+                    (when (or (:skipped? finite)
+                              (not= 1 (get-in finite [:optimizer-state :step]))
+                              (not= 1 (get-in finite [:scaler :growth-tracker])))
+                      (throw (js/Error. "Metal async scaled AdamW finite control failed")))
+                    (let [overflow-gradients
+                          (assoc-in (:gradients gpu-scaled-fixture) [0 :qb]
+                                    (arr/from-vec backend
+                                                  [js/Infinity 0.0 0.0 0.0] [4]))]
+                      (.then
+                       (js/Promise.all
+                        #js [(arr/->vec (get-in finite [:weights 0 :qw]))
+                             (arr/->vec (get-in cpu-scaled [:weights 0 :qw]))
+                             (optim/scaled-adamw-step-async
+                              (:weights gpu-scaled-fixture) overflow-gradients nil
+                              (:scaler gpu-scaled-fixture) adamw-options)])
+                       (fn [values]
+                         (let [gpu-weight (aget values 0)
+                               cpu-weight (aget values 1)
+                               overflow (aget values 2)]
+                           (when-not (approx-vec? cpu-weight gpu-weight 1.0e-3)
+                             (throw (js/Error. "Metal scaled AdamW weight diverged")))
+                           (when-not (and (:skipped? overflow)
+                                          (nil? (:optimizer-state overflow))
+                                          (= 4.0 (get-in overflow [:scaler :scale])))
+                             (throw (js/Error. "Metal async overflow skip failed")))
+                           (swap! passed inc)
+                           (println "✓ async-scaled-adamw finite+overflow")))))))]
              (println "adapter:" (gpu/adapter-description device))
              (-> (js/Promise.all
                   (into-array (conj (vec array-checks)
-                                    loss-check training-loss-check adamw-loss-check)))
+                                    loss-check training-loss-check adamw-loss-check
+                                    scaled-control-check)))
                  (.then (fn [_]
                           (println (str "Metal learned MultiheadAttention training: "
                                         @passed " passed"))))))))

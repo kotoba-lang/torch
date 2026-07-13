@@ -60,6 +60,24 @@
     (is (= 1 (get-in updated [:optimizer-state :step])))
     (is (< (first (arr/->vec (get-in updated [:weights 0 :w]))) 1.0))))
 
+#?(:clj
+   (deftest async-scaled-adamw-matches-control-flow-contract
+     (let [weights [{:w (arr/from-vec backend [1.0 -2.0] [2])}]
+           scaler (optim/grad-scaler {:initial-scale 8.0 :growth-interval 2})
+           finite [{:w (arr/from-vec backend [4.0 -2.0] [2])}]
+           updated (.get (optim/scaled-adamw-step-async
+                          weights finite nil scaler
+                          {:learning-rate 0.01 :weight-decay 0.0}))
+           overflow [{:w (arr/from-vec backend [##Inf 1.0] [2])}]
+           skipped (.get (optim/scaled-adamw-step-async
+                          weights overflow nil scaler))]
+       (is (false? (:skipped? updated)))
+       (is (= 1 (get-in updated [:optimizer-state :step])))
+       (is (= 1 (get-in updated [:scaler :growth-tracker])))
+       (is (:skipped? skipped))
+       (is (identical? weights (:weights skipped)))
+       (is (= 4.0 (get-in skipped [:scaler :scale]))))))
+
 (deftest mixed-precision-unet-step-keeps-f32-master-weights
   (let [model (m/sequential (m/conv2d 1 2 3 1 1)
                             (m/groupnorm 1 2)
