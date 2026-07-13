@@ -131,6 +131,21 @@
     (is (< (Math/abs (- numeric analytic)) 1.0e-4))
     (is (< (:loss trained) (:loss first-pass)))))
 
+(deftest complete-llama-lm-graph-trains-through-vocabulary-head
+  (let [model (m/sequential (m/embedding 6 4)
+                            (m/llama-block 4 2 8)
+                            (m/rmsnorm 4) (m/lm-head 4 6))
+        input (arr/from-vec backend [2 0 2] [3])
+        target (arr/from-vec backend (repeat 18 0.0) [3 6])
+        initial (nb/random-weights backend model 79)
+        first-pass (train/loss-and-gradients model initial input target)
+        trained (last (take 21 (iterate (fn [{:keys [weights]}]
+                                          (train/sgd-step model weights input target 0.02))
+                                        {:weights initial})))]
+    (is (= [3 6] (:shape (:prediction first-pass))))
+    (is (= [4 6] (:shape (:w (last (:gradients first-pass))))))
+    (is (< (:loss trained) (:loss first-pass)))))
+
 (deftest training-contract-rejects-ambiguous-input
   (let [x (arr/from-vec backend [1 2] [1 2])]
     (is (thrown? #?(:clj Exception :cljs js/Error)

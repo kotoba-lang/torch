@@ -107,6 +107,8 @@
                    :ffn-norm (upload (repeat embed 1.0) [embed])
                    :gate (matrix embed hidden) :up (matrix embed hidden)
                    :down (matrix hidden embed)})
+                :lm-head (let [[embed vocab] a]
+                           {:w (upload (next-vec! (* embed vocab)) [embed vocab])})
                 nil)))
           lyrs))))
 
@@ -229,8 +231,17 @@
             up (linear ffn-input (:up weights) hidden)
             down (linear (nm/mul gate up) (:down weights) embed)]
         (t/add residual down))
+      :lm-head
+      (let [[_embed vocab] largs
+            shape (:shape x) rank (count shape)]
+        (if (= rank 3)
+          (let [[batch sequence _] shape]
+            (t/reshape (nm/matmul (t/reshape x [(* batch sequence) (last shape)])
+                                  (:w weights))
+                       [batch sequence vocab]))
+          (nm/matmul x (:w weights))))
       (throw (ex-info (str "torch.num-backend: layer type not supported: " t')
-                      {:layer lyr :supported #{:linear :relu :silu :sigmoid :tanh :gelu :softmax :flatten :conv2d :layernorm :rmsnorm :embedding :llama-block
+                      {:layer lyr :supported #{:linear :relu :silu :sigmoid :tanh :gelu :softmax :flatten :conv2d :layernorm :rmsnorm :embedding :llama-block :lm-head
                                                :groupnorm :attention
                                                :multihead-attention}})))))
 
@@ -362,12 +373,10 @@
   ([backend model* capacity]
    (init-llama-caches backend model* capacity :f32))
   ([backend model* capacity dtype]
-   (mapv (fn [layer]
-           (when-not (= :llama-block (model/layer-type layer))
-             (throw (ex-info "incremental Llama decode requires only llama-block layers"
-                             {:layer layer})))
-           (init-kv-cache backend capacity (first (model/layer-args layer)) dtype))
-         (model/execution-layers model*))))
+   (->> (model/execution-layers model*)
+        (filter #(= :llama-block (model/layer-type %)))
+        (mapv #(init-kv-cache backend capacity
+                             (first (model/layer-args %)) dtype)))))
 
 (defn llama-model-step
   "Run one token through every Llama block and update each layer's KV cache."
@@ -387,6 +396,33 @@
   [caches]
   (doseq [cache caches] (release-kv-cache! cache))
   nil)
+
+(defn llama-lm-step
+  "Execute one token ID through Embedding, any number of Llama blocks, final
+  normalization, and LM head. Returns vocabulary logits and updated block
+  caches."
+  [model* weights token caches]
+  (let [layers (model/execution-layers model*)]
+    (when-not (= (count layers) (count weights))
+      (throw (ex-info "Llama LM layers and weights must align" {})))
+    (loop [remaining (seq (map vector layers weights))
+           value token cache-index 0 updated []]
+      (if-let [[layer weight] (first remaining)]
+        (if (= :llama-block (model/layer-type layer))
+          (let [cache (nth caches cache-index nil)
+                _ (when-not cache
+                    (throw (ex-info "missing per-block KV cache"
+                                    {:cache-index cache-index})))
+                step (llama-block-step layer weight value cache)]
+            (recur (next remaining) (:output step) (inc cache-index)
+                   (conj updated (:cache step))))
+          (recur (next remaining) (layer-forward layer weight value nil)
+                 cache-index updated))
+        (do
+          (when-not (= cache-index (count caches))
+            (throw (ex-info "unused Llama KV caches"
+                            {:used cache-index :provided (count caches)})))
+          {:logits value :caches updated})))))
 
 (defn release-kv-cache!
   "Explicitly release the two device arrays in a superseded KV cache."

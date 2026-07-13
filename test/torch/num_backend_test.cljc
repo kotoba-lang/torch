@@ -306,3 +306,24 @@
                            (map #(-> % :key :handle) (:caches decoded)))))
     (is (every? #(< (Math/abs %) 1.0e-5)
                 (map - (arr/->vec full) (:outputs decoded))))))
+
+(deftest cached-llama-lm-step-produces-full-vocabulary-logits
+  (let [model (m/sequential (m/embedding 6 4)
+                            (m/llama-block 4 2 8)
+                            (m/llama-block 4 2 8)
+                            (m/rmsnorm 4) (m/lm-head 4 6))
+        weights (nb/random-weights backend model 73)
+        token-ids [2 0 2]
+        full (core/run (nb/num-backend backend weights) model
+                       (arr/from-vec backend token-ids [3]))
+        initial (nb/init-llama-caches backend model 8)
+        decoded (reduce (fn [{:keys [caches logits]} token]
+                          (let [step (nb/llama-lm-step
+                                      model weights (arr/from-vec backend [token] [1]) caches)]
+                            {:caches (:caches step)
+                             :logits (into logits (arr/->vec (:logits step)))}))
+                        {:caches initial :logits []} token-ids)]
+    (is (= [3 6] (:shape full)))
+    (is (= [3 3] (mapv :length (:caches decoded))))
+    (is (every? #(< (Math/abs %) 1.0e-5)
+                (map - (arr/->vec full) (:logits decoded))))))

@@ -79,6 +79,11 @@
   ([embed-dim num-heads hidden-dim opts]
    {:llama-block [embed-dim num-heads hidden-dim opts]}))
 
+(defn lm-head
+  "Bias-free hidden-state to vocabulary-logit projection."
+  [embed-dim vocab-size]
+  {:lm-head [embed-dim vocab-size]})
+
 ;; ---------------------------------------------------------------------------
 ;; model container
 ;; ---------------------------------------------------------------------------

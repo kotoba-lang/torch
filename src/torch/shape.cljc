@@ -97,6 +97,15 @@
       (odd? (quot embed heads)) [:error "llama-block head dimension must be even"]
       :else [:ok in])))
 
+(defmethod layer-shape :lm-head [_ args in]
+  (let [[embed vocab] args]
+    (cond
+      (not (and (pos-int? embed) (pos-int? vocab)))
+      [:error "lm-head expects positive embed and vocabulary dimensions"]
+      (empty? in) [:error "lm-head expects rank >= 1"]
+      (not= embed (last in)) [:error "lm-head embed dimension mismatch"]
+      :else [:ok (conj (vec (butlast in)) vocab)])))
+
 ;; --- linear ----------------------------------------------------------------
 
 (defmethod layer-shape :linear [_ args in]
@@ -248,12 +257,14 @@
 (defmethod layer-params :llama-block [_ args]
   (let [embed (nth-arg args 0 0) hidden (nth-arg args 2 0)]
     (+ (* 2 embed) (* 4 embed embed) (* 3 embed hidden))))
+(defmethod layer-params :lm-head [_ args]
+  (* (nth-arg args 0 0) (nth-arg args 1 0)))
 
 (def built-in-types
   "The set of layer types this namespace understands."
   #{:linear :conv2d :maxpool2d :avgpool2d :embedding :batchnorm :layernorm :rmsnorm
     :groupnorm :dropout :flatten :relu :silu :gelu :sigmoid :tanh :softmax
-    :attention :multihead-attention :llama-block :identity})
+    :attention :multihead-attention :llama-block :lm-head :identity})
 
 (defn known?
   "True if `t` is a built-in layer type."

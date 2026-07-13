@@ -10,13 +10,14 @@
 
 (def supported-layers
   #{:linear :conv2d :groupnorm :layernorm :rmsnorm :embedding :flatten :relu :silu :sigmoid :tanh :gelu :softmax :attention
-    :multihead-attention :llama-block})
+    :multihead-attention :llama-block :lm-head})
 
 (def parameter-keys
   {:linear #{:w :b} :conv2d #{:w :b} :groupnorm #{:w :b} :layernorm #{:w :b}
    :embedding #{:w}
    :rmsnorm #{:w}
    :llama-block #{:attn-norm :qw :kw :vw :ow :ffn-norm :gate :up :down}
+   :lm-head #{:w}
    :multihead-attention #{:qw :qb :kw :kb :vw :vb :ow :ob}})
 
 (defn- fail [message data]
@@ -139,6 +140,16 @@
           down (linear (ag/mul* gate up) :down embed)
           output (ag/add* residual down)]
       (track state output parameters))
+
+    :lm-head
+    (let [[_embed vocab] (model/layer-args layer)
+          w (ag/value (:w weight)) value (:value state)
+          shape (:shape (:data value)) rank (count shape)
+          [batch sequence] (if (= rank 3) (take 2 shape) [1 (first shape)])
+          flat (if (= rank 3) (ag/reshape* value [(* batch sequence) (last shape)]) value)
+          projected (ag/matmul* flat w)
+          output (if (= rank 3) (ag/reshape* projected [batch sequence vocab]) projected)]
+      (track state output {:w w}))
 
     :multihead-attention
     (let [[embed heads opts] (model/layer-args layer)

@@ -118,6 +118,22 @@ blocks with one token:
 Two stacked blocks are verified token-for-token against their full causal model
 on Apple Metal while every layer retains its originally allocated K/V handles.
 
+A complete decoder can be described as ordinary layers:
+
+```clojure
+(m/sequential (m/embedding vocab embed)
+              (m/llama-block embed heads hidden)
+              (m/llama-block embed heads hidden)
+              (m/rmsnorm embed)
+              (m/lm-head embed vocab))
+```
+
+`llama-lm-step` accepts one token ID and returns `{:logits [1 vocab] :caches ...}`.
+After reading the final logits, `torch.generate/sample-token` supports greedy,
+temperature, top-k, nucleus/top-p, and repetition-penalty policies. Randomness is
+passed explicitly as `:random-value`, keeping sampling reproducible and allowing a
+server to own the RNG stream.
+
 When `:context` is present, Q is projected from the current model value while K/V
 are projected from the separate context sequence, enabling UNet-style cross-attention
 with different query/key lengths. VJP and MSE results expose the context gradient at
@@ -306,7 +322,7 @@ tested. Backward is still a synchronous host reference implementation, so this
 is real mixed-precision numerical behavior but not GPU-resident autograd.
 
 The reference path supports recursively nested sequential models composed from
-`:linear/:conv2d/:embedding/:groupnorm/:layernorm/:rmsnorm/:flatten/:relu/:silu/:sigmoid/:tanh/:gelu/:softmax/:attention/:multihead-attention/:llama-block`, with MSE and
+`:linear/:conv2d/:embedding/:groupnorm/:layernorm/:rmsnorm/:flatten/:relu/:silu/:sigmoid/:tanh/:gelu/:softmax/:attention/:multihead-attention/:llama-block/:lm-head`, with MSE and
 positive-rate SGD plus immutable AdamW. NCHW grouped convolution, affine GroupNorm, SiLU, and
 multi-head self-attention all have real reverse-mode gradients; tests verify
 both finite-difference agreement in `num` and decreasing loss through the

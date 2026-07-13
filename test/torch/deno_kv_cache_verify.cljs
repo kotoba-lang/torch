@@ -13,6 +13,8 @@
    [0.6 0.2 -0.4 0.1]
    [-0.1 0.4 0.2 -0.5]])
 
+(def token-ids [2 0 2 1])
+
 (defn- approx? [expected actual]
   (and (= (count expected) (count actual))
        (every? #(< (Math/abs %) 1.0e-5) (map - expected actual))))
@@ -28,18 +30,20 @@
 
 (defn- decode-llama [backend model* weights caches]
   (reduce (fn [{:keys [caches outputs]} token]
-            (let [step (nb/llama-model-step
-                        model* weights (arr/from-vec backend token [1 4]) caches)]
-              {:caches (:caches step) :outputs (conj outputs (:output step))}))
-          {:caches caches :outputs []} tokens))
+            (let [step (nb/llama-lm-step
+                        model* weights (arr/from-vec backend [token] [1]) caches)]
+              {:caches (:caches step) :outputs (conj outputs (:logits step))}))
+          {:caches caches :outputs []} token-ids))
 
 (defn -main [& _]
   (let [layer (model/multihead-attention
                4 2 {:causal? true :rope? true :position-offset 3})
         model* (model/sequential layer)
         llama-model (model/sequential
+                     (model/embedding 6 4)
                      (model/llama-block 4 2 8 {:position-offset 3})
-                     (model/llama-block 4 2 8 {:position-offset 3}))
+                     (model/llama-block 4 2 8 {:position-offset 3})
+                     (model/rmsnorm 4) (model/lm-head 4 6))
         cpu-backend (cpu/cpu-backend)
         cpu-weights (nb/random-weights cpu-backend model* 61)
         input-values (vec (mapcat identity tokens))
@@ -50,7 +54,7 @@
         expected-llama
         (arr/->vec (core/run (nb/num-backend cpu-backend cpu-llama-weights)
                              llama-model
-                             (arr/from-vec cpu-backend input-values [4 4])))]
+                             (arr/from-vec cpu-backend token-ids [4])))]
     (-> (gpu/request-device)
         (.then
          (fn [device]
@@ -65,7 +69,7 @@
                  llama-weights (nb/random-weights backend llama-model 71)
                  llama-full (core/run (nb/num-backend backend llama-weights)
                                       llama-model
-                                      (arr/from-vec backend input-values [4 4]))
+                                      (arr/from-vec backend token-ids [4]))
                  llama-initial (nb/init-llama-caches backend llama-model 16)
                  llama-handles (mapv #(-> % :key :handle) llama-initial)
                  llama-decoded (decode-llama backend llama-model llama-weights
