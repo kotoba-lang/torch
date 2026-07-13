@@ -10,7 +10,7 @@
         ;; multi-head attention, typed Metal tensors, UNet autograd, and a
         ;; real-Metal async twin of multi-head attention (num.tensor-async).
         io.github.kotoba-lang/num
-        {:git/sha "7af148a681d517d242b99f97e63b465252cb4fc8"}}
+        {:git/sha "a03c9dbfcf056cff21dfef9fc67012f3fc97444f"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
