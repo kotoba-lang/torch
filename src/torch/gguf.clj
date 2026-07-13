@@ -189,9 +189,7 @@
                                            :head-count :kv-head-count
                                            :context-length) config))
                    (zero? (mod (:embed-dim config) (:head-count config)))
-                   ;; The current attention kernel is MHA. Refuse to silently
-                   ;; misread GQA weights with a smaller K/V projection.
-                   (= (:head-count config) (:kv-head-count config)))
+                   (zero? (mod (:head-count config) (:kv-head-count config))))
       (throw (ex-info "GGUF lacks a valid Llama architecture configuration"
                       config)))
     config))
@@ -199,14 +197,15 @@
 (defn llama-model
   "Construct a complete torch.model Llama LM description from GGUF metadata."
   [gguf]
-  (let [{:keys [block-count embed-dim hidden-dim head-count rope-theta]}
+  (let [{:keys [block-count embed-dim hidden-dim head-count kv-head-count rope-theta]}
         (llama-config gguf)
         vocab (count (get-in gguf [:metadata "tokenizer.ggml.tokens"]))]
     (apply model/sequential
            (concat [(model/embedding vocab embed-dim)]
                    (repeat block-count
                            (model/llama-block embed-dim head-count hidden-dim
-                                              {:rope-theta rope-theta}))
+                                              {:rope-theta rope-theta
+                                               :kv-heads kv-head-count}))
                    [(model/rmsnorm embed-dim) (model/lm-head embed-dim vocab)]))))
 
 (defn gguf-tokenizer

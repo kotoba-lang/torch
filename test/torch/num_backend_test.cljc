@@ -327,3 +327,24 @@
     (is (= [3 3] (mapv :length (:caches decoded))))
     (is (every? #(< (Math/abs %) 1.0e-5)
                 (map - (arr/->vec full) (:logits decoded))))))
+
+(deftest grouped-query-llama-cache-matches-full-model
+  (let [model (m/sequential (m/llama-block 4 2 8 {:kv-heads 1}))
+        weights (nb/random-weights backend model 97)
+        tokens [[0.2 -0.1 0.3 0.4] [-0.2 0.1 0.5 -0.3]
+                [0.6 0.2 -0.4 0.1]]
+        input (arr/from-vec backend (vec (mapcat identity tokens)) [3 4])
+        full (core/run (nb/num-backend backend weights) model input)
+        initial (nb/init-llama-caches backend model 8)
+        decoded (reduce (fn [{:keys [caches output]} token]
+                          (let [step (nb/llama-model-step
+                                      model weights
+                                      (arr/from-vec backend token [1 4]) caches)]
+                            {:caches (:caches step)
+                             :output (into output (arr/->vec (:output step)))}))
+                        {:caches initial :output []} tokens)]
+    (is (= [4 2] (:shape (:kw (first weights)))))
+    (is (= [8 2] (:shape (get-in initial [0 :key]))))
+    (is (= 3 (get-in decoded [:caches 0 :length])))
+    (is (every? #(< (Math/abs %) 1.0e-5)
+                (map - (arr/->vec full) (:output decoded))))))

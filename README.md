@@ -152,8 +152,9 @@ tokenizer, transpose GGUF linear matrices, upload weights, and handle tied outpu
 embeddings.
 
 Q8_0 currently dequantizes to f32 during loading. Q4_K and other K-quants do not
-yet execute directly, and Llama files using grouped-query attention
-(`head_count_kv < head_count`) are rejected explicitly rather than misinterpreted.
+yet execute directly. Llama grouped-query attention is supported when
+`head_count_kv` evenly divides `head_count`, including training and fixed-capacity
+KV-cache decoding on Metal; K/V projections and caches use the reduced KV width.
 
 When `:context` is present, Q is projected from the current model value while K/V
 are projected from the separate context sequence, enabling UNet-style cross-attention

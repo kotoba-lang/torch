@@ -111,6 +111,8 @@
     :llama-block
     (let [[embed heads hidden opts] (model/layer-args layer)
           opts (merge {:causal? true :rope? true} opts runtime-options)
+          kv-heads (long (or (:kv-heads opts) heads))
+          kv-embed (* kv-heads (quot embed heads))
           eps (or (:eps opts) 1.0e-5)
           input (:value state)
           shape (:shape (:data input)) rank (count shape)
@@ -125,13 +127,14 @@
                    (restore (ag/matmul* (flatten v) (get parameters key)) out))
           normalized (ag/rms-norm-last* input (:attn-norm parameters) eps)
           q0 (linear normalized :qw embed)
-          k0 (linear normalized :kw embed)
-          value (linear normalized :vw embed)
+          k0 (linear normalized :kw kv-embed)
+          value (linear normalized :vw kv-embed)
           rope-opts {:theta (or (:rope-theta opts) 10000.0)
                      :position-offset (or (:position-offset opts) 0)}
           query (ag/rotary-embedding* q0 heads rope-opts)
-          key (ag/rotary-embedding* k0 heads rope-opts)
-          attended (ag/multi-head-attention* query key value heads {:causal? true})
+          key (ag/rotary-embedding* k0 kv-heads rope-opts)
+          attended (ag/multi-head-attention* query key value heads
+                                             {:causal? true :kv-heads kv-heads})
           attention-output (linear attended :ow embed)
           residual (ag/add* input attention-output)
           ffn-input (ag/rms-norm-last* residual (:ffn-norm parameters) eps)

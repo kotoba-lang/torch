@@ -73,7 +73,8 @@
 
 (defn llama-block
   "Pre-normalized Llama decoder block: RoPE causal attention plus SwiGLU.
-  `opts` accepts `:rope-theta`, `:position-offset`, and RMSNorm `:eps`."
+  `opts` accepts `:kv-heads` (grouped-query attention), `:rope-theta`,
+  `:position-offset`, and RMSNorm `:eps`."
   ([embed-dim num-heads hidden-dim]
    {:llama-block [embed-dim num-heads hidden-dim]})
   ([embed-dim num-heads hidden-dim opts]

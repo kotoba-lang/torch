@@ -41,8 +41,8 @@
         model* (model/sequential layer)
         llama-model (model/sequential
                      (model/embedding 6 4)
-                     (model/llama-block 4 2 8 {:position-offset 3})
-                     (model/llama-block 4 2 8 {:position-offset 3})
+                     (model/llama-block 4 2 8 {:position-offset 3 :kv-heads 1})
+                     (model/llama-block 4 2 8 {:position-offset 3 :kv-heads 1})
                      (model/rmsnorm 4) (model/lm-head 4 6))
         cpu-backend (cpu/cpu-backend)
         cpu-weights (nb/random-weights cpu-backend model* 61)

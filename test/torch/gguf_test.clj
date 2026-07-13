@@ -100,6 +100,7 @@
                "llama.embedding_length" 4
                "llama.feed_forward_length" 8
                "llama.attention.head_count" 2
+               "llama.attention.head_count_kv" 1
                "llama.context_length" 128
                "llama.rope.freq_base" 500000.0
                "tokenizer.ggml.tokens" ["<unk>" "<bos>" "<eos>" "a" "b" "ab"]
@@ -113,6 +114,7 @@
     (is (= [:embedding :llama-block :llama-block :rmsnorm :lm-head]
            (mapv model/layer-type layers)))
     (is (= 500000.0 (get-in (second layers) [:llama-block 3 :rope-theta])))
+    (is (= 1 (get-in (second layers) [:llama-block 3 :kv-heads])))
     (is (= [1 5] (tokenizer/encode tokenizer* "ab")))
     (is (= "ab" (tokenizer/decode tokenizer* [1 5 2])))))
 

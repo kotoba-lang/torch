@@ -98,12 +98,14 @@
                   {:qw (matrix) :qb (bias) :kw (matrix) :kb (bias)
                    :vw (matrix) :vb (bias) :ow (matrix) :ob (bias)})
                 :llama-block
-                (let [[embed _heads hidden] a
+                (let [[embed heads hidden opts] a
+                      kv-heads (long (or (:kv-heads opts) heads))
+                      kv-embed (* kv-heads (quot embed heads))
                       matrix (fn [in out]
                                (upload (next-vec! (* in out)) [in out]))]
                   {:attn-norm (upload (repeat embed 1.0) [embed])
-                   :qw (matrix embed embed) :kw (matrix embed embed)
-                   :vw (matrix embed embed) :ow (matrix embed embed)
+                   :qw (matrix embed embed) :kw (matrix embed kv-embed)
+                   :vw (matrix embed kv-embed) :ow (matrix embed embed)
                    :ffn-norm (upload (repeat embed 1.0) [embed])
                    :gate (matrix embed hidden) :up (matrix embed hidden)
                    :down (matrix hidden embed)})
@@ -207,6 +209,8 @@
       :llama-block
       (let [[embed heads hidden opts] largs
             opts (merge {:causal? true :rope? true} opts runtime-options)
+            kv-heads (long (or (:kv-heads opts) heads))
+            kv-embed (* kv-heads (quot embed heads))
             eps (or (:eps opts) 1.0e-5)
             rank (count (:shape x))
             [batch sequence] (if (= rank 3) (take 2 (:shape x)) [1 (first (:shape x))])
@@ -217,13 +221,14 @@
                      (restore (nm/matmul (flatten a) w) out))
             normalized (t/rms-norm-last x (:attn-norm weights) eps)
             q0 (linear normalized (:qw weights) embed)
-            k0 (linear normalized (:kw weights) embed)
-            v (linear normalized (:vw weights) embed)
+            k0 (linear normalized (:kw weights) kv-embed)
+            v (linear normalized (:vw weights) kv-embed)
             rope-opts {:theta (or (:rope-theta opts) 10000.0)
                        :position-offset (or (:position-offset opts) 0)}
             q (t/rotary-embedding q0 heads rope-opts)
-            k (t/rotary-embedding k0 heads rope-opts)
-            attended (t/multi-head-attention q k v heads {:causal? true})
+            k (t/rotary-embedding k0 kv-heads rope-opts)
+            attended (t/multi-head-attention q k v heads
+                                             {:causal? true :kv-heads kv-heads})
             attention-output (linear attended (:ow weights) embed)
             residual (t/add x attention-output)
             ffn-input (t/rms-norm-last residual (:ffn-norm weights) eps)
@@ -330,6 +335,8 @@
   [layer weights input cache]
   (let [[embed heads _hidden opts] (model/layer-args layer)
         opts (merge {:causal? true :rope? true} opts)
+        kv-heads (long (or (:kv-heads opts) heads))
+        kv-embed (* kv-heads (quot embed heads))
         length (long (or (:length cache) 0))
         eps (or (:eps opts) 1.0e-5)]
     (when-not (and (= :llama-block (model/layer-type layer))
@@ -343,22 +350,23 @@
           rope-opts {:theta (or (:rope-theta opts) 10000.0)
                      :position-offset (+ (or (:position-offset opts) 0) length)}
           query (t/rotary-embedding q0 heads rope-opts)
-          key (t/rotary-embedding k0 heads rope-opts)
+          key (t/rotary-embedding k0 kv-heads rope-opts)
           fixed? (:fixed-capacity? cache)
           _ (when (and fixed? (>= length (:capacity cache)))
               (throw (ex-info "Llama KV cache is full"
                               {:length length :capacity (:capacity cache)})))
           all-key (if fixed?
                     (let [backing (:key cache)]
-                      (t/copy-into! backing key (* length embed))
-                      (assoc backing :shape [(inc length) embed]))
+                      (t/copy-into! backing key (* length kv-embed))
+                      (assoc backing :shape [(inc length) kv-embed]))
                     (if-let [old (:key cache)] (t/cat [old key] 0) key))
           all-value (if fixed?
                       (let [backing (:value cache)]
-                        (t/copy-into! backing value (* length embed))
-                        (assoc backing :shape [(inc length) embed]))
+                        (t/copy-into! backing value (* length kv-embed))
+                        (assoc backing :shape [(inc length) kv-embed]))
                       (if-let [old (:value cache)] (t/cat [old value] 0) value))
-          attended (t/multi-head-attention query all-key all-value heads)
+          attended (t/multi-head-attention query all-key all-value heads
+                                           {:kv-heads kv-heads})
           residual (t/add input (linear attended :ow))
           ffn-input (t/rms-norm-last residual (:ffn-norm weights) eps)
           gate (t/silu (linear ffn-input :gate))
@@ -375,8 +383,11 @@
   ([backend model* capacity dtype]
    (->> (model/execution-layers model*)
         (filter #(= :llama-block (model/layer-type %)))
-        (mapv #(init-kv-cache backend capacity
-                             (first (model/layer-args %)) dtype)))))
+        (mapv (fn [layer]
+                (let [[embed heads _hidden opts] (model/layer-args layer)
+                      kv-heads (long (or (:kv-heads opts) heads))]
+                  (init-kv-cache backend capacity
+                                 (* kv-heads (quot embed heads)) dtype)))))))
 
 (defn llama-model-step
   "Run one token through every Llama block and update each layer's KV cache."

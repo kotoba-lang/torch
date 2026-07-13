@@ -146,6 +146,17 @@
     (is (= [4 6] (:shape (:w (last (:gradients first-pass))))))
     (is (< (:loss trained) (:loss first-pass)))))
 
+(deftest grouped-query-llama-trains-smaller-kv-projections
+  (let [model (m/sequential (m/llama-block 4 2 8 {:kv-heads 1}))
+        input (arr/from-vec backend [0.2 -0.1 0.3 0.4,
+                                     -0.2 0.1 0.5 -0.3] [2 4])
+        target (arr/from-vec backend (repeat 8 0.0) [2 4])
+        weights (nb/random-weights backend model 101)
+        result (train/loss-and-gradients model weights input target)]
+    (is (= [4 2] (:shape (:kw (first weights)))))
+    (is (= [4 2] (:shape (:vw (first (:gradients result))))))
+    (is (= [2 4] (:shape (:prediction result))))))
+
 (deftest training-contract-rejects-ambiguous-input
   (let [x (arr/from-vec backend [1 2] [1 2])]
     (is (thrown? #?(:clj Exception :cljs js/Error)

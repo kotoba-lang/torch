@@ -86,14 +86,16 @@
       :else [:ok in])))
 
 (defmethod layer-shape :llama-block [_ args in]
-  (let [[embed heads hidden] args]
+  (let [[embed heads hidden opts] args
+        kv-heads (or (:kv-heads opts) heads)]
     (cond
       (not (#{2 3} (count in)))
       [:error "llama-block expects [sequence embed] or [batch sequence embed]"]
-      (not (every? pos-int? [embed heads hidden]))
+      (not (every? pos-int? [embed heads hidden kv-heads]))
       [:error "llama-block dimensions must be positive integers"]
       (not= embed (last in)) [:error "llama-block embed dimension mismatch"]
       (not (zero? (mod embed heads))) [:error "llama-block heads must divide embed"]
+      (not (zero? (mod heads kv-heads))) [:error "llama-block kv-heads must divide heads"]
       (odd? (quot embed heads)) [:error "llama-block head dimension must be even"]
       :else [:ok in])))
 
@@ -255,8 +257,12 @@
 (defmethod layer-params :multihead-attention [_ args]
   (let [embed (nth-arg args 0 0)] (* 4 (+ (* embed embed) embed))))
 (defmethod layer-params :llama-block [_ args]
-  (let [embed (nth-arg args 0 0) hidden (nth-arg args 2 0)]
-    (+ (* 2 embed) (* 4 embed embed) (* 3 embed hidden))))
+  (let [embed (nth-arg args 0 0) heads (nth-arg args 1 1)
+        hidden (nth-arg args 2 0) opts (nth-arg args 3 {})
+        kv-heads (or (:kv-heads opts) heads)
+        kv-embed (* kv-heads (quot embed heads))]
+    (+ (* 2 embed) (* 2 embed embed) (* 2 embed kv-embed)
+       (* 3 embed hidden))))
 (defmethod layer-params :lm-head [_ args]
   (* (nth-arg args 0 0) (nth-arg args 1 0)))
 
