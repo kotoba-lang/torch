@@ -47,6 +47,11 @@
        (drop 1) (take n)
        (map (fn [s] (- (/ (double s) 2147483648.0) 0.5)))))
 
+(defn- flatten-batch-shape [shape]
+  (if (<= (count shape) 1)
+    shape
+    [(first shape) (arr/nelems (subvec (vec shape) 1))]))
+
 (defn random-weights
   "A weights vector for `model*` (one entry per NORMALIZED layer, `nil` for
   parameterless layers) on `backend`, seeded from `seed` for reproducibility.
@@ -107,6 +112,7 @@
       :relu   (nm/relu x)
       :silu   (t/silu x)
       :softmax (t/softmax x)
+      :flatten (t/reshape x (flatten-batch-shape (:shape x)))
       :attention (let [num-heads (if (and (vector? largs) (seq largs)) (first largs) 1)]
                    (when-not (= 2 (count (:shape x)))
                      (throw (ex-info "torch.num-backend: :attention expects [sequence embedding]"
@@ -160,7 +166,7 @@
                    (t/group-norm-nchw x groups (:w weights) (:b weights)
                                       (or eps 1.0e-5)))
       (throw (ex-info (str "torch.num-backend: layer type not supported: " t')
-                      {:layer lyr :supported #{:linear :relu :silu :softmax :conv2d
+                      {:layer lyr :supported #{:linear :relu :silu :softmax :flatten :conv2d
                                                :groupnorm :attention
                                                :multihead-attention}})))))
 
@@ -185,11 +191,11 @@
                layer-options (or (:layer-options options)
                                  (repeat (count lyrs) nil))
                unsupported (when autocast-dtype
-                             (seq (remove #{:linear :relu :silu :conv2d :groupnorm}
+                             (seq (remove #{:linear :relu :silu :flatten :conv2d :groupnorm}
                                           (map model/layer-type lyrs))))]
            (when unsupported
              (throw (ex-info
-                     "torch.num-backend: autocast supports linear/relu/silu/conv2d/groupnorm"
+                     "torch.num-backend: autocast supports linear/relu/silu/flatten/conv2d/groupnorm"
                      {:unsupported (vec unsupported) :dtype autocast-dtype})))
            (when-not (= (count lyrs) (count layer-options))
              (throw (ex-info "torch.num-backend: layer-options count mismatch"

@@ -270,13 +270,19 @@ tested. Backward is still a synchronous host reference implementation, so this
 is real mixed-precision numerical behavior but not GPU-resident autograd.
 
 The reference path supports recursively nested sequential models composed from
-`:linear/:conv2d/:groupnorm/:relu/:silu/:softmax/:attention/:multihead-attention`, with MSE and
+`:linear/:conv2d/:groupnorm/:flatten/:relu/:silu/:softmax/:attention/:multihead-attention`, with MSE and
 positive-rate SGD plus immutable AdamW. NCHW grouped convolution, affine GroupNorm, SiLU, and
 multi-head self-attention all have real reverse-mode gradients; tests verify
 both finite-difference agreement in `num` and decreasing loss through the
 public torch model/weight representation. It is not yet a replacement for
 PyTorch's broader optimizer catalog, general GPU autograd, or mixed-precision
 coverage for every layer.
+
+`Flatten` follows PyTorch's batch-preserving default: `[N,C,H,W]` becomes
+`[N,C*H*W]`, is zero-copy in forward execution, and reshapes its VJP back to the
+exact input shape. Consequently the documented
+`Conv2d → activation → Flatten → Linear` CNN form now runs and trains through
+the same EDN model rather than remaining shape-only syntax.
 
 The standalone two-linear-layer Metal trainer follows num's current MSE VJP
 contract, including an explicit device-resident upstream scalar seed. Its full

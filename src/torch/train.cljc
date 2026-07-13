@@ -9,7 +9,7 @@
             [torch.optim :as optim]))
 
 (def supported-layers
-  #{:linear :conv2d :groupnorm :relu :silu :softmax :attention
+  #{:linear :conv2d :groupnorm :flatten :relu :silu :softmax :attention
     :multihead-attention})
 
 (def parameter-keys
@@ -44,6 +44,11 @@
        (update :parameters conj parameters)
        (update :runtime-values conj runtime-values))))
 
+(defn- flatten-batch-shape [shape]
+  (if (<= (count shape) 1)
+    shape
+    [(first shape) (arr/nelems (subvec (vec shape) 1))]))
+
 (defn- forward-layer [state [layer weight runtime-options]]
   (case (model/layer-type layer)
     :linear
@@ -69,6 +74,11 @@
     :relu (track state (ag/relu* (:value state)) nil)
     :silu (track state (ag/silu* (:value state)) nil)
     :softmax (track state (ag/softmax* (:value state)) nil)
+    :flatten
+    (track state
+           (ag/reshape* (:value state)
+                        (flatten-batch-shape (:shape (:data (:value state)))))
+           nil)
     :attention
     (let [args (model/layer-args layer)
           heads (if (and (vector? args) (seq args)) (first args) 1)]
@@ -210,9 +220,9 @@
     (fail "loss-scale must be a positive number" {:loss-scale loss-scale}))
   (let [layers (model/execution-layers model*)
         _ (when (and autocast-dtype
-                     (seq (remove #{:conv2d :groupnorm :silu :relu}
+                     (seq (remove #{:conv2d :groupnorm :flatten :silu :relu}
                                   (map model/layer-type layers))))
-            (fail "training autocast supports conv2d/groupnorm/silu/relu only"
+            (fail "training autocast supports conv2d/groupnorm/flatten/silu/relu only"
                   {:dtype autocast-dtype}))
         cast-array #(if autocast-dtype (arr/cast % autocast-dtype) %)
         weights (if autocast-dtype

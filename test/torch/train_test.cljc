@@ -74,6 +74,30 @@
       (is (not= (arr/->vec (:w (first initial)))
                 (arr/->vec (:w (first (:weights trained)))))))))
 
+(deftest cnn-flatten-bridges-convolution-to-linear-training
+  (let [model (m/sequential (m/conv2d 1 2 1) (m/relu)
+                            (m/flatten) (m/linear 8 1))
+        input (arr/from-vec backend
+                            [0.1 0.3 -0.2 0.5,
+                             -0.4 0.2 0.6 -0.1] [2 1 2 2])
+        target (arr/from-vec backend [0.4 -0.3] [2 1])
+        initial (nb/random-weights backend model 37)
+        inference (core/run (nb/num-backend backend initial) model input)
+        first-pass (train/loss-and-gradients model initial input target)
+        trained (last (take 31 (iterate (fn [{:keys [weights]}]
+                                          (train/sgd-step
+                                           model weights input target 0.05))
+                                        {:weights initial})))]
+    (is (= [2 1] (:shape inference)))
+    (is (= (arr/->vec inference) (arr/->vec (:prediction first-pass))))
+    (is (= [2 1 2 2] (:shape (:input-gradient
+                              (train/prediction-and-gradients
+                               model initial input
+                               (arr/from-vec backend [1.0 1.0] [2 1]))))))
+    (is (nil? (nth (:gradients first-pass) 2)))
+    (is (= [8 1] (:shape (:w (nth (:gradients first-pass) 3)))))
+    (is (< (:loss trained) (:loss first-pass)))))
+
 (deftest multi-head-attention-model-trains
   (testing "two-head attention participates in a trainable sequential graph"
     (let [model (m/sequential (m/linear 4 4) (m/attention 2) (m/linear 4 4))
