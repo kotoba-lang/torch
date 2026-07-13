@@ -325,8 +325,25 @@ clojure -M:public-gguf-verify /tmp/tiny-random-llama.Q4_K_M.gguf
 
 This checkpoint has random weights and proves compatibility/lifecycle, not text
 quality. The verifier is CPU-hosted because the current GGUF parser is JVM-only;
-the Deno/Metal packed whole-graph verifier below remains a separate execution
-path. Joining file loading and Metal serving in one host is still outstanding.
+an explicit portable bundle now joins that parser to the Deno/Metal host and
+proves the same real checkpoint through the full Llama graph:
+
+```sh
+clojure -M:gguf-bundle-export /tmp/tiny-random-llama.Q4_K_M.gguf \
+  target/tiny-random-llama-metal.edn
+clojure -M:deno-public-gguf-metal-verify && \
+  deno run --allow-all target/deno-public-gguf-metal-verify.cjs \
+  target/tiny-random-llama-metal.edn
+# Apple M4: CPU expected = Metal generated = [30821 25334 12729 26193]
+# full Embedding → 2 Llama blocks → RMSNorm → 32k LM head: 1.01 s
+# released: 25 weight/cache buffers, 2,415,376 bytes
+# remaining transient GPU buffers: 0
+```
+
+The bundle is an opt-in verification interchange, not yet a production binary
+container or direct JVM↔Deno IPC protocol. It retains packed Q5_0 bytes and
+dense fallback tensors exactly enough to establish checkpoint-level numeric and
+resource-lifecycle parity on Metal.
 
 A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
 blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding

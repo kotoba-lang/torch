@@ -1,0 +1,110 @@
+(ns torch.deno-public-gguf-metal-verify
+  "Run an exported real GGUF checkpoint through the complete Llama graph on Metal."
+  (:require [cljs.reader :as reader]
+            [num.array :as arr]
+            [num.deno-gpu :as gpu]
+            [num.quantized :as quantized]
+            [torch.generate :as generate]
+            [torch.model :as model]
+            [torch.num-backend :as nb]))
+
+(defn- build-model [{:keys [vocab embed-dim hidden-dim head-count kv-head-count
+                            block-count rope-theta]}]
+  (apply model/sequential
+         (concat [(model/embedding vocab embed-dim)]
+                 (repeat block-count
+                         (model/llama-block embed-dim head-count hidden-dim
+                                            {:kv-heads kv-head-count
+                                             :rope-theta rope-theta}))
+                 [(model/rmsnorm embed-dim) (model/lm-head embed-dim vocab)])))
+
+(defn- upload-weight [backend {:keys [kind shape source-shape quant-type bytes values]}]
+  (case kind
+    :quantized-matrix (quantized/matrix backend bytes source-shape quant-type)
+    :quantized-table (quantized/table backend bytes shape quant-type)
+    :dense (arr/from-vec backend values shape)))
+
+(defn- upload-weights [backend weights]
+  (mapv (fn [entry]
+          (into {} (map (fn [[key weight]] [key (upload-weight backend weight)]))
+                entry))
+        weights))
+
+(defn- step-read [backend model* weights token-id caches]
+  (let [token (arr/from-vec backend [token-id] [1])
+        step (nb/llama-lm-step model* weights token caches)]
+    (-> (arr/->vec (:logits step))
+        (.then (fn [logits]
+                 (arr/release! token)
+                 (arr/release! (:logits step))
+                 {:logits logits :caches (:caches step)})))))
+
+(defn- prefill [backend model* weights caches prompt-ids]
+  (reduce (fn [pending token-id]
+            (.then pending
+                   (fn [{:keys [caches]}]
+                     (step-read backend model* weights token-id caches))))
+          (js/Promise.resolve {:caches caches}) prompt-ids))
+
+(defn- generate-greedy [backend model* weights state token-count]
+  (letfn [(advance [{:keys [logits caches generated]}]
+            (if (= token-count (count generated))
+              (js/Promise.resolve {:generated generated :caches caches})
+              (let [token-id (generate/sample-token logits {:temperature 0.0})]
+                (-> (step-read backend model* weights token-id caches)
+                    (.then #(advance (assoc % :generated
+                                            (conj generated token-id))))))))]
+    (advance (assoc state :generated []))))
+
+(defn -main [& [bundle-path]]
+  (when-not bundle-path
+    (throw (js/Error. "usage: deno ... bundle.edn")))
+  (let [bundle (reader/read-string (js/Deno.readTextFileSync bundle-path))]
+    (when-not (= :torch/gguf-metal-bundle-v1 (:format bundle))
+      (throw (js/Error. "unsupported GGUF Metal bundle")))
+    (-> (gpu/request-device)
+        (.then
+         (fn [request]
+           (let [backend (gpu/backend request)
+                 baseline (gpu/backend-stats backend)
+                 model* (build-model (:config bundle))
+                 weights (upload-weights backend (:weights bundle))
+                 caches (nb/init-llama-caches backend model* 32)
+                 started (.now js/performance)]
+             (println "Public GGUF full Llama on" (gpu/adapter-description request))
+             (-> (prefill backend model* weights caches (:prompt-ids bundle))
+                 (.then #(generate-greedy backend model* weights % 4))
+                 (.then
+                  (fn [{:keys [generated caches]}]
+                    (let [before-release (gpu/backend-stats backend)
+                          _ (nb/release-llama-caches! caches)
+                          _ (nb/release-weights! weights)
+                          after-release (gpu/backend-stats backend)
+                          elapsed (- (.now js/performance) started)
+                          parity? (= generated (:generated-ids bundle))
+                          released-buffers (- (:live-buffers before-release)
+                                              (:live-buffers after-release))
+                          released-bytes (- (:live-bytes before-release)
+                                            (:live-bytes after-release))
+                          release? (and (pos? released-buffers)
+                                        (pos? released-bytes)
+                                        (= baseline after-release))]
+                      (println "prompt ids:" (:prompt-ids bundle))
+                      (println "CPU expected:" (:generated-ids bundle))
+                      (println "Metal generated:" generated)
+                      (println "CPU/Metal greedy parity:"
+                               (if parity? "passed" "failed"))
+                      (println "Metal elapsed ms:" (.toFixed elapsed 3))
+                      (println "weights+cache released:" released-buffers
+                               "buffers /" released-bytes "bytes")
+                      (println "remaining transient buffers:"
+                               (- (:live-buffers after-release)
+                                  (:live-buffers baseline)))
+                      (when-not (and parity? release?)
+                        (throw (js/Error. "public GGUF Metal verification failed"))))))))))
+        (.then #(js/Deno.exit 0))
+        (.catch (fn [error]
+                  (println "ERROR:" (or (.-stack error) (str error)))
+                  (js/Deno.exit 1))))))
+
+(set! *main-cli-fn* -main)

@@ -412,11 +412,21 @@
                                            {:kv-heads kv-heads})
           _ (when (and fixed? (= rank 3))
               (arr/release-all! [all-key all-value]))
-          residual (t/add input (linear attended :ow))
+          attention-output (linear attended :ow)
+          residual (t/add input attention-output)
           ffn-input (t/rms-norm-last residual (:ffn-norm weights) eps)
-          gate (t/silu (linear ffn-input :gate))
+          gate-projection (linear ffn-input :gate)
+          gate (t/silu gate-projection)
           up (linear ffn-input :up)
-          output (t/add residual (linear (nm/mul gate up) :down))]
+          gated (nm/mul gate up)
+          down (linear gated :down)
+          output (t/add residual down)
+          ;; Every command consuming these buffers has already been encoded.
+          ;; The output and cache are the only values escaping this scope.
+          _ (arr/release-all!
+             (cond-> [normalized q0 k0 query attended attention-output
+                      ffn-input gate-projection gate up gated down residual]
+               fixed? (into [key value])))]
       {:output output
        :cache (if fixed? (assoc cache :length (inc length))
                   {:key all-key :value all-value :length (inc length)
@@ -612,18 +622,20 @@
     (when-not (= (count layers) (count weights))
       (throw (ex-info "Llama LM layers and weights must align" {})))
     (loop [remaining (seq (map vector layers weights))
-           value token cache-index 0 updated []]
+           value token value-owned? false cache-index 0 updated []]
       (if-let [[layer weight] (first remaining)]
         (if (= :llama-block (model/layer-type layer))
           (let [cache (nth caches cache-index nil)
                 _ (when-not cache
                     (throw (ex-info "missing per-block KV cache"
                                     {:cache-index cache-index})))
-                step (llama-block-step layer weight value cache)]
-            (recur (next remaining) (:output step) (inc cache-index)
+                step (llama-block-step layer weight value cache)
+                _ (when value-owned? (arr/release! value))]
+            (recur (next remaining) (:output step) true (inc cache-index)
                    (conj updated (:cache step))))
-          (recur (next remaining) (layer-forward layer weight value nil)
-                 cache-index updated))
+          (let [output (layer-forward layer weight value nil)
+                _ (when value-owned? (arr/release! value))]
+            (recur (next remaining) output true cache-index updated)))
         (do
           (when-not (= cache-index (count caches))
             (throw (ex-info "unused Llama KV caches"

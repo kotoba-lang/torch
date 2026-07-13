@@ -16,6 +16,10 @@
        {:extra-paths ["test"]
         :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
         :main-opts ["-m" "torch.public-gguf-verify"]}
+  :gguf-bundle-export
+       {:extra-paths ["test"]
+        :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
+        :main-opts ["-m" "torch.gguf-bundle-export"]}
   :test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
                       {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
@@ -92,6 +96,13 @@
         :main-opts ["-m" "cljs.main"
                     "-co" "{:optimizations :simple :target :nodejs :main torch.deno-quantized-llama-benchmark :output-to \"target/deno-quantized-llama-benchmark.cjs\"}"
                     "-c" "torch.deno-quantized-llama-benchmark"]}
+       :deno-public-gguf-metal-verify
+       {:extra-paths ["test"]
+        :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-public-gguf-metal-verify :output-to \"target/deno-public-gguf-metal-verify.cjs\"}"
+                    "-c" "torch.deno-public-gguf-metal-verify"]}
        ;; clj-kondo as a Clojars lib (no Homebrew/system install needed).
        :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
          :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"
