@@ -166,3 +166,40 @@
                    [(get-in runtime* [:pool :sequences :a :length])
                     (get-in runtime* [:pool :sequences :b :length])])
                  (:runtimes batch-step))))))
+
+(deftest serving-control-applies-backpressure-cancel-timeout-and-metrics
+  (let [events (atom [])
+        storage {:write! (fn [& args] (swap! events conj [:write args]))
+                 :copy-block! (fn [& args] (swap! events conj [:copy args]))
+                 :attention (fn [& _] [1.0])}
+        runtime (paged/runtime (kv/pool 1 2) storage)
+        step-fn (fn [token [runtime*] request-id]
+                  (let [write (paged/append-kv! runtime* request-id token token)]
+                    {:logits [1.0] :runtimes [(:runtime write)]}))
+        engine0 (continuous/engine [runtime] step-fn nil 1 {:max-waiting 2})
+        one (continuous/submit engine0 :one [1] {:deadline-ms 1000})
+        two (continuous/submit (:engine one) :two [2] {:deadline-ms 50})
+        rejected (continuous/submit (:engine two) :three [3] {})
+        admitted (continuous/admit (:engine rejected))]
+    (is (:accepted? one))
+    (is (:accepted? two))
+    (is (false? (:accepted? rejected)))
+    (is (= :backpressure (:reason rejected)))
+    (is (= [:one] (:order admitted)))
+    (is (empty? (get-in admitted [:runtimes 0 :pool :free])))
+    (let [cancelled (continuous/cancel admitted :one)
+          replaced (continuous/admit (:engine cancelled))]
+      (is (:cancelled? cancelled))
+      (is (= [:two] (:order replaced)))
+      (is (= :cancelled (get-in replaced [:completed :one :reason])))
+      (let [expired (continuous/expire replaced 100)
+            snapshot (continuous/metrics expired)]
+        (is (empty? (:running expired)))
+        (is (= :timeout (get-in expired [:completed :two :reason])))
+        (is (= #{0} (set (get-in expired [:runtimes 0 :pool :free]))))
+        (is (= {:submitted 2 :admitted 2 :rejected 1 :completed 2
+                :cancelled 1 :timed-out 1 :prompt-tokens 2
+                :generated-tokens 0 :decode-batches 0 :decode-requests 0
+                :peak-running 1 :peak-waiting 2 :running 0 :waiting 0
+                :completed-retained 2 :free-blocks-per-layer [1]}
+               snapshot))))))

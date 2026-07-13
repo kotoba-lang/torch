@@ -224,8 +224,13 @@ deno run --allow-all target/deno-continuous-verify.cjs
 `tick-batched` and `tick-batched-async` classify EOS/length completions first,
 release their blocks, pause rows that cannot grow, and group every remaining
 runnable request into one Llama batch call in stable order. Ragged prefill is still
-request-local. Cancellation, timeouts, backpressure, metrics, and an HTTP
-compatibility surface remain.
+request-local.
+
+Serving lifecycle controls now include bounded waiting queues with explicit
+backpressure rejection, cancellation of queued or running requests, absolute
+deadlines, timeout eviction, immediate block release, and counter/gauge snapshots
+for submissions, admissions, rejections, completions, prompt/decode tokens,
+microbatches, active queues, peaks, and free blocks per layer.
 
 The lower execution API also provides `llama-lm-paged-batch-step`: QKV and FFN
 projections remain batch tensors while each layer resolves request-specific RoPE
@@ -243,6 +248,24 @@ deno run --allow-all target/deno-paged-batch-llama-verify.cjs
 The continuous Metal verifier configures both callbacks and proves that `[:a :b]`
 is selected automatically into one fused decode call before their blocks are
 released and reused to prefill request `:c`.
+
+`torch.ollama` translates `/api/generate` options and deadlines into continuous
+engine submissions and emits Ollama-shaped token/final payloads.
+`torch.ollama-http/handler` is a standard Fetch handler suitable for `Deno.serve`;
+it implements `GET /api/version`, `GET /api/tags`, and streaming NDJSON or
+non-streaming `POST /api/generate`, including JSON 400/404 errors. Its live
+Request/Response verifier checks headers, status codes, three NDJSON records, and
+the assembled non-stream response:
+
+```sh
+clojure -M:deno-ollama-http-verify
+deno run --allow-all target/deno-ollama-http-verify.cjs
+# version/tags, stream/non-stream generate, invalid request: passed
+```
+
+The HTTP handler currently receives an injected `generate!` service callback;
+wiring cancellation to client disconnects, an actual listening-process lifecycle,
+model load/unload, authentication, and production observability remain.
 
 A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
 blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding

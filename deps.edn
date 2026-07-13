@@ -76,6 +76,12 @@
         :main-opts ["-m" "cljs.main"
                     "-co" "{:optimizations :simple :target :nodejs :main torch.deno-paged-batch-llama-verify :output-to \"target/deno-paged-batch-llama-verify.cjs\"}"
                     "-c" "torch.deno-paged-batch-llama-verify"]}
+       :deno-ollama-http-verify
+       {:extra-paths ["test"]
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-ollama-http-verify :output-to \"target/deno-ollama-http-verify.cjs\"}"
+                    "-c" "torch.deno-ollama-http-verify"]}
        :deno-quantized-llama-benchmark
        {:extra-paths ["test"]
         :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
