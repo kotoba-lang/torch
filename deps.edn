@@ -5,11 +5,10 @@
  ;; (real execution is a host-injected IBackend port).
  :deps {io.github.kotoba-lang/dsl-core
         {:git/sha "9bedd2b9d05133a2d9b0656a55135f142ab11a36"}
-        ;; Development checkout includes differentiable NCHW convolution,
-        ;; GroupNorm, SiLU, and multi-head attention. Replace with its merged
-        ;; git SHA before publishing this branch.
+        ;; Includes differentiable NCHW convolution, GroupNorm, SiLU,
+        ;; multi-head attention, typed Metal tensors, and UNet autograd.
         io.github.kotoba-lang/num
-        {:local/root "../num"}}
+        {:git/sha "9eb57f0674c2e9f2b50367094810663f924f4d46"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner

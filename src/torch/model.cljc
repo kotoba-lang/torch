@@ -38,20 +38,18 @@
 (defn embedding  [num-emb dim]       {:embedding [num-emb dim]})
 (defn batchnorm  [features]          {:batchnorm [features]})
 (defn layernorm  [features]          {:layernorm [features]})
-(defn groupnorm  [num-groups channels] {:groupnorm [num-groups channels]})
-(defn dropout    ([] {:dropout [0.5]}) ([p] {:dropout [p]}))
-(defn flatten    [] {:flatten {}})
-(defn relu       [] {:relu {}})
-(defn silu       [] {:silu {}})
 (defn groupnorm
   "PyTorch-style GroupNorm(num-groups, num-channels, eps=1e-5)."
   ([num-groups num-channels] {:groupnorm [num-groups num-channels]})
   ([num-groups num-channels eps] {:groupnorm [num-groups num-channels eps]}))
+(defn dropout    ([] {:dropout [0.5]}) ([p] {:dropout [p]}))
+(defn flatten    [] {:flatten {}})
+(defn relu       [] {:relu {}})
+(defn silu       [] {:silu {}})
 (defn gelu       [] {:gelu {}})
 (defn sigmoid    [] {:sigmoid {}})
 (defn tanh       [] {:tanh {}})
 (defn softmax    [] {:softmax {}})
-(defn silu       [] {:silu {}})
 (defn attention
   "Parameter-free self-attention over `[sequence embedding]`. Zero-arg is
   single-head (unchanged `{:attention {}}` shape); `num-heads` selects
