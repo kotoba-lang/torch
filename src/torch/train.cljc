@@ -36,8 +36,13 @@
           (fail "parameterless layers require a nil weight entry"
                 {:index index :layer layer :weight weight}))))))
 
-(defn- track [state value parameters]
-  (-> state (assoc :value value) (update :parameters conj parameters)))
+(defn- track
+  ([state value parameters] (track state value parameters nil))
+  ([state value parameters runtime-values]
+   (-> state
+       (assoc :value value)
+       (update :parameters conj parameters)
+       (update :runtime-values conj runtime-values))))
 
 (defn- forward-layer [state [layer weight runtime-options]]
   (case (model/layer-type layer)
@@ -74,25 +79,40 @@
 
     :multihead-attention
     (let [[embed heads opts] (model/layer-args layer)
-          attention-options (merge opts runtime-options)
+          context-array (:context runtime-options)
+          attention-options (merge opts (dissoc runtime-options :context))
           input-value (:value state)
           input-shape (:shape (:data input-value))
           rank (count input-shape)
           [batch sequence] (if (= rank 3) (take 2 input-shape)
                                [1 (first input-shape)])
-          flat-input (if (= rank 3)
-                       (ag/reshape* input-value [(* batch sequence) embed])
-                       input-value)
-          restore (fn [value]
+          context-value (when context-array (ag/value context-array))
+          key-value-source (or context-value input-value)
+          source-layout
+          (fn [source]
+            (let [shape (:shape (:data source))
+                  source-rank (count shape)
+                  [source-batch source-sequence]
+                  (if (= source-rank 3) (take 2 shape) [1 (first shape)])]
+              {:rank source-rank :batch source-batch :sequence source-sequence
+               :flat (if (= source-rank 3)
+                       (ag/reshape* source [(* source-batch source-sequence) embed])
+                       source)}))
+          query-layout (source-layout input-value)
+          context-layout (source-layout key-value-source)
+          restore (fn [value {:keys [rank batch sequence]}]
                     (if (= rank 3)
                       (ag/reshape* value [batch sequence embed]) value))
           parameters (into {} (map (fn [[key array]] [key (ag/value array)]) weight))
-          project (fn [weight-key bias-key]
+          project (fn [layout weight-key bias-key]
                     (restore
                      (ag/add-bias*
-                      (ag/matmul* flat-input (get parameters weight-key))
-                      (get parameters bias-key))))
-          query (project :qw :qb) key (project :kw :kb) value (project :vw :vb)
+                      (ag/matmul* (:flat layout) (get parameters weight-key))
+                      (get parameters bias-key))
+                     layout))
+          query (project query-layout :qw :qb)
+          key (project context-layout :kw :kb)
+          value (project context-layout :vw :vb)
           attended (if (seq attention-options)
                      (ag/multi-head-attention* query key value heads
                                                attention-options)
@@ -102,17 +122,20 @@
                           attended)
           output (restore
                   (ag/add-bias* (ag/matmul* attended-flat (:ow parameters))
-                                (:ob parameters)))]
-      (track state output parameters))))
+                                (:ob parameters))
+                  query-layout)]
+      (track state output parameters
+             (when context-value {:context context-value})))))
 
 (defn- forward-graph [layers weights input layer-options]
   (let [input-value (ag/value input)
         state (reduce forward-layer
-                      {:value input-value :parameters []}
+                      {:value input-value :parameters [] :runtime-values []}
                       (map vector layers weights layer-options))]
     {:input input-value
      :prediction (:value state)
-     :parameters (:parameters state)}))
+     :parameters (:parameters state)
+     :runtime-values (:runtime-values state)}))
 
 (defn- parameter-gradients [parameters]
   (mapv (fn [layer-parameters]
@@ -120,6 +143,12 @@
             (into {} (map (fn [[key value]] [key @(:grad value)]))
                   layer-parameters)))
         parameters))
+
+(defn- runtime-gradients [runtime-values]
+  (mapv (fn [values]
+          (when values
+            (into {} (map (fn [[key value]] [key @(:grad value)])) values)))
+        runtime-values))
 
 (defn- scalar-readback [array]
   (let [values (arr/->vec array)]
@@ -137,7 +166,8 @@
   backends can keep forward activations and the complete backward pass on the
   device. Returns prediction, input gradient, and one parameter-gradient entry
   per normalized layer. Optional `:layer-options` is aligned with normalized
-  layers and carries runtime inputs such as attention key-padding masks."
+  layers and carries runtime inputs such as attention context/key-padding masks.
+  Gradients for runtime tensors are returned in `:layer-input-gradients`."
   ([model* weights input upstream-gradient]
    (prediction-and-gradients model* weights input upstream-gradient {}))
   ([model* weights input upstream-gradient {:keys [layer-options]}]
@@ -161,6 +191,7 @@
       (ag/backward! (:prediction graph) upstream-gradient tape)
       {:prediction (:data (:prediction graph))
        :input-gradient @(:grad (:input graph))
+       :layer-input-gradients (runtime-gradients (:runtime-values graph))
        :gradients (parameter-gradients (:parameters graph))}))))
 
 (defn loss-and-gradients
@@ -168,7 +199,8 @@
 
   Optional `:loss-scale` multiplies the backward seed while keeping the
   reported loss unchanged. `:layer-options` carries aligned runtime layer
-  inputs such as key-padding masks. This is the reference seam used by
+  inputs such as context and key-padding masks; their gradients are returned
+  in `:layer-input-gradients`. This is the reference seam used by
   GradScaler."
   ([model* weights input target]
    (loss-and-gradients model* weights input target {}))
@@ -205,6 +237,7 @@
       (ag/backward! (:loss result) (arr/from-vec (:backend input) [loss-scale] []) tape)
       {:loss (scalar-readback (:data (:loss result)))
        :prediction (:data (:prediction result))
+       :layer-input-gradients (runtime-gradients (:runtime-values result))
        :gradients (parameter-gradients (:parameters result))}))))
 
 (defn mixed-precision-adamw-step

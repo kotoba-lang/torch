@@ -135,3 +135,24 @@
     (is (thrown? #?(:clj Exception :cljs js/Error)
                  (train/prediction-and-gradients
                   model weights input (arr/from-vec backend [1.0] [1]))))))
+
+(deftest runtime-context-produces-cross-attention-gradient
+  (let [model (m/sequential (m/multihead-attention 4 2))
+        weights (nb/random-weights backend model 37)
+        input (arr/from-vec backend
+                            [0.2 -0.1 0.3 0.4, -0.2 0.1 0.5 -0.3] [2 4])
+        context (arr/from-vec backend
+                              [0.1 0.3 -0.2 0.4, 0.5 -0.1 0.2 0.0,
+                               -0.3 0.2 0.1 0.6] [3 4])
+        upstream (arr/from-vec backend
+                               [0.3 -0.2 0.5 0.1, -0.4 0.6 -0.1 0.2] [2 4])
+        result (train/prediction-and-gradients
+                model weights input upstream
+                {:layer-options [{:context context}]})
+        context-gradient (:context (first (:layer-input-gradients result)))]
+    (is (= [2 4] (:shape (:prediction result))))
+    (is (= [2 4] (:shape (:input-gradient result))))
+    (is (= [3 4] (:shape context-gradient)))
+    (is (some #(not (zero? %)) (arr/->vec context-gradient)))
+    (is (= #{:qw :qb :kw :kb :vw :vb :ow :ob}
+           (set (keys (first (:gradients result))))))))

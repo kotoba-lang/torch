@@ -73,10 +73,16 @@ including a `[batch sequence]` `:key-padding-mask` whose non-zero keys are ignor
 
 ```clojure
 (train/loss-and-gradients model weights input target
-  {:layer-options [{:key-padding-mask padding-mask}]})
+  {:layer-options [{:context encoder-hidden-states
+                    :key-padding-mask padding-mask}]})
 ```
 
-Cross-attention plumbing through the sequential model API remains future work.
+When `:context` is present, Q is projected from the current model value while K/V
+are projected from the separate context sequence, enabling UNet-style cross-attention
+with different query/key lengths. VJP and MSE results expose the context gradient at
+`[:layer-input-gradients layer-index :context]`. The inference-only `torch.core/run`
+backend still lacks runtime layer arguments; cross-attention currently enters through
+the training/VJP API.
 `:conv2d` executes full NCHW batches and
 supports scalar/pair kernels, stride, padding, dilation, groups, depthwise
 convolution, and bias. `torch.num-backend/random-weights` produces a
@@ -261,11 +267,12 @@ GEMMs, last-axis bias broadcasts, fused multi-head attention, transposes, bias
 reductions, MSE loss/VJP, and all eight parameter gradients stay in GPU buffers
 until final verification readback. The Apple M4 check covers explicit VJP plus
 ordinary MSE training, comparing prediction, input gradient, loss, and every
-projection weight/bias gradient against the CPU backend. It then performs eight
+projection weight/bias gradient plus the separate context gradient against the CPU
+backend. The fixture uses query length 3 and context length 2 with different padding
+masks per batch. It then performs eight
 public `sgd-step` iterations, checks the complete loss trajectory and all final
-weights against CPU, and confirms a two-batch causal model decreases loss from
-`0.11440` to `0.07745` while applying a different padding mask to each batch
-(29/29 checks):
+weights against CPU, and confirms loss decreases from `0.09691` to `0.06289`
+(31/31 checks):
 
 ```sh
 clojure -M:deno-metal-attention-verify

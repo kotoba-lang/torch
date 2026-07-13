@@ -21,11 +21,18 @@
 
 (def input-shape [2 3 4])
 
+(def context-values
+  [0.1 0.3 -0.2 0.4, 0.5 -0.1 0.2 0.0,
+   -0.3 0.2 0.1 0.6, 0.4 -0.2 0.5 0.1])
+
+(def context-shape [2 2 4])
+
 (def parameter-names [:qw :qb :kw :kb :vw :vb :ow :ob])
 
 (defn- execution-options [backend]
   {:layer-options
-   [{:key-padding-mask (arr/from-vec backend [0 1 0, 0 0 1] [2 3])}]})
+   [{:context (arr/from-vec backend context-values context-shape)
+     :key-padding-mask (arr/from-vec backend [0 1, 0 0] [2 2])}]})
 
 (defn- approx-vec? [expected actual tolerance]
   (and (= (count expected) (count actual))
@@ -62,7 +69,9 @@
 
 (defn- flatten-result [result]
   (merge {:prediction (:prediction result)
-          :input-gradient (:input-gradient result)}
+          :input-gradient (:input-gradient result)
+          :context-gradient
+          (:context (first (:layer-input-gradients result)))}
          (first (:gradients result))))
 
 (defn- prefix-keys [prefix entries]
@@ -73,8 +82,7 @@
   (if (instance? js/Promise value) value (js/Promise.resolve value)))
 
 (defn -main [& _]
-  (let [model* (model/sequential
-                (model/multihead-attention 4 2 {:causal? true}))
+  (let [model* (model/sequential (model/multihead-attention 4 2))
         cpu-backend (cpu/cpu-backend)
         expected-vjp (into {}
                             (map (fn [[label array]] [label (arr/->vec array)]))
@@ -88,7 +96,10 @@
                            (first (:weights cpu-training))))
         expected-mse
         (prefix-keys "mse-"
-                     (into {:prediction (arr/->vec (:prediction cpu-mse))}
+                     (into {:prediction (arr/->vec (:prediction cpu-mse))
+                            :context-gradient
+                            (arr/->vec
+                             (:context (first (:layer-input-gradients cpu-mse))))}
                            (map (fn [[label array]] [label (arr/->vec array)]))
                            (first (:gradients cpu-mse))))]
     (-> (gpu/request-device)
@@ -100,7 +111,10 @@
                  actual-training (run-training backend model* 8)
                  actual-mse
                  (prefix-keys "mse-"
-                              (into {:prediction (:prediction actual-mse-pass)}
+                              (into {:prediction (:prediction actual-mse-pass)
+                                     :context-gradient
+                                     (:context
+                                      (first (:layer-input-gradients actual-mse-pass)))}
                                     (first (:gradients actual-mse-pass))))
                  passed (atom 0)
                  check-array
@@ -148,7 +162,7 @@
                                     loss-check training-loss-check)))
                  (.then (fn [_]
                           (println (str "Metal learned MultiheadAttention training: "
-                                        @passed "/" (+ 5 (* 3 (count parameter-names)))
+                                        @passed "/" (+ 7 (* 3 (count parameter-names)))
                                         " passed"))))))))
         (.catch (fn [error]
                   (js/console.error (or (.-stack error) error))
