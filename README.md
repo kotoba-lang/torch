@@ -142,6 +142,19 @@ tokenization, prompt prefill, cached token steps, sampling, EOS termination, and
 decoding for synchronous runtimes; GPU callers use the same sampling policy after
 their asynchronous logits readback.
 
+### GGUF model loading
+
+`torch.gguf/load-file` parses GGUF v2/v3 with long file offsets, typed/nested
+metadata arrays, `general.alignment`, and bounds-checked positional reads rather
+than loading the entire model file. `read-tensor` decodes F32, F16, and Q8_0;
+`llama-model`, `gguf-tokenizer`, and `load-llama-weights` construct the model,
+tokenizer, transpose GGUF linear matrices, upload weights, and handle tied output
+embeddings.
+
+Q8_0 currently dequantizes to f32 during loading. Q4_K and other K-quants do not
+yet execute directly, and Llama files using grouped-query attention
+(`head_count_kv < head_count`) are rejected explicitly rather than misinterpreted.
+
 When `:context` is present, Q is projected from the current model value while K/V
 are projected from the separate context sequence, enabling UNet-style cross-attention
 with different query/key lengths. VJP and MSE results expose the context gradient at
