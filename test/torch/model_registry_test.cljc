@@ -46,8 +46,8 @@
     (is (= ["a" "b"] (:evicted c)))
     (is (= #{"c"} (set (keys (get-in c [:registry :loaded])))))
     (is (= 70 (get-in c [:registry :resident-bytes])))
-    (is (= [[:load "a"] [:load "b"] [:unload "a"]
-            [:unload "b"] [:load "c"]]
+    (is (= [[:load "a"] [:load "b"] [:load "c"]
+            [:unload "a"] [:unload "b"]]
            @events))))
 
 (deftest active-models-are-never-evicted-and-explicit-unload-is-safe
@@ -57,12 +57,15 @@
     (is (thrown-with-msg?
          #?(:clj Exception :cljs js/Error) #"active models"
          (registry/acquire (:registry a) "c" 2)))
+    (is (= #{"a"} (set (keys (get-in a [:registry :loaded]))))
+        "failed admission leaves the prior immutable ownership state valid")
     (is (thrown-with-msg?
          #?(:clj Exception :cljs js/Error) #"active model"
          (registry/unload (:registry a) "a")))
     (let [forced (registry/unload (:registry a) "a" true)]
       (is (empty? (:loaded forced)))
-      (is (= [[:load "a"] [:unload "a"]] @events)))))
+      (is (= [[:load "a"] [:load "c"] [:unload "c"] [:unload "a"]]
+             @events)))))
 
 (deftest catalog-tags-report-residency
   (let [events (atom [])

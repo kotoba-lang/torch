@@ -1,6 +1,8 @@
 (ns torch.deno-ollama-http-verify
   (:require [torch.ollama :as ollama]
-            [torch.ollama-http :as http]))
+            [torch.ollama-http :as http]
+            [torch.model-registry :as registry]
+            [torch.registry-runtime :as registry-runtime]))
 
 (defn- body-json [response]
   (.json response))
@@ -26,9 +28,21 @@
                   :cancel (fn [_]
                             (doseq [timer @timers] (js/clearTimeout timer)))})))
         live-cancellations (atom [])
+        model-events (atom [])
+        model-runtime
+        (registry-runtime/runtime
+         (-> (registry/registry
+              2048
+              (fn [descriptor]
+                (swap! model-events conj [:load (:name descriptor)])
+                {:name (:name descriptor)})
+              (fn [resource]
+                (swap! model-events conj [:unload (:name resource)])))
+             (registry/register
+              {:name "tiny:latest" :size 1234 :digest "sha256:test"})))
+        _ (registry-runtime/acquire! model-runtime "tiny:latest" 0)
         service {:version "0.12.0"
-                 :models (fn [] [{:name "tiny:latest" :model "tiny:latest"
-                                  :size 1234 :digest "sha256:test"}])
+                 :models #(registry-runtime/tags model-runtime)
                  :generate! (fn [_ _] (js/Promise.resolve chunks))
                  :generate-stream! (fn [_ _]
                                      (js/Promise.resolve (stream-source)))
@@ -118,6 +132,9 @@
                           stream-lines (-> (aget bodies 2) .trim (.split "\n"))
                           one-body (aget bodies 3)
                           bad-body (aget bodies 4)
+                          _ (registry-runtime/release!
+                             model-runtime "tiny:latest" 1 0)
+                          _ (registry-runtime/expire! model-runtime 1)
                           ok? (and (= 200 (.-status version))
                                    (= "0.12.0" (.-version version-body))
                                    (= 1 (.-length (.-models tags-body)))
@@ -133,6 +150,9 @@
                                    (< (.-elapsed first-byte) 100)
                                    (pos? (.-bytes first-byte))
                                    (= 1 (count @live-cancellations))
+                                   (= [[:load "tiny:latest"]
+                                       [:unload "tiny:latest"]]
+                                      @model-events)
                                    (= [["abort-me" :client-disconnect]]
                                       @cancellations))]
                       (println "Ollama version/tags endpoints:"

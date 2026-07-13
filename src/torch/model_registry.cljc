@@ -41,16 +41,19 @@
        (sort-by (fn [[name entry]] [(:last-used-ms entry) name]))))
 
 (defn- make-room [registry* bytes]
-  (loop [registry* registry* candidates (evictable registry*) evicted []]
-    (if (<= (+ (:resident-bytes registry*) bytes)
+  (loop [resident (:resident-bytes registry*)
+         candidates (evictable registry*) evicted []]
+    (if (<= (+ resident bytes)
             (:max-resident-bytes registry*))
-      {:registry registry* :evicted evicted}
-      (if-let [[name _] (first candidates)]
-        (recur (unload-entry registry* name :evicted)
+      {:registry (reduce #(unload-entry %1 %2 :evicted)
+                         registry* evicted)
+       :evicted evicted}
+      (if-let [[name entry] (first candidates)]
+        (recur (- resident (:size entry))
                (next candidates) (conj evicted name))
         (throw (ex-info "model residency budget exhausted by active models"
                         {:reason :resident-budget
-                         :requested bytes :resident (:resident-bytes registry*)
+                         :requested bytes :resident resident
                          :budget (:max-resident-bytes registry*)}))))))
 
 (defn acquire
@@ -71,9 +74,13 @@
         (throw (ex-info "model is larger than the residency budget"
                         {:model name :size size
                          :budget (:max-resident-bytes registry*)})))
-      (let [{:keys [registry evicted]} (make-room registry* size)]
+      (let [resource
+            (try ((:load-fn registry*) descriptor)
+                 (catch #?(:clj Exception :cljs :default) error
+                   (throw (ex-info "model load failed"
+                                   {:model name :reason :load-failed} error))))]
         (try
-          (let [resource ((:load-fn registry) descriptor)]
+          (let [{:keys [registry evicted]} (make-room registry* size)]
             {:registry (-> registry
                            (assoc-in [:loaded name]
                                      {:resource resource :size size :active 1
@@ -83,9 +90,11 @@
                            (update-in [:metrics :acquires] inc))
              :resource resource :loaded? true :evicted evicted})
           (catch #?(:clj Exception :cljs :default) error
-            (throw (ex-info "model load failed"
-                            {:model name :evicted evicted :reason :load-failed}
-                            error))))))))
+            ;; Loading is the only effect before the immutable registry commit.
+            ;; If active models prevent admission, retire the candidate and keep
+            ;; the caller's old state/resource ownership valid.
+            ((:unload-fn registry*) resource)
+            (throw error)))))))
 
 (defn release
   "Release one active reference. `keep-alive-ms` is >=0 or -1 for indefinite."

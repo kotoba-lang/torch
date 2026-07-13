@@ -288,8 +288,25 @@ forced administrative unload, live catalog/tag snapshots, and residency/load/
 eviction metrics are included. The unload callback is where GGUF weights, paged
 K/V pools, and device resources are released. `/api/tags` accepts a snapshot
 function, so loaded/active registry state is visible without rebuilding the HTTP
-handler. A production host still needs to serialize concurrent registry mutations
-and connect its GGUF loader callback to model-specific continuous engines.
+handler. A production host still needs to connect its GGUF loader callback to
+model-specific continuous engines.
+
+`torch.registry-runtime` supplies that serialization without `swap!` retries:
+JVM mutations run under one lock, while CLJS mutations execute without an event-
+loop yield. This matters because loader/unloader callbacks have GPU side effects
+and must never be repeated by a failed CAS. A 24-thread acquire/release test loads
+and unloads exactly once, and the Deno HTTP verifier reads dynamic tags from the
+same runtime before expiry unloads the resource. Failed budget admission loads and
+retires only the new candidate; existing LRU resources are planned first and are
+not physically evicted unless the complete capacity plan succeeds.
+
+`torch.gguf-resource` is the concrete JVM registry factory: a filesystem
+descriptor uses the real byte size, then `load-file`, `llama-model`,
+`gguf-tokenizer`, and `load-llama-weights` construct the resource. Optional
+`engine-fn` builds its continuous serving engine, and unload calls
+`release-weights!`, which deduplicates tied/aliased dense and packed handles.
+Factory composition and cleanup are tested; a public full GGUF checkpoint is not
+downloaded as part of the default test suite.
 
 A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
 blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding
