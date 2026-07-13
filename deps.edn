@@ -14,6 +14,7 @@
  :aliases
  {:public-gguf-verify
        {:extra-paths ["test"]
+        :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
         :main-opts ["-m" "torch.public-gguf-verify"]}
   :test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner

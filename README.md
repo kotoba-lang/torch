@@ -308,7 +308,8 @@ descriptor uses the real byte size, then `load-file`, `llama-model`,
 Factory composition and cleanup are tested; a public full GGUF checkpoint is not
 downloaded as part of the default test suite. An opt-in verifier now exercises a
 real public checkpoint without mocks: it parses GGUF v3, decodes legacy Q5_0
-blocks (including tensors whose 32-value blocks span narrow logical rows), builds
+blocks (including tensors whose 32-value blocks span narrow logical rows), keeps
+all 13 Q5_0 weights packed through matrix multiplication and embedding, builds
 the Llama graph and SentencePiece tokenizer, runs cached greedy decode, validates
 finite logits/token bounds, and releases the KV cache and all weights.
 
@@ -318,8 +319,8 @@ curl -L --fail -o /tmp/tiny-random-llama.Q4_K_M.gguf \
 shasum -a 256 /tmp/tiny-random-llama.Q4_K_M.gguf
 # f06746ef9696d552d3746516558d5e9f338e581fd969158a90824e24f244169c
 clojure -M:public-gguf-verify /tmp/tiny-random-llama.Q4_K_M.gguf
-# Apple M4 JVM reference run: 1,627,808 bytes, 21 tensors, load 8.66 s,
-# four cached decode tokens 0.80 s; status :passed.
+# Apple M4 JVM reference run: 1,627,808 bytes, 21 tensors, load 6.39 s,
+# four cached decode tokens 0.40 s; 13 packed Q5_0 weights; status :passed.
 ```
 
 This checkpoint has random weights and proves compatibility/lifecycle, not text

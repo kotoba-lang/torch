@@ -287,7 +287,7 @@
   (let [tensor (get-in gguf [:tensor-map name])]
     (when-not tensor
       (throw (ex-info "GGUF tensor not found" {:name name})))
-    (when-not (#{:q4-k :q6-k :q8-0} (:type tensor))
+    (when-not (#{:q5-0 :q4-k :q6-k :q8-0} (:type tensor))
       (throw (ex-info "GGUF tensor is not packed quantized data"
                       {:name name :type (:type tensor)})))
     (assoc tensor :bytes
@@ -355,11 +355,21 @@
 (defn- upload-vector [gguf backend name]
   (let [tensor (get-in gguf [:tensor-map name])]
     (if (and (= 2 (count (:shape tensor)))
-             (#{:q4-k :q6-k :q8-0} (:type tensor))
-             (zero? (mod (last (:shape tensor))
-                         (if (= :q8-0 (:type tensor)) 32 256))))
+             (#{:q5-0 :q4-k :q6-k :q8-0} (:type tensor))
+             (or (= :q5-0 (:type tensor))
+                 (zero? (mod (last (:shape tensor))
+                             (if (= :q8-0 (:type tensor)) 32 256)))))
       (let [{:keys [shape bytes]} (read-packed-tensor gguf name)]
-        (quantized/table backend bytes shape (:type tensor)))
+        (try
+          (quantized/table backend bytes shape (:type tensor))
+          (catch clojure.lang.ExceptionInfo error
+            ;; Allows torch to remain usable with an older pinned num while a
+            ;; newly added packed format rolls forward; only Q5_0 has a dense
+            ;; compatibility path here.
+            (if (= :q5-0 (:type tensor))
+              (let [{:keys [shape values]} (read-tensor gguf name)]
+                (arr/from-vec backend values shape))
+              (throw error)))))
       (let [{:keys [shape values]} (read-tensor gguf name)]
         (arr/from-vec backend values shape)))))
 
@@ -367,11 +377,24 @@
   "GGUF linear matrices are `[out in]`; torch.num-backend uses `[in out]`."
   [gguf backend name]
   (let [tensor (get-in gguf [:tensor-map name])]
-    (if (and (#{:q4-k :q6-k :q8-0} (:type tensor))
-             (zero? (mod (last (:shape tensor))
-                         (if (= :q8-0 (:type tensor)) 32 256))))
+    (if (and (#{:q5-0 :q4-k :q6-k :q8-0} (:type tensor))
+             (or (= :q5-0 (:type tensor))
+                 (zero? (mod (last (:shape tensor))
+                             (if (= :q8-0 (:type tensor)) 32 256)))))
       (let [{:keys [shape bytes]} (read-packed-tensor gguf name)]
-        (quantized/matrix backend bytes shape (:type tensor)))
+        (try
+          (quantized/matrix backend bytes shape (:type tensor))
+          (catch clojure.lang.ExceptionInfo error
+            (if (= :q5-0 (:type tensor))
+              (let [{[out in] :shape values :values} (read-tensor gguf name)
+                    transposed (mapv (fn [i]
+                                       (let [input-index (quot i out)
+                                             output-index (mod i out)]
+                                         (nth values (+ (* output-index in)
+                                                        input-index))))
+                                     (range (* in out)))]
+                (arr/from-vec backend transposed [in out]))
+              (throw error)))))
       (let [{[out in] :shape values :values} (read-tensor gguf name)
             transposed (mapv (fn [i]
                                (let [input-index (quot i out) output-index (mod i out)]
@@ -381,7 +404,8 @@
 
 (defn load-llama-weights
   "Decode and upload standard Llama GGUF tensors into the weights vector used
-  by `torch.num-backend`. Quantized tensors are currently dequantized to f32."
+  by `torch.num-backend`. Supported row-addressable and cross-row Q5_0 tensors
+  remain packed; incompatible legacy layouts fall back to decoded f32."
   [gguf backend]
   (let [{:keys [block-count]} (llama-config gguf)
         embedding (upload-vector gguf backend "token_embd.weight")

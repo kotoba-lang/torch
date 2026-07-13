@@ -2,6 +2,7 @@
   "Opt-in, network-independent verification against a downloaded public GGUF."
   (:require [num.array :as arr]
             [num.cpu :as cpu]
+            [num.quantized :as quantized]
             [torch.generate :as generate]
             [torch.gguf-resource :as resource]
             [torch.num-backend :as nb]
@@ -20,10 +21,17 @@
         load-ms (elapsed-ms load-start)
         prompt "Hello"
         prompt-ids (tokenizer/encode (:tokenizer loaded) prompt)
+        packed-q5 (filter #(and (or (quantized/matrix? %)
+                                    (quantized/table? %))
+                                (= :q5-0 (:quant-type %)))
+                          (mapcat vals (:weights loaded)))
         caches* (atom (nb/init-llama-caches backend (:model loaded) 32))
         inference-start (System/nanoTime)]
     (try
-      (let [prefill
+      (let [_ (when-not (= 13 (count packed-q5))
+                (throw (ex-info "public GGUF Q5_0 weights were expanded"
+                                {:packed-q5 (count packed-q5)})))
+            prefill
             (reduce (fn [_ token-id]
                       (let [step (nb/llama-lm-step
                                   (:model loaded) (:weights loaded)
@@ -52,6 +60,7 @@
                                          ["general.architecture" "general.name"])
               :file-bytes (get-in loaded [:descriptor :size])
               :tensor-types (frequencies (map :type (get-in loaded [:gguf :tensors])))
+              :packed-q5-weights (count packed-q5)
               :load-ms load-ms
               :inference-ms (elapsed-ms inference-start)
               :prompt-ids prompt-ids
