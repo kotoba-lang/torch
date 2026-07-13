@@ -277,7 +277,19 @@ once, while TCP reader cancellation propagates to `Request.signal` and `cancel!`
 The live test emits chunks at 0/60/120 ms, proves the first bytes arrive before
 100 ms, cancels the reader, and confirms producer timers and generation are
 cancelled. The HTTP layer still receives injected generation callbacks; model
-load/unload, authentication, and production observability remain.
+loading can be supplied through the registry below; authentication and production
+observability remain.
+
+`torch.model-registry` bounds loaded resources by byte budget. Catalog models are
+loaded lazily, acquire/release references prevent active eviction, Ollama
+`keep_alive` values (`5m`, seconds, `0`, or `-1`) set expiry, and inactive models
+are evicted in deterministic LRU order until a new model fits. Explicit unload,
+forced administrative unload, live catalog/tag snapshots, and residency/load/
+eviction metrics are included. The unload callback is where GGUF weights, paged
+K/V pools, and device resources are released. `/api/tags` accepts a snapshot
+function, so loaded/active registry state is visible without rebuilding the HTTP
+handler. A production host still needs to serialize concurrent registry mutations
+and connect its GGUF loader callback to model-specific continuous engines.
 
 A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
 blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding

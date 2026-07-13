@@ -1,0 +1,74 @@
+(ns torch.model-registry-test
+  (:require [clojure.test :refer [deftest is]]
+            [torch.model-registry :as registry]))
+
+(defn- fixture [budget events]
+  (-> (registry/registry
+       budget
+       (fn [descriptor]
+         (let [resource {:handle (:name descriptor)}]
+           (swap! events conj [:load (:name descriptor)])
+           resource))
+       (fn [resource] (swap! events conj [:unload (:handle resource)])))
+      (registry/register {:name "a" :size 60 :digest "sha:a"})
+      (registry/register {:name "b" :size 40 :digest "sha:b"})
+      (registry/register {:name "c" :size 70 :digest "sha:c"})))
+
+(deftest lazy-load-refcount-keep-alive-and-expiry
+  (let [events (atom [])
+        r0 (fixture 100 events)
+        a1 (registry/acquire r0 "a" 10)
+        a2 (registry/acquire (:registry a1) "a" 11)
+        released1 (registry/release (:registry a2) "a" 20 100)
+        released2 (registry/release released1 "a" 21 100)
+        before (registry/expire released2 120)
+        after (registry/expire before 121)]
+    (is (:loaded? a1))
+    (is (false? (:loaded? a2)))
+    (is (identical? (:resource a1) (:resource a2)))
+    (is (= 2 (get-in (:registry a2) [:loaded "a" :active])))
+    (is (contains? (:loaded before) "a"))
+    (is (empty? (:loaded after)))
+    (is (= [[:load "a"] [:unload "a"]] @events))
+    (is (= {:loads 1 :unloads 1 :evictions 0 :acquires 2 :releases 2
+            :resident-bytes 0 :budget-bytes 100 :loaded-models 0
+            :catalog-models 3}
+           (registry/stats after)))))
+
+(deftest lru-eviction-frees-enough-inactive-models
+  (let [events (atom [])
+        r0 (fixture 100 events)
+        a (registry/acquire r0 "a" 1)
+        r1 (registry/release (:registry a) "a" 2 -1)
+        b (registry/acquire r1 "b" 3)
+        r2 (registry/release (:registry b) "b" 4 -1)
+        c (registry/acquire r2 "c" 5)]
+    (is (= ["a" "b"] (:evicted c)))
+    (is (= #{"c"} (set (keys (get-in c [:registry :loaded])))))
+    (is (= 70 (get-in c [:registry :resident-bytes])))
+    (is (= [[:load "a"] [:load "b"] [:unload "a"]
+            [:unload "b"] [:load "c"]]
+           @events))))
+
+(deftest active-models-are-never-evicted-and-explicit-unload-is-safe
+  (let [events (atom [])
+        r0 (fixture 100 events)
+        a (registry/acquire r0 "a" 1)]
+    (is (thrown-with-msg?
+         #?(:clj Exception :cljs js/Error) #"active models"
+         (registry/acquire (:registry a) "c" 2)))
+    (is (thrown-with-msg?
+         #?(:clj Exception :cljs js/Error) #"active model"
+         (registry/unload (:registry a) "a")))
+    (let [forced (registry/unload (:registry a) "a" true)]
+      (is (empty? (:loaded forced)))
+      (is (= [[:load "a"] [:unload "a"]] @events)))))
+
+(deftest catalog-tags-report-residency
+  (let [events (atom [])
+        r0 (fixture 100 events)
+        a (registry/acquire r0 "a" 1)
+        tags (registry/tags (:registry a))]
+    (is (= ["a" "b" "c"] (mapv :name tags)))
+    (is (= [true false false] (mapv :loaded tags)))
+    (is (= [1 0 0] (mapv :active tags)))))

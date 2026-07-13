@@ -27,8 +27,8 @@
                             (doseq [timer @timers] (js/clearTimeout timer)))})))
         live-cancellations (atom [])
         service {:version "0.12.0"
-                 :models [{:name "tiny:latest" :model "tiny:latest"
-                           :size 1234 :digest "sha256:test"}]
+                 :models (fn [] [{:name "tiny:latest" :model "tiny:latest"
+                                  :size 1234 :digest "sha256:test"}])
                  :generate! (fn [_ _] (js/Promise.resolve chunks))
                  :generate-stream! (fn [_ _]
                                      (js/Promise.resolve (stream-source)))

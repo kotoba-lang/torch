@@ -3,12 +3,40 @@
   (:require [torch.continuous :as continuous]
             [torch.tokenizer :as tokenizer]))
 
+(defn- parse-integer [text]
+  #?(:clj (Long/parseLong text)
+     :cljs (js/parseInt text 10)))
+
+(defn parse-keep-alive
+  "Parse Ollama keep_alive into milliseconds. Numeric values are seconds;
+  strings accept `ms`, `s`, `m`, or `h`; -1 means indefinite residency."
+  [value]
+  (cond
+    (nil? value) 300000
+    (number? value)
+    (let [value (long value)]
+      (if (< value -1)
+        (throw (ex-info "invalid Ollama keep_alive" {:keep-alive value :status 400}))
+        (if (= -1 value) -1 (* 1000 value))))
+    (string? value)
+    (if-let [[_ amount unit] (re-matches #"^(-?[0-9]+)(ms|s|m|h)?$" value)]
+      (let [amount (parse-integer amount)
+            multiplier (case unit "ms" 1 "s" 1000 "m" 60000 "h" 3600000
+                             1000)]
+        (if (< amount -1)
+          (throw (ex-info "invalid Ollama keep_alive"
+                          {:keep-alive value :status 400}))
+          (if (= -1 amount) -1 (* amount multiplier))))
+      (throw (ex-info "invalid Ollama keep_alive" {:keep-alive value :status 400})))
+    :else (throw (ex-info "invalid Ollama keep_alive"
+                          {:keep-alive value :status 400}))))
+
 (defn normalize-generate-request
   "Validate an Ollama generate body and translate options to torch sampling.
   Durations/deadlines are milliseconds at this portable boundary; an HTTP host
   is responsible for JSON and Ollama's nanosecond duration fields."
   [body]
-  (let [{:keys [model prompt stream options timeout_ms]} body
+  (let [{:keys [model prompt stream options timeout_ms keep_alive]} body
         options (or options {})]
     (when-not (and (string? model) (seq model) (string? prompt)
                    (or (nil? stream) (boolean? stream)) (map? options))
@@ -22,7 +50,8 @@
               :repetition-penalty (double (or (:repeat_penalty options) 1.1))}
        (:top_k options) (assoc :top-k (long (:top_k options)))
        (:seed options) (assoc :seed (long (:seed options))))
-     :timeout-ms (when timeout_ms (long timeout_ms))}))
+     :timeout-ms (when timeout_ms (long timeout_ms))
+     :keep-alive-ms (parse-keep-alive keep_alive)}))
 
 (defn submit-generate
   "Tokenize and submit an Ollama request to a continuous engine."

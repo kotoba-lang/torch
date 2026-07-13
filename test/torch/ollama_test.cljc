@@ -57,3 +57,15 @@
        #?(:clj Exception :cljs js/Error) #"invalid Ollama"
        (ollama/normalize-generate-request {:model "" :prompt 1})))
   (is (= {:error "queue full"} (ollama/error-body "queue full"))))
+
+(deftest keep-alive-supports-ollama-duration-forms
+  (is (= 300000 (ollama/parse-keep-alive nil)))
+  (is (= 5000 (ollama/parse-keep-alive 5)))
+  (is (= -1 (ollama/parse-keep-alive -1)))
+  (is (= 250 (ollama/parse-keep-alive "250ms")))
+  (is (= 300000 (ollama/parse-keep-alive "5m")))
+  (is (= 7200000 (ollama/parse-keep-alive "2h")))
+  (is (thrown? #?(:clj Exception :cljs js/Error)
+               (ollama/parse-keep-alive "forever")))
+  (is (thrown? #?(:clj Exception :cljs js/Error)
+               (ollama/parse-keep-alive -2))))

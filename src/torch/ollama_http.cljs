@@ -66,7 +66,8 @@
         (js/Promise.resolve (json-response 200 {:version version}))
 
         (and (= method "GET") (= path "/api/tags"))
-        (js/Promise.resolve (json-response 200 {:models models}))
+        (js/Promise.resolve
+         (json-response 200 {:models (if (fn? models) (models) models)}))
 
         (and (= method "POST") (= path "/api/generate"))
         (let [request-id (request-id-fn)

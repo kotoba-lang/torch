@@ -1,0 +1,146 @@
+(ns torch.model-registry
+  "Bounded lazy model residency with refcounts, keep-alive, and LRU eviction.")
+
+(defn registry
+  "Create a registry. `load-fn` receives a catalog descriptor and returns the
+  runtime resource; `unload-fn` releases that resource."
+  [max-resident-bytes load-fn unload-fn]
+  (when-not (and (pos-int? max-resident-bytes)
+                 (fn? load-fn) (fn? unload-fn))
+    (throw (ex-info "model registry requires positive budget and lifecycle callbacks"
+                    {:max-resident-bytes max-resident-bytes})))
+  {:max-resident-bytes max-resident-bytes :resident-bytes 0
+   :load-fn load-fn :unload-fn unload-fn
+   :catalog {} :loaded {}
+   :metrics {:loads 0 :unloads 0 :evictions 0 :acquires 0
+             :releases 0}})
+
+(defn register
+  "Register/replace an unloaded model descriptor. Requires `:name` and positive
+  `:size` bytes. A loaded descriptor cannot be replaced."
+  [registry* {:keys [name size] :as descriptor}]
+  (when-not (and (string? name) (seq name) (pos-int? size))
+    (throw (ex-info "model descriptor requires name and positive size"
+                    {:descriptor descriptor})))
+  (when (contains? (:loaded registry*) name)
+    (throw (ex-info "cannot replace a loaded model descriptor" {:model name})))
+  (assoc-in registry* [:catalog name] descriptor))
+
+(defn- unload-entry [registry* name reason]
+  (let [{:keys [resource size]} (get-in registry* [:loaded name])]
+    ((:unload-fn registry*) resource)
+    (cond-> (-> registry*
+                (update :loaded dissoc name)
+                (update :resident-bytes - size)
+                (update-in [:metrics :unloads] inc))
+      (= reason :evicted) (update-in [:metrics :evictions] inc))))
+
+(defn- evictable [registry*]
+  (->> (:loaded registry*)
+       (keep (fn [[name entry]] (when (zero? (:active entry)) [name entry])))
+       (sort-by (fn [[name entry]] [(:last-used-ms entry) name]))))
+
+(defn- make-room [registry* bytes]
+  (loop [registry* registry* candidates (evictable registry*) evicted []]
+    (if (<= (+ (:resident-bytes registry*) bytes)
+            (:max-resident-bytes registry*))
+      {:registry registry* :evicted evicted}
+      (if-let [[name _] (first candidates)]
+        (recur (unload-entry registry* name :evicted)
+               (next candidates) (conj evicted name))
+        (throw (ex-info "model residency budget exhausted by active models"
+                        {:reason :resident-budget
+                         :requested bytes :resident (:resident-bytes registry*)
+                         :budget (:max-resident-bytes registry*)}))))))
+
+(defn acquire
+  "Acquire one active reference, lazy-loading and LRU-evicting inactive models.
+  Returns `{:registry :resource :loaded? :evicted}`."
+  [registry* name now-ms]
+  (if-let [entry (get-in registry* [:loaded name])]
+    {:registry (-> registry*
+                   (update-in [:loaded name :active] inc)
+                   (assoc-in [:loaded name :last-used-ms] now-ms)
+                   (assoc-in [:loaded name :expires-at-ms] nil)
+                   (update-in [:metrics :acquires] inc))
+     :resource (:resource entry) :loaded? false :evicted []}
+    (let [{:keys [size] :as descriptor} (get-in registry* [:catalog name])]
+      (when-not descriptor
+        (throw (ex-info "unknown model" {:model name :reason :unknown-model})))
+      (when (> size (:max-resident-bytes registry*))
+        (throw (ex-info "model is larger than the residency budget"
+                        {:model name :size size
+                         :budget (:max-resident-bytes registry*)})))
+      (let [{:keys [registry evicted]} (make-room registry* size)]
+        (try
+          (let [resource ((:load-fn registry) descriptor)]
+            {:registry (-> registry
+                           (assoc-in [:loaded name]
+                                     {:resource resource :size size :active 1
+                                      :last-used-ms now-ms :expires-at-ms nil})
+                           (update :resident-bytes + size)
+                           (update-in [:metrics :loads] inc)
+                           (update-in [:metrics :acquires] inc))
+             :resource resource :loaded? true :evicted evicted})
+          (catch #?(:clj Exception :cljs :default) error
+            (throw (ex-info "model load failed"
+                            {:model name :evicted evicted :reason :load-failed}
+                            error))))))))
+
+(defn release
+  "Release one active reference. `keep-alive-ms` is >=0 or -1 for indefinite."
+  [registry* name now-ms keep-alive-ms]
+  (let [{:keys [active]} (get-in registry* [:loaded name])]
+    (when-not (and active (pos? active) (integer? keep-alive-ms)
+                   (or (= -1 keep-alive-ms) (not (neg? keep-alive-ms))))
+      (throw (ex-info "invalid model release"
+                      {:model name :active active :keep-alive-ms keep-alive-ms})))
+    (let [active' (dec active)]
+      (-> registry*
+          (assoc-in [:loaded name :active] active')
+          (assoc-in [:loaded name :last-used-ms] now-ms)
+          (assoc-in [:loaded name :expires-at-ms]
+                    (when (and (zero? active') (not= -1 keep-alive-ms))
+                      (+ now-ms keep-alive-ms)))
+          (update-in [:metrics :releases] inc)))))
+
+(defn expire
+  "Unload inactive models whose keep-alive deadline has elapsed."
+  [registry* now-ms]
+  (reduce (fn [state name] (unload-entry state name :expired))
+          registry*
+          (->> (:loaded registry*)
+               (keep (fn [[name {:keys [active expires-at-ms]}]]
+                       (when (and (zero? active) expires-at-ms
+                                  (<= expires-at-ms now-ms)) name)))
+               sort)))
+
+(defn unload
+  "Explicitly unload an inactive model. With `force?`, active references are
+  invalidated too; callers must cancel their requests first."
+  ([registry* name] (unload registry* name false))
+  ([registry* name force?]
+   (if-let [{:keys [active]} (get-in registry* [:loaded name])]
+     (do
+       (when (and (pos? active) (not force?))
+         (throw (ex-info "cannot unload an active model"
+                         {:model name :active active})))
+       (unload-entry registry* name :explicit))
+     registry*)))
+
+(defn tags
+  "Ollama-style catalog rows with loaded residency metadata."
+  [registry*]
+  (mapv (fn [[name descriptor]]
+          (let [loaded (get-in registry* [:loaded name])]
+            (merge descriptor
+                   {:name name :model name :loaded (boolean loaded)
+                    :active (or (:active loaded) 0)})))
+        (sort-by key (:catalog registry*))))
+
+(defn stats [registry*]
+  (assoc (:metrics registry*)
+         :resident-bytes (:resident-bytes registry*)
+         :budget-bytes (:max-resident-bytes registry*)
+         :loaded-models (count (:loaded registry*))
+         :catalog-models (count (:catalog registry*))))
