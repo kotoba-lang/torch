@@ -9,7 +9,7 @@
             [torch.optim :as optim]))
 
 (def supported-layers
-  #{:linear :conv2d :groupnorm :flatten :relu :silu :softmax :attention
+  #{:linear :conv2d :groupnorm :flatten :relu :silu :sigmoid :tanh :softmax :attention
     :multihead-attention})
 
 (def parameter-keys
@@ -73,6 +73,8 @@
 
     :relu (track state (ag/relu* (:value state)) nil)
     :silu (track state (ag/silu* (:value state)) nil)
+    :sigmoid (track state (ag/sigmoid* (:value state)) nil)
+    :tanh (track state (ag/tanh* (:value state)) nil)
     :softmax (track state (ag/softmax* (:value state)) nil)
     :flatten
     (track state
@@ -220,9 +222,9 @@
     (fail "loss-scale must be a positive number" {:loss-scale loss-scale}))
   (let [layers (model/execution-layers model*)
         _ (when (and autocast-dtype
-                     (seq (remove #{:conv2d :groupnorm :flatten :silu :relu}
+                     (seq (remove #{:conv2d :groupnorm :flatten :silu :relu :sigmoid :tanh}
                                   (map model/layer-type layers))))
-            (fail "training autocast supports conv2d/groupnorm/flatten/silu/relu only"
+            (fail "training autocast supports conv2d/groupnorm/flatten/silu/relu/sigmoid/tanh only"
                   {:dtype autocast-dtype}))
         cast-array #(if autocast-dtype (arr/cast % autocast-dtype) %)
         weights (if autocast-dtype
