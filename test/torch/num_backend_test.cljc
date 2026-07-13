@@ -176,7 +176,7 @@
 (deftest unsupported-layer-throws-clearly
   (testing "a layer type outside this backend's documented scope throws,
             not silently produces wrong numbers"
-    (let [model (m/sequential (m/layer :gelu))]
+    (let [model (m/sequential (m/maxpool2d 2))]
       (is (thrown? #?(:clj Exception :cljs js/Error)
                    (core/run (nb/num-backend backend [nil]) model
                              (arr/from-vec backend [1 2] [1 2])))))))
@@ -243,3 +243,108 @@
          #?(:clj Exception :cljs js/Error) #"autocast supports"
          (core/run (nb/num-backend backend weights {:autocast-dtype :f16})
                    model input)))))
+
+(deftest incremental-kv-cache-matches-full-causal-attention
+  (let [layer (m/multihead-attention
+               4 2 {:causal? true :rope? true :position-offset 3})
+        model (m/sequential layer)
+        weights (nb/random-weights backend model 61)
+        tokens [[0.2 -0.1 0.3 0.4]
+                [-0.2 0.1 0.5 -0.3]
+                [0.6 0.2 -0.4 0.1]
+                [-0.1 0.4 0.2 -0.5]]
+        input (arr/from-vec backend (vec (mapcat identity tokens)) [4 4])
+        full (core/run (nb/num-backend backend weights) model input)
+        decoded
+        (reduce (fn [{:keys [cache outputs]} token]
+                  (let [step (nb/multihead-attention-step
+                              layer (first weights)
+                              (arr/from-vec backend token [1 4]) cache)]
+                    {:cache (:cache step)
+                     :outputs (into outputs (arr/->vec (:output step)))}))
+                {:cache nil :outputs []} tokens)
+        fixed-initial (nb/init-kv-cache backend 8 4)
+        fixed-key-handle (:handle (:key fixed-initial))
+        fixed-decoded
+        (reduce (fn [{:keys [cache outputs]} token]
+                  (let [step (nb/multihead-attention-step
+                              layer (first weights)
+                              (arr/from-vec backend token [1 4]) cache)]
+                    {:cache (:cache step)
+                     :outputs (into outputs (arr/->vec (:output step)))}))
+                {:cache fixed-initial :outputs []} tokens)]
+    (is (= 4 (get-in decoded [:cache :length])))
+    (is (= [4 4] (:shape (get-in decoded [:cache :key]))))
+    (is (every? #(< (Math/abs %) 1.0e-6)
+                (map - (arr/->vec full) (:outputs decoded))))
+    (is (identical? fixed-key-handle
+                    (:handle (get-in fixed-decoded [:cache :key]))))
+    (is (= 8 (get-in fixed-decoded [:cache :capacity])))
+    (is (every? #(< (Math/abs %) 1.0e-6)
+                (map - (arr/->vec full) (:outputs fixed-decoded))))))
+
+(deftest multi-block-llama-decoding-matches-full-causal-model
+  (let [model (m/sequential (m/llama-block 4 2 8 {:position-offset 3})
+                            (m/llama-block 4 2 8 {:position-offset 3}))
+        weights (nb/random-weights backend model 71)
+        tokens [[0.2 -0.1 0.3 0.4]
+                [-0.2 0.1 0.5 -0.3]
+                [0.6 0.2 -0.4 0.1]]
+        input (arr/from-vec backend (vec (mapcat identity tokens)) [3 4])
+        full (core/run (nb/num-backend backend weights) model input)
+        initial-caches (nb/init-llama-caches backend model 8)
+        handles (mapv #(-> % :key :handle) initial-caches)
+        decoded (reduce (fn [{:keys [caches outputs]} token]
+                          (let [step (nb/llama-model-step
+                                      model weights
+                                      (arr/from-vec backend token [1 4]) caches)]
+                            {:caches (:caches step)
+                             :outputs (into outputs (arr/->vec (:output step)))}))
+                        {:caches initial-caches :outputs []} tokens)]
+    (is (= [3 3] (mapv :length (:caches decoded))))
+    (is (every? true? (map identical? handles
+                           (map #(-> % :key :handle) (:caches decoded)))))
+    (is (every? #(< (Math/abs %) 1.0e-5)
+                (map - (arr/->vec full) (:outputs decoded))))))
+
+(deftest cached-llama-lm-step-produces-full-vocabulary-logits
+  (let [model (m/sequential (m/embedding 6 4)
+                            (m/llama-block 4 2 8)
+                            (m/llama-block 4 2 8)
+                            (m/rmsnorm 4) (m/lm-head 4 6))
+        weights (nb/random-weights backend model 73)
+        token-ids [2 0 2]
+        full (core/run (nb/num-backend backend weights) model
+                       (arr/from-vec backend token-ids [3]))
+        initial (nb/init-llama-caches backend model 8)
+        decoded (reduce (fn [{:keys [caches logits]} token]
+                          (let [step (nb/llama-lm-step
+                                      model weights (arr/from-vec backend [token] [1]) caches)]
+                            {:caches (:caches step)
+                             :logits (into logits (arr/->vec (:logits step)))}))
+                        {:caches initial :logits []} token-ids)]
+    (is (= [3 6] (:shape full)))
+    (is (= [3 3] (mapv :length (:caches decoded))))
+    (is (every? #(< (Math/abs %) 1.0e-5)
+                (map - (arr/->vec full) (:logits decoded))))))
+
+(deftest grouped-query-llama-cache-matches-full-model
+  (let [model (m/sequential (m/llama-block 4 2 8 {:kv-heads 1}))
+        weights (nb/random-weights backend model 97)
+        tokens [[0.2 -0.1 0.3 0.4] [-0.2 0.1 0.5 -0.3]
+                [0.6 0.2 -0.4 0.1]]
+        input (arr/from-vec backend (vec (mapcat identity tokens)) [3 4])
+        full (core/run (nb/num-backend backend weights) model input)
+        initial (nb/init-llama-caches backend model 8)
+        decoded (reduce (fn [{:keys [caches output]} token]
+                          (let [step (nb/llama-model-step
+                                      model weights
+                                      (arr/from-vec backend token [1 4]) caches)]
+                            {:caches (:caches step)
+                             :output (into output (arr/->vec (:output step)))}))
+                        {:caches initial :output []} tokens)]
+    (is (= [4 2] (:shape (:kw (first weights)))))
+    (is (= [8 2] (:shape (get-in initial [0 :key]))))
+    (is (= 3 (get-in decoded [:caches 0 :length])))
+    (is (every? #(< (Math/abs %) 1.0e-5)
+                (map - (arr/->vec full) (:output decoded))))))

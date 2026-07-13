@@ -1,5 +1,5 @@
 (ns torch.safetensors
-  "Validated, lazy JVM safetensors reader and torch state-dict loader."
+  "Validated safetensors reader/writer and torch state-dict loader."
   (:require [clojure.data.json :as json]
             [clojure.set :as set]
             [num.array :as arr]
@@ -7,7 +7,9 @@
   (:import [java.io Closeable RandomAccessFile]
            [java.nio ByteBuffer ByteOrder]
            [java.nio.channels FileChannel]
-           [java.nio.charset StandardCharsets]))
+           [java.nio.charset StandardCharsets]
+           [java.nio.file Files Path StandardCopyOption StandardOpenOption]
+           [java.nio.file.attribute FileAttribute]))
 
 (def ^:private max-header-bytes (* 128 1024 1024))
 (def ^:private dtype-bytes
@@ -69,6 +71,97 @@
 
 (defn tensor-names [checkpoint] (vec (sort (keys (:tensors checkpoint)))))
 (defn tensor-info [checkpoint name] (get (:tensors checkpoint) name))
+
+(defn- write-fully! [^FileChannel channel ^ByteBuffer buffer]
+  (while (.hasRemaining buffer) (.write channel buffer)))
+
+(defn- padded-header-bytes [header]
+  (let [raw (.getBytes (json/write-str header) StandardCharsets/UTF_8)
+        padded-length (* 8 (quot (+ (alength raw) 7) 8))
+        padded (byte-array padded-length)]
+    (java.util.Arrays/fill padded (byte 0x20))
+    (System/arraycopy raw 0 padded 0 (alength raw))
+    padded))
+
+(defn- encode-tensor [array storage-dtype]
+  (let [values (arr/->vec array)
+        [dtype width put-value]
+        (case (or storage-dtype (:dtype array))
+          :f32 ["F32" 4 #(.putFloat ^ByteBuffer %1 (float %2))]
+          :f64 ["F64" 8 #(.putDouble ^ByteBuffer %1 (double %2))]
+          (throw (ex-info "torch.safetensors: unsupported output dtype"
+                          {:dtype (:dtype array) :supported [:f32 :f64]})))
+        buffer (doto (ByteBuffer/allocate (* width (count values)))
+                 (.order ByteOrder/LITTLE_ENDIAN))]
+    (doseq [value values] (put-value buffer value))
+    (.flip buffer)
+    {:dtype dtype :shape (mapv long (:shape array)) :buffer buffer}))
+
+(defn write-file!
+  "Write a deterministic safetensors file and atomically replace `path`.
+
+  Tensor names are sorted, metadata keys and values must be strings, and each
+  tensor's current f32/f64 dtype is preserved. Returns the destination Path."
+  ([path tensors] (write-file! path tensors {} {}))
+  ([path tensors metadata] (write-file! path tensors metadata {}))
+  ([path tensors metadata {:keys [storage-dtype]}]
+   (when-not (and (map? tensors) (seq tensors)
+                  (every? string? (keys tensors)))
+     (throw (ex-info "torch.safetensors: tensors must be a non-empty string-keyed map"
+                     {:tensor-names (keys tensors)})))
+   (when-not (and (map? metadata) (every? string? (keys metadata))
+                  (every? string? (vals metadata)))
+     (throw (ex-info "torch.safetensors: metadata must contain only strings"
+                     {:metadata metadata})))
+   (let [destination (.toAbsolutePath ^Path (if (instance? Path path)
+                                               path (Path/of (str path) (make-array String 0))))
+         parent (or (.getParent destination)
+                    (.toAbsolutePath (Path/of "." (make-array String 0))))
+         encoded (mapv (fn [[name array]]
+                         [name (encode-tensor array storage-dtype)])
+                       (sort-by key tensors))
+         [header _]
+         (reduce (fn [[entries offset] [name {:keys [dtype shape buffer]}]]
+                   (let [end (+ offset (.remaining ^ByteBuffer buffer))]
+                     [(assoc entries name {"dtype" dtype "shape" shape
+                                           "data_offsets" [offset end]})
+                      end]))
+                 [(cond-> {} (seq metadata) (assoc "__metadata__" metadata)) 0]
+                 encoded)
+         header-bytes (padded-header-bytes header)
+         temp (Files/createTempFile parent ".torch-safetensors-" ".tmp"
+                                    (make-array FileAttribute 0))]
+     (try
+       (with-open [channel (FileChannel/open temp
+                                             (into-array StandardOpenOption
+                                                         [StandardOpenOption/WRITE
+                                                          StandardOpenOption/TRUNCATE_EXISTING]))]
+         (write-fully! channel (doto (ByteBuffer/allocate 8)
+                                (.order ByteOrder/LITTLE_ENDIAN)
+                                (.putLong (long (alength header-bytes)))
+                                (.flip)))
+         (write-fully! channel (ByteBuffer/wrap header-bytes))
+         (doseq [[_ {:keys [buffer]}] encoded]
+           (write-fully! channel (.duplicate ^ByteBuffer buffer)))
+         (.force channel true))
+       (try
+         (Files/move temp destination
+                     (into-array StandardCopyOption
+                                 [StandardCopyOption/ATOMIC_MOVE
+                                  StandardCopyOption/REPLACE_EXISTING]))
+         (catch java.nio.file.AtomicMoveNotSupportedException _
+           (Files/move temp destination
+                       (into-array StandardCopyOption
+                                   [StandardCopyOption/REPLACE_EXISTING]))))
+       destination
+       (finally (Files/deleteIfExists temp))))))
+
+(defn save-weights!
+  "Save model weights under stable PyTorch-compatible state-dict names."
+  ([path model* weights] (save-weights! path model* weights {}))
+  ([path model* weights metadata]
+   (write-file! path (state/state-dict model* weights)
+                (merge {"format" "pt" "torch-clj.kind" "model"} metadata))))
 
 (defn- half->double [bits]
   (let [sign (if (zero? (bit-and bits 0x8000)) 1.0 -1.0)

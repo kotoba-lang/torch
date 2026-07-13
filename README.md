@@ -56,6 +56,11 @@ bare vector, read as an implicit sequential). Builders are threadable data:
 (m/sequential (m/linear 32 64) block (m/linear 64 10))
 ```
 
+Nested Sequentials execute in recursive leaf order across inference, autograd,
+optimizers, summaries, and checkpoints. `torch.model/layer-entries` exposes each
+leaf plus its stable index path; checkpoint names retain module structure (for
+example `layers.1.layers.0.weight`) instead of flattening names ambiguously.
+
 Built-in layer types: `:linear :conv2d :maxpool2d :avgpool2d :embedding
 :batchnorm :layernorm :groupnorm :dropout :flatten :relu :silu :gelu
 :sigmoid :tanh :softmax :attention :multihead-attention`.
@@ -68,7 +73,11 @@ it doesn't divide). It has no batch axis, mask, or learned QKV projections;
 and output weight/bias projections in the same data-first model form. Learned
 attention accepts `[sequence embedding]` or batch-first
 `[batch sequence embedding]`; `(m/multihead-attention d h {:causal? true})`
-enables causal masking. Training/VJP calls accept one runtime options map per layer,
+enables causal masking. Llama-compatible rotary position embedding is enabled with
+`{:rope? true}`; `:rope-theta`, `:position-offset`, and
+`:context-position-offset` support long-context and cached/cross-attention positions.
+RoPE is applied head-wise to projected Q/K (not V), including its inverse-rotation
+VJP on Metal. Training/VJP calls accept one runtime options map per layer,
 including a `[batch sequence]` `:key-padding-mask` whose non-zero keys are ignored:
 
 ```clojure
@@ -76,6 +85,98 @@ including a `[batch sequence]` `:key-padding-mask` whose non-zero keys are ignor
   {:layer-options [{:context encoder-hidden-states
                     :key-padding-mask padding-mask}]})
 ```
+
+Incremental autoregressive inference reuses projected, RoPE-rotated keys and
+values without a host readback:
+
+```clojure
+(let [initial-cache (nb/init-kv-cache backend 4096 embed-dim)
+      {:keys [output cache]}
+      (nb/multihead-attention-step layer layer-weights one-token initial-cache)]
+  {:logits output :cache cache})
+```
+
+The step accepts `[1 embed]` or `[batch 1 embed]`; its output matches the same
+layer's full causal pass token-for-token, verified on Apple Metal. A cache from
+`init-kv-cache` preallocates K/V once and appends device-to-device without changing
+either GPUBuffer handle. The older nil-start immutable cache remains supported.
+Fixed-capacity cache currently targets the common batch-1 generation path; batched
+serving and Ollama-style paged/block cache allocation remain future work.
+
+`(m/llama-block embed heads hidden)` is a bias-free pre-normalized decoder
+block: RMSNorm → RoPE causal attention → residual → RMSNorm → SwiGLU → residual.
+Blocks are ordinary model layers for full-sequence inference and training. For
+incremental multi-layer decoding, allocate one cache per block and advance all
+blocks with one token:
+
+```clojure
+(def caches (nb/init-llama-caches backend model 4096))
+(nb/llama-model-step model weights one-token caches)
+;; => {:output hidden-state :caches updated-per-layer-caches}
+```
+
+Two stacked blocks are verified token-for-token against their full causal model
+on Apple Metal while every layer retains its originally allocated K/V handles.
+
+A complete decoder can be described as ordinary layers:
+
+```clojure
+(m/sequential (m/embedding vocab embed)
+              (m/llama-block embed heads hidden)
+              (m/llama-block embed heads hidden)
+              (m/rmsnorm embed)
+              (m/lm-head embed vocab))
+```
+
+`llama-lm-step` accepts one token ID and returns `{:logits [1 vocab] :caches ...}`.
+After reading the final logits, `torch.generate/sample-token` supports greedy,
+temperature, top-k, nucleus/top-p, and repetition-penalty policies. Randomness is
+passed explicitly as `:random-value`, keeping sampling reproducible and allowing a
+server to own the RNG stream.
+
+`torch.tokenizer/tokenizer` builds a portable BPE tokenizer from ID-ordered
+tokens and merge pairs. It supports BOS/EOS, SentencePiece-style space prefixes,
+Unicode codepoints, and GGUF-style `<0xHH>` UTF-8 byte fallback. The same `.cljc`
+implementation is verified on JVM and Node. `torch.generate/generate-text` joins
+tokenization, prompt prefill, cached token steps, sampling, EOS termination, and
+decoding for synchronous runtimes; GPU callers use the same sampling policy after
+their asynchronous logits readback.
+
+### GGUF model loading
+
+`torch.gguf/load-file` parses GGUF v2/v3 with long file offsets, typed/nested
+metadata arrays, `general.alignment`, and bounds-checked positional reads rather
+than loading the entire model file. `read-tensor` decodes F32, F16, Q8_0, Q4_K,
+and Q6_K (including their packed per-block scale layouts);
+`llama-model`, `gguf-tokenizer`, and `load-llama-weights` construct the model,
+tokenizer, transpose GGUF linear matrices, upload weights, and handle tied output
+embeddings.
+
+Q4_K, Q6_K, and Q8_0 linear tensors remain packed at their GGML bit rates and
+execute through fused CPU/Metal quantized matmul without a dense weight
+allocation. Quantized token embeddings use packed device-native lookup; when
+`output.weight` is tied/missing, the LM head shares that exact packed buffer
+through a zero-copy matrix view. Llama
+grouped-query attention is supported when
+`head_count_kv` evenly divides `head_count`, including training and fixed-capacity
+KV-cache decoding on Metal; K/V projections and caches use the reduced KV width.
+
+A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
+blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding
+Q4_K-packed, tied LM head, causal prefill, and fixed-capacity KV-cache decode.
+
+```sh
+clojure -Sdeps '{:deps {io.github.kotoba-lang/num {:local/root "../num"}}}' \
+  -M:deno-quantized-llama-benchmark && \
+deno run --allow-all target/deno-quantized-llama-benchmark.cjs
+# Apple M4, 16 tokens:
+# packed 479,232 bytes vs dense equivalent 3,407,872 bytes (7.11x)
+# full cold 42.806 ms; full warm prefill 23.815 ms
+# cached decode 8.852 ms/token; full/cached parity passed
+```
+
+This deterministic synthetic model verifies orchestration, storage, and kernel
+integration. It is not a quality or real-checkpoint tokens/sec claim.
 
 When `:context` is present, Q is projected from the current model value while K/V
 are projected from the separate context sequence, enabling UNet-style cross-attention
@@ -206,7 +307,10 @@ For stateful optimization, `torch.optim/adamw-step` consumes the aligned
 weights and gradients returned by `torch.train/loss-and-gradients`. It returns
 both new weights and immutable first/second-moment state; pass that state into
 the next step. Learning rate, betas, epsilon, and decoupled weight decay are
-configurable, with AdamW defaults when omitted.
+configurable, with AdamW defaults when omitted. On an f32 `ITensorBackend`, each
+parameter update is a fused device dispatch that produces new weight, first-moment,
+and variance buffers; first-step zero slots are allocated on-device. No parameter,
+gradient, or optimizer slot is downloaded.
 
 `torch.optim/grad-scaler` and `scaled-adamw-step` provide dynamic loss scaling:
 call `loss-and-gradients` with the scaler's `:scale`, then pass the scaled
@@ -214,6 +318,44 @@ gradients to the optimizer. Gradients are unscaled before AdamW, non-finite
 values skip the update and back off the scale, and stable steps grow it at the
 configured interval. Unscaled gradients and optimizer state remain f32; this
 is the control path used by the mixed-precision training API below.
+For an asynchronous GPU backend, `scaled-adamw-step-async` performs unscale and
+non-finite detection in one device dispatch per parameter, reads back only the
+one-scalar flags, then either launches fused GPU AdamW or skips every update and
+backs off the scale. It returns a Promise in ClojureScript and a completed
+`CompletableFuture` on the JVM.
+
+### Checkpoints and PyTorch state dictionaries
+
+`torch.safetensors/save-weights!` and `load-weights` write and read stable
+PyTorch-style parameter names. Linear and attention projection matrices are
+transposed at the file boundary (`[out,in]` externally, `[in,out]` internally),
+while convolution and normalization tensors retain their native layout. Loading
+is strict by default: missing and unexpected tensors fail before execution.
+
+For restartable training, `torch.checkpoint/save-checkpoint!` stores model
+weights, every AdamW first/second moment, optimizer step/options, GradScaler
+state, and caller-owned JSON training position in one safetensors file. The
+write uses a sibling temporary file, fsync, and atomic replacement where the
+filesystem supports it. `load-checkpoint` validates the schema and complete
+tensor set before returning state accepted directly by the next training step:
+
+```clojure
+(require '[torch.checkpoint :as checkpoint])
+
+(checkpoint/save-checkpoint!
+ "run.safetensors" model weights
+ {:optimizer-state optimizer-state
+  :optimizer-options {:learning-rate 1.0e-3}
+  :scaler scaler
+  :training-state {:epoch 3 :batch 120}})
+
+(def resumed (checkpoint/load-checkpoint "run.safetensors" backend model))
+```
+
+Training checkpoints use F64 storage to preserve the CPU reference backend's
+double intermediates even for logically-f32 arrays. Tests interrupt an
+AdamW+GradScaler run, reload it, and prove that every subsequent loss, weight,
+moment, variance, and scaler value is exactly equal to uninterrupted training.
 
 `torch.train/mixed-precision-adamw-step` now connects these pieces for
 conv2d/GroupNorm/SiLU/ReLU models: it casts the forward pass to f16 or bf16,
@@ -223,15 +365,25 @@ back off the scaler; both successful updates and forced-overflow skips are
 tested. Backward is still a synchronous host reference implementation, so this
 is real mixed-precision numerical behavior but not GPU-resident autograd.
 
-The reference path supports flat sequential models composed from
-`:linear/:conv2d/:groupnorm/:relu/:silu/:softmax/:attention/:multihead-attention`, with MSE and
+The reference path supports recursively nested sequential models composed from
+`:linear/:conv2d/:embedding/:groupnorm/:layernorm/:rmsnorm/:flatten/:relu/:silu/:sigmoid/:tanh/:gelu/:softmax/:attention/:multihead-attention/:llama-block/:lm-head`, with MSE and
 positive-rate SGD plus immutable AdamW. NCHW grouped convolution, affine GroupNorm, SiLU, and
 multi-head self-attention all have real reverse-mode gradients; tests verify
 both finite-difference agreement in `num` and decreasing loss through the
-public torch model/weight representation. It remains a synchronous reference
-trainer, not yet a replacement for PyTorch's broader optimizer catalog, GPU autograd,
-batched/masked attention, checkpoint loading, or mixed
-precision coverage for every layer.
+public torch model/weight representation. It is not yet a replacement for
+PyTorch's broader optimizer catalog, general GPU autograd, or mixed-precision
+coverage for every layer.
+
+`Flatten` follows PyTorch's batch-preserving default: `[N,C,H,W]` becomes
+`[N,C*H*W]`, is zero-copy in forward execution, and reshapes its VJP back to the
+exact input shape. Consequently the documented
+`Conv2d → activation → Flatten → Linear` CNN form now runs and trains through
+the same EDN model rather than remaining shape-only syntax.
+
+The standalone two-linear-layer Metal trainer follows num's current MSE VJP
+contract, including an explicit device-resident upstream scalar seed. Its full
+backward/update result matches CPU on Apple M4 and lowers loss from `0.75249` to
+`0.16486`; the verifier guards shader binding count as well as numeric parity.
 
 For an explicit vector-Jacobian product, `prediction-and-gradients` accepts an
 upstream tensor with the prediction's shape. This is equivalent to PyTorch's
@@ -249,8 +401,13 @@ gradient accumulation. MSE forward and its VJP are also device-native; on an asy
 backend `loss-and-gradients` returns `:loss` as a Promise for the final scalar
 readback while prediction and gradients are immediately usable GPU arrays. The
 immutable `sgd-step` update is composed from device elementwise multiply/subtract,
-so parameter and gradient buffers are never downloaded. AdamW and mixed-precision
-optimizer state updates remain host-side reference paths.
+so parameter and gradient buffers are never downloaded. AdamW now follows the same
+GPU-resident path: four learned-attention steps on Apple M4 verify every final
+weight, first moment, variance, and the decreasing loss trajectory against CPU.
+The Apple M4 verifier covers both the finite async update and an injected infinity:
+the finite path advances AdamW and GradScaler, while overflow leaves weights and
+optimizer state unchanged and halves the scale. Only scalar control flags cross the
+device boundary.
 
 Learned MultiheadAttention is verified on both JVM and compiled ClojureScript:
 all eight projection tensors receive gradients, a Q-weight gradient matches a

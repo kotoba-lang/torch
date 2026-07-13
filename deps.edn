@@ -10,7 +10,7 @@
         ;; multi-head attention, typed Metal tensors, UNet autograd, and a
         ;; real-Metal async twin of multi-head attention (num.tensor-async).
         io.github.kotoba-lang/num
-        {:git/sha "c7b86eef7f666ba57dbe2580c1bcf50c323f099b"}}
+        {:git/sha "a03c9dbfcf056cff21dfef9fc67012f3fc97444f"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
@@ -35,12 +35,30 @@
         :main-opts ["-m" "cljs.main"
                     "-co" "{:optimizations :simple :target :nodejs :main torch.learned-attention-verify :output-to \"target/learned-attention-verify.cjs\"}"
                     "-c" "torch.learned-attention-verify"]}
+       :cljs-tokenizer-verify
+       {:extra-paths ["test"]
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.tokenizer-verify :output-to \"target/tokenizer-verify.cjs\"}"
+                    "-c" "torch.tokenizer-verify"]}
        :deno-metal-attention-verify
        {:extra-paths ["test"]
         :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
         :main-opts ["-m" "cljs.main"
                     "-co" "{:optimizations :simple :target :nodejs :main torch.deno-metal-attention-verify :output-to \"target/deno-metal-attention-verify.cjs\"}"
                     "-c" "torch.deno-metal-attention-verify"]}
+       :deno-kv-cache-verify
+       {:extra-paths ["test"]
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-kv-cache-verify :output-to \"target/deno-kv-cache-verify.cjs\"}"
+                    "-c" "torch.deno-kv-cache-verify"]}
+       :deno-quantized-llama-benchmark
+       {:extra-paths ["test"]
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-quantized-llama-benchmark :output-to \"target/deno-quantized-llama-benchmark.cjs\"}"
+                    "-c" "torch.deno-quantized-llama-benchmark"]}
        ;; clj-kondo as a Clojars lib (no Homebrew/system install needed).
        :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
          :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"

@@ -46,3 +46,19 @@
                    (state/load-state-dict
                     model* (assoc external "layers.0.weight"
                                   (arr/from-vec backend [1.0] [1]))))))))
+
+(deftest nested-state-dict-retains-module-paths-and-roundtrips
+  (let [model* (model/sequential
+                (model/linear 2 3)
+                (model/sequential (model/relu) (model/linear 3 1)))
+        weights (nb/random-weights backend model* 9)
+        entries (state/manifest model*)
+        external (state/state-dict model* weights)
+        restored (state/load-state-dict model* external)]
+    (is (= ["layers.0.weight" "layers.0.bias"
+            "layers.1.layers.1.weight" "layers.1.layers.1.bias"]
+           (mapv :name entries)))
+    (is (= [[0] [0] [1 1] [1 1]] (mapv :layer-path entries)))
+    (doseq [[before after] (map vector weights restored)
+            key (keys before)]
+      (is (arrays-equal? (get before key) (get after key))))))

@@ -38,6 +38,10 @@
 (defn embedding  [num-emb dim]       {:embedding [num-emb dim]})
 (defn batchnorm  [features]          {:batchnorm [features]})
 (defn layernorm  [features]          {:layernorm [features]})
+(defn rmsnorm
+  "Llama-style RMSNorm over the final `features` dimension."
+  ([features] {:rmsnorm [features]})
+  ([features eps] {:rmsnorm [features eps]}))
 (defn groupnorm
   "PyTorch-style GroupNorm(num-groups, num-channels, eps=1e-5)."
   ([num-groups num-channels] {:groupnorm [num-groups num-channels]})
@@ -59,12 +63,27 @@
   ([num-heads] {:attention [num-heads]}))
 (defn multihead-attention
   "Learned self-attention with independent Q/K/V and output projections.
-  `opts` currently supports `:causal?`; rank-2 and batch-first rank-3 inputs
-  share the same layer description."
+  `opts` supports attention masks plus Llama RoPE via `:rope?`, `:rope-theta`,
+  `:position-offset`, and `:context-position-offset`; rank-2 and batch-first
+  rank-3 inputs share the same layer description."
   ([embed-dim num-heads]
    {:multihead-attention [embed-dim num-heads]})
   ([embed-dim num-heads opts]
    {:multihead-attention [embed-dim num-heads opts]}))
+
+(defn llama-block
+  "Pre-normalized Llama decoder block: RoPE causal attention plus SwiGLU.
+  `opts` accepts `:kv-heads` (grouped-query attention), `:rope-theta`,
+  `:position-offset`, and RMSNorm `:eps`."
+  ([embed-dim num-heads hidden-dim]
+   {:llama-block [embed-dim num-heads hidden-dim]})
+  ([embed-dim num-heads hidden-dim opts]
+   {:llama-block [embed-dim num-heads hidden-dim opts]}))
+
+(defn lm-head
+  "Bias-free hidden-state to vocabulary-logit projection."
+  [embed-dim vocab-size]
+  {:lm-head [embed-dim vocab-size]})
 
 ;; ---------------------------------------------------------------------------
 ;; model container
@@ -122,6 +141,24 @@
   "The (normalized) layer seq of a model."
   [model]
   (:torch/layers (normalize model)))
+
+(defn layer-entries
+  "Leaf layers in recursive Sequential execution order. Each entry contains
+  `:layer` and its stable nested `:path` of layer indexes."
+  [model]
+  (letfn [(walk [module path]
+            (mapcat (fn [[index child]]
+                      (let [child-path (conj path index)]
+                        (if (model? child)
+                          (walk child child-path)
+                          [{:layer child :path child-path}])))
+                    (map-indexed vector (:torch/layers module))))]
+    (vec (walk (normalize model) []))))
+
+(defn execution-layers
+  "Leaf layers flattened from nested Sequentials in canonical forward order."
+  [model]
+  (mapv :layer (layer-entries model)))
 
 (defn describe
   "A short human string for a layer, e.g. \"linear(784, 256)\"."

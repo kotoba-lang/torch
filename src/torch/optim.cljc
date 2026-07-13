@@ -1,12 +1,10 @@
 (ns torch.optim
-  "Immutable reference optimizers over torch.train's weight/gradient layout."
-  (:require [num.array :as arr]))
+  "Immutable optimizers over torch.train's weight/gradient layout."
+  (:require [num.array :as arr]
+            [num.tensor :as t]))
 
 (defn- fail [message data]
   (throw (ex-info (str "torch.optim: " message) data)))
-
-(defn- zeros-like [parameter]
-  (arr/zeros (:backend parameter) (:shape parameter)))
 
 (defn grad-scaler
   "Create immutable dynamic loss-scaling state."
@@ -62,23 +60,8 @@
 
 (defn- update-parameter
   [parameter gradient moment variance step
-   {:keys [learning-rate beta1 beta2 eps weight-decay]}]
-  (let [ps (arr/->vec parameter) gs (arr/->vec gradient)
-        ms (arr/->vec moment) vs (arr/->vec variance)
-        correction1 (- 1.0 (Math/pow beta1 step))
-        correction2 (- 1.0 (Math/pow beta2 step))
-        next-m (mapv (fn [m g] (+ (* beta1 m) (* (- 1.0 beta1) g))) ms gs)
-        next-v (mapv (fn [v g] (+ (* beta2 v) (* (- 1.0 beta2) g g))) vs gs)
-        next-p (mapv (fn [p m v]
-                       (let [m-hat (/ m correction1)
-                             v-hat (/ v correction2)
-                             adaptive (/ m-hat (+ (Math/sqrt v-hat) eps))]
-                         (- p (* learning-rate (+ adaptive (* weight-decay p))))))
-                     ps next-m next-v)
-        backend (:backend parameter) shape (:shape parameter)]
-    {:parameter (arr/from-vec backend next-p shape)
-     :moment (arr/from-vec backend next-m shape)
-     :variance (arr/from-vec backend next-v shape)}))
+   options]
+  (t/adamw-step parameter gradient moment variance step options))
 
 (defn adamw-step
   "Apply one AdamW update.
@@ -111,10 +94,8 @@
                       {:parameters (keys weight) :gradients (keys gradient)}))
               (into {}
                     (map (fn [[key parameter]]
-                           (let [old-m (or (get-in slot [key :moment])
-                                           (zeros-like parameter))
-                                 old-v (or (get-in slot [key :variance])
-                                           (zeros-like parameter))]
+                           (let [old-m (get-in slot [key :moment])
+                                 old-v (get-in slot [key :variance])]
                              [key (update-parameter parameter (get gradient key)
                                                     old-m old-v step
                                                     normalized-options)])))
@@ -152,3 +133,54 @@
              (adamw-step weights gradients optimizer-state options)]
          {:weights weights :optimizer-state state
           :scaler next-scaler :skipped? false})))))
+
+(defn- device-unscale-gradients [gradients scale]
+  (let [results
+        (mapv (fn [gradient]
+                (when gradient
+                  (into {} (map (fn [[key value]]
+                                  [key (t/unscale-gradient value scale)]))
+                        gradient)))
+              gradients)]
+    {:gradients
+     (mapv (fn [gradient]
+             (when gradient
+               (into {} (map (fn [[key result]] [key (:gradient result)]))
+                     gradient)))
+           results)
+     :flags (vec (mapcat (fn [gradient]
+                           (map (comp :found-inf val) gradient))
+                         (remove nil? results)))}))
+
+(defn scaled-adamw-step-async
+  "Asynchronously unscale/check gradients and apply AdamW without tensor readback.
+
+  On ClojureScript this returns a Promise. Device backends download only one
+  scalar overflow flag per parameter; unscaled gradients, weights, and AdamW
+  slots remain device-resident. JVM returns an already-completed
+  CompletableFuture with the same result shape."
+  ([weights scaled-gradients optimizer-state scaler]
+   (scaled-adamw-step-async weights scaled-gradients optimizer-state scaler {}))
+  ([weights scaled-gradients optimizer-state scaler options]
+   (let [{:keys [gradients flags]}
+         (device-unscale-gradients scaled-gradients (:scale scaler))
+         finish
+         (fn [flag-values]
+           (let [found-inf? (boolean (some #(pos? (first %)) flag-values))
+                 next-scaler (update-grad-scaler scaler found-inf?)]
+             (if found-inf?
+               {:weights weights :optimizer-state optimizer-state
+                :scaler next-scaler :skipped? true}
+               (let [{:keys [weights state]}
+                     (adamw-step weights gradients optimizer-state options)]
+                 {:weights weights :optimizer-state state
+                  :scaler next-scaler :skipped? false}))))]
+     #?(:cljs
+        (.then (js/Promise.all
+                (into-array
+                 (map (fn [flag]
+                        (js/Promise.resolve (arr/->vec flag))) flags)))
+               (fn [values] (finish (vec (js/Array.from values)))))
+        :clj
+        (java.util.concurrent.CompletableFuture/completedFuture
+         (finish (mapv arr/->vec flags)))))))

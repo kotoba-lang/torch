@@ -9,11 +9,15 @@
             [torch.optim :as optim]))
 
 (def supported-layers
-  #{:linear :conv2d :groupnorm :relu :silu :softmax :attention
-    :multihead-attention})
+  #{:linear :conv2d :groupnorm :layernorm :rmsnorm :embedding :flatten :relu :silu :sigmoid :tanh :gelu :softmax :attention
+    :multihead-attention :llama-block :lm-head})
 
 (def parameter-keys
-  {:linear #{:w :b} :conv2d #{:w :b} :groupnorm #{:w :b}
+  {:linear #{:w :b} :conv2d #{:w :b} :groupnorm #{:w :b} :layernorm #{:w :b}
+   :embedding #{:w}
+   :rmsnorm #{:w}
+   :llama-block #{:attn-norm :qw :kw :vw :ow :ffn-norm :gate :up :down}
+   :lm-head #{:w}
    :multihead-attention #{:qw :qb :kw :kb :vw :vb :ow :ob}})
 
 (defn- fail [message data]
@@ -44,6 +48,11 @@
        (update :parameters conj parameters)
        (update :runtime-values conj runtime-values))))
 
+(defn- flatten-batch-shape [shape]
+  (if (<= (count shape) 1)
+    shape
+    [(first shape) (arr/nelems (subvec (vec shape) 1))]))
+
 (defn- forward-layer [state [layer weight runtime-options]]
   (case (model/layer-type layer)
     :linear
@@ -66,9 +75,31 @@
              (ag/group-norm-nchw* (:value state) groups w b (or eps 1.0e-5))
              {:w w :b b}))
 
+    :layernorm
+    (let [w (ag/value (:w weight)) b (ag/value (:b weight))]
+      (track state (ag/layer-norm-last* (:value state) w b 1.0e-5)
+             {:w w :b b}))
+
+    :embedding
+    (let [w (ag/value (:w weight))]
+      (track state (ag/embedding* (:data (:value state)) w) {:w w}))
+
+    :rmsnorm
+    (let [[_features eps] (model/layer-args layer)
+          w (ag/value (:w weight))]
+      (track state (ag/rms-norm-last* (:value state) w (or eps 1.0e-5)) {:w w}))
+
     :relu (track state (ag/relu* (:value state)) nil)
     :silu (track state (ag/silu* (:value state)) nil)
+    :sigmoid (track state (ag/sigmoid* (:value state)) nil)
+    :tanh (track state (ag/tanh* (:value state)) nil)
+    :gelu (track state (ag/gelu* (:value state)) nil)
     :softmax (track state (ag/softmax* (:value state)) nil)
+    :flatten
+    (track state
+           (ag/reshape* (:value state)
+                        (flatten-batch-shape (:shape (:data (:value state)))))
+           nil)
     :attention
     (let [args (model/layer-args layer)
           heads (if (and (vector? args) (seq args)) (first args) 1)]
@@ -77,10 +108,65 @@
                                        (:value state) heads)
              nil))
 
+    :llama-block
+    (let [[embed heads hidden opts] (model/layer-args layer)
+          opts (merge {:causal? true :rope? true} opts runtime-options)
+          kv-heads (long (or (:kv-heads opts) heads))
+          kv-embed (* kv-heads (quot embed heads))
+          eps (or (:eps opts) 1.0e-5)
+          input (:value state)
+          shape (:shape (:data input)) rank (count shape)
+          [batch sequence] (if (= rank 3) (take 2 shape) [1 (first shape)])
+          parameters (into {} (map (fn [[key array]] [key (ag/value array)]) weight))
+          flatten (fn [v]
+                    (if (= rank 3)
+                      (ag/reshape* v [(* batch sequence) (last (:shape (:data v)))]) v))
+          restore (fn [v features]
+                    (if (= rank 3) (ag/reshape* v [batch sequence features]) v))
+          linear (fn [v key out]
+                   (restore (ag/matmul* (flatten v) (get parameters key)) out))
+          normalized (ag/rms-norm-last* input (:attn-norm parameters) eps)
+          q0 (linear normalized :qw embed)
+          k0 (linear normalized :kw kv-embed)
+          value (linear normalized :vw kv-embed)
+          rope-opts {:theta (or (:rope-theta opts) 10000.0)
+                     :position-offset (or (:position-offset opts) 0)}
+          query (ag/rotary-embedding* q0 heads rope-opts)
+          key (ag/rotary-embedding* k0 kv-heads rope-opts)
+          attended (ag/multi-head-attention* query key value heads
+                                             {:causal? true :kv-heads kv-heads})
+          attention-output (linear attended :ow embed)
+          residual (ag/add* input attention-output)
+          ffn-input (ag/rms-norm-last* residual (:ffn-norm parameters) eps)
+          gate (ag/silu* (linear ffn-input :gate hidden))
+          up (linear ffn-input :up hidden)
+          down (linear (ag/mul* gate up) :down embed)
+          output (ag/add* residual down)]
+      (track state output parameters))
+
+    :lm-head
+    (let [[_embed vocab] (model/layer-args layer)
+          w (ag/value (:w weight)) value (:value state)
+          shape (:shape (:data value)) rank (count shape)
+          [batch sequence] (if (= rank 3) (take 2 shape) [1 (first shape)])
+          flat (if (= rank 3) (ag/reshape* value [(* batch sequence) (last shape)]) value)
+          projected (ag/matmul* flat w)
+          output (if (= rank 3) (ag/reshape* projected [batch sequence vocab]) projected)]
+      (track state output {:w w}))
+
     :multihead-attention
     (let [[embed heads opts] (model/layer-args layer)
           context-array (:context runtime-options)
-          attention-options (merge opts (dissoc runtime-options :context))
+          merged-options (merge opts (dissoc runtime-options :context))
+          rope? (:rope? merged-options)
+          rope-options {:theta (or (:rope-theta merged-options) 10000.0)
+                        :position-offset (or (:position-offset merged-options) 0)}
+          key-rope-options (assoc rope-options :position-offset
+                                  (or (:context-position-offset merged-options)
+                                      (:position-offset rope-options)))
+          attention-options (apply dissoc merged-options
+                                   [:rope? :rope-theta :position-offset
+                                    :context-position-offset])
           input-value (:value state)
           input-shape (:shape (:data input-value))
           rank (count input-shape)
@@ -110,8 +196,10 @@
                       (ag/matmul* (:flat layout) (get parameters weight-key))
                       (get parameters bias-key))
                      layout))
-          query (project query-layout :qw :qb)
-          key (project context-layout :kw :kb)
+          query0 (project query-layout :qw :qb)
+          key0 (project context-layout :kw :kb)
+          query (if rope? (ag/rotary-embedding* query0 heads rope-options) query0)
+          key (if rope? (ag/rotary-embedding* key0 heads key-rope-options) key0)
           value (project context-layout :vw :vb)
           attended (if (seq attention-options)
                      (ag/multi-head-attention* query key value heads
@@ -171,7 +259,7 @@
   ([model* weights input upstream-gradient]
    (prediction-and-gradients model* weights input upstream-gradient {}))
   ([model* weights input upstream-gradient {:keys [layer-options]}]
-  (let [layers (model/layers model*)
+  (let [layers (model/execution-layers model*)
         layer-options (or layer-options (repeat (count layers) nil))]
     (validate-weights! layers weights)
     (when-not (= (count layers) (count layer-options))
@@ -208,11 +296,11 @@
                                  :or {loss-scale 1.0}}]
   (when-not (and (number? loss-scale) (pos? loss-scale))
     (fail "loss-scale must be a positive number" {:loss-scale loss-scale}))
-  (let [layers (model/layers model*)
+  (let [layers (model/execution-layers model*)
         _ (when (and autocast-dtype
-                     (seq (remove #{:conv2d :groupnorm :silu :relu}
+                     (seq (remove #{:conv2d :groupnorm :layernorm :rmsnorm :embedding :flatten :silu :relu :sigmoid :tanh :gelu}
                                   (map model/layer-type layers))))
-            (fail "training autocast supports conv2d/groupnorm/silu/relu only"
+            (fail "training autocast supports conv2d/groupnorm/layernorm/rmsnorm/embedding/flatten/silu/relu/sigmoid/tanh/gelu only"
                   {:dtype autocast-dtype}))
         cast-array #(if autocast-dtype (arr/cast % autocast-dtype) %)
         weights (if autocast-dtype
@@ -222,7 +310,8 @@
                                   weight)))
                         weights)
                   weights)
-        input (cast-array input)
+        embedding-input? (= :embedding (model/layer-type (first layers)))
+        input (if embedding-input? input (cast-array input))
         target (cast-array target)
         layer-options (or layer-options (repeat (count layers) nil))]
     (validate-weights! layers weights)

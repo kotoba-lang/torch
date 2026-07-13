@@ -20,6 +20,8 @@
     (is (= {:linear [784 256]} (m/linear 784 256)))
     (is (= {:relu {}} (m/relu)))
     (is (= {:silu {}} (m/silu)))
+    (is (= {:rmsnorm [16]} (m/rmsnorm 16)))
+    (is (= {:llama-block [16 4 32]} (m/llama-block 16 4 32)))
     (is (= {:groupnorm [4 32]} (m/groupnorm 4 32)))
     (is (= {:attention {}} (m/attention)))
     (is (= {:multihead-attention [64 8]} (m/multihead-attention 64 8)))
@@ -104,6 +106,16 @@
     (is (= (+ (* 784 256) 256 (* 256 10) 10) (:torch/total-params s)))
     (is (= 4 (count (:torch/layers s))))
     (is (= [256] (:torch/out-shape (first (:torch/layers s)))))))
+
+(deftest nested-sequentials-have-canonical-leaf-order-and-paths
+  (let [nested (m/sequential
+                (m/linear 2 3)
+                (m/sequential (m/relu) (m/sequential (m/linear 3 1))))]
+    (is (= [:linear :relu :linear]
+           (mapv m/layer-type (m/execution-layers nested))))
+    (is (= [[0] [1 0] [1 1 0]]
+           (mapv :path (m/layer-entries nested))))
+    (is (= [1] (core/infer-shape nested [2])))))
 
 (def cnn
   [{:conv2d [1 8 3 1 1]} {:relu {}} {:maxpool2d [2]}

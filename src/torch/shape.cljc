@@ -85,6 +85,29 @@
                    " must divide embed-dim " embed-dim)]
       :else [:ok in])))
 
+(defmethod layer-shape :llama-block [_ args in]
+  (let [[embed heads hidden opts] args
+        kv-heads (or (:kv-heads opts) heads)]
+    (cond
+      (not (#{2 3} (count in)))
+      [:error "llama-block expects [sequence embed] or [batch sequence embed]"]
+      (not (every? pos-int? [embed heads hidden kv-heads]))
+      [:error "llama-block dimensions must be positive integers"]
+      (not= embed (last in)) [:error "llama-block embed dimension mismatch"]
+      (not (zero? (mod embed heads))) [:error "llama-block heads must divide embed"]
+      (not (zero? (mod heads kv-heads))) [:error "llama-block kv-heads must divide heads"]
+      (odd? (quot embed heads)) [:error "llama-block head dimension must be even"]
+      :else [:ok in])))
+
+(defmethod layer-shape :lm-head [_ args in]
+  (let [[embed vocab] args]
+    (cond
+      (not (and (pos-int? embed) (pos-int? vocab)))
+      [:error "lm-head expects positive embed and vocabulary dimensions"]
+      (empty? in) [:error "lm-head expects rank >= 1"]
+      (not= embed (last in)) [:error "lm-head embed dimension mismatch"]
+      :else [:ok (conj (vec (butlast in)) vocab)])))
+
 ;; --- linear ----------------------------------------------------------------
 
 (defmethod layer-shape :linear [_ args in]
@@ -120,8 +143,25 @@
 
 ;; --- norms (shape-preserving, but check feature dim) ------------------------
 
-(doseq [t [:batchnorm :layernorm]]
-  (defmethod layer-shape t [_ _ in] [:ok in]))
+(defmethod layer-shape :batchnorm [_ _ in] [:ok in])
+
+(defmethod layer-shape :layernorm [_ args in]
+  (let [features (nth-arg args 0 nil)]
+    (cond
+      (not (pos-int? features)) [:error "layernorm expects a positive feature count"]
+      (empty? in) [:error "layernorm expects rank >= 1"]
+      (not= features (last in))
+      [:error (str "layernorm features " features " differs from input " (last in))]
+      :else [:ok in])))
+
+(defmethod layer-shape :rmsnorm [_ args in]
+  (let [features (nth-arg args 0 nil)]
+    (cond
+      (not (pos-int? features)) [:error "rmsnorm expects a positive feature count"]
+      (empty? in) [:error "rmsnorm expects rank >= 1"]
+      (not= features (last in))
+      [:error (str "rmsnorm features " features " differs from input " (last in))]
+      :else [:ok in])))
 
 (defmethod layer-shape :groupnorm [_ args in]
   (let [groups (nth-arg args 0 nil)
@@ -212,15 +252,25 @@
 
 (defmethod layer-params :batchnorm [_ args] (* 2 (nth-arg args 0 0)))
 (defmethod layer-params :layernorm [_ args] (* 2 (nth-arg args 0 0)))
+(defmethod layer-params :rmsnorm [_ args] (nth-arg args 0 0))
 (defmethod layer-params :groupnorm [_ args] (* 2 (nth-arg args 1 0)))
 (defmethod layer-params :multihead-attention [_ args]
   (let [embed (nth-arg args 0 0)] (* 4 (+ (* embed embed) embed))))
+(defmethod layer-params :llama-block [_ args]
+  (let [embed (nth-arg args 0 0) heads (nth-arg args 1 1)
+        hidden (nth-arg args 2 0) opts (nth-arg args 3 {})
+        kv-heads (or (:kv-heads opts) heads)
+        kv-embed (* kv-heads (quot embed heads))]
+    (+ (* 2 embed) (* 2 embed embed) (* 2 embed kv-embed)
+       (* 3 embed hidden))))
+(defmethod layer-params :lm-head [_ args]
+  (* (nth-arg args 0 0) (nth-arg args 1 0)))
 
 (def built-in-types
   "The set of layer types this namespace understands."
-  #{:linear :conv2d :maxpool2d :avgpool2d :embedding :batchnorm :layernorm
+  #{:linear :conv2d :maxpool2d :avgpool2d :embedding :batchnorm :layernorm :rmsnorm
     :groupnorm :dropout :flatten :relu :silu :gelu :sigmoid :tanh :softmax
-    :attention :multihead-attention :identity})
+    :attention :multihead-attention :llama-block :lm-head :identity})
 
 (defn known?
   "True if `t` is a built-in layer type."

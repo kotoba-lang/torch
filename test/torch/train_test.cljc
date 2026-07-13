@@ -22,10 +22,145 @@
     (is (= [2 3] (:shape (:w (first (:gradients first-result))))))
     (is (nil? (second (:gradients first-result))))))
 
+(deftest nested-model-description-runs-and-trains-in-leaf-order
+  (let [model (m/sequential
+               (m/linear 2 3)
+               (m/sequential (m/relu) (m/linear 3 2)))
+        input (arr/from-vec backend [1.0 0.0, 0.0 1.0] [2 2])
+        target (arr/from-vec backend [0.5 -0.5, -0.25 0.75] [2 2])
+        initial (nb/random-weights backend model 23)
+        inference (core/run (nb/num-backend backend initial) model input)
+        first-pass (train/loss-and-gradients model initial input target)
+        trained (last (take 21 (iterate (fn [{:keys [weights]}]
+                                          (train/sgd-step
+                                           model weights input target 0.1))
+                                        {:weights initial})))]
+    (is (= 3 (count initial)))
+    (is (nil? (second initial)))
+    (is (= (arr/->vec inference) (arr/->vec (:prediction first-pass))))
+    (is (= 3 (count (:gradients first-pass))))
+    (is (< (:loss trained) (:loss first-pass)))))
+
+(deftest smooth-activation-model-description-runs-and-trains
+  (let [model (m/sequential (m/linear 2 3) (m/sigmoid) (m/tanh) (m/gelu)
+                            (m/linear 3 1))
+        input (arr/from-vec backend [1.0 0.0, 0.0 1.0, 0.5 -0.5] [3 2])
+        target (arr/from-vec backend [0.4 -0.2 0.1] [3 1])
+        initial (nb/random-weights backend model 43)
+        inference (core/run (nb/num-backend backend initial) model input)
+        first-pass (train/loss-and-gradients model initial input target)
+        trained (last (take 41 (iterate (fn [{:keys [weights]}]
+                                          (train/sgd-step model weights input target 0.1))
+                                        {:weights initial})))]
+    (is (= (arr/->vec inference) (arr/->vec (:prediction first-pass))))
+    (is (nil? (nth (:gradients first-pass) 1)))
+    (is (nil? (nth (:gradients first-pass) 2)))
+    (is (nil? (nth (:gradients first-pass) 3)))
+    (is (< (:loss trained) (:loss first-pass)))))
+
+(deftest transformer-style-layernorm-model-runs-and-trains
+  (let [model (m/sequential (m/linear 4 4) (m/layernorm 4) (m/gelu)
+                            (m/linear 4 2))
+        input (arr/from-vec backend
+                            [0.2 -0.1 0.3 0.4, -0.2 0.1 0.5 -0.3,
+                             0.6 0.2 -0.4 0.1] [3 4])
+        target (arr/from-vec backend [0.1 -0.2, 0.3 0.0, -0.1 0.4] [3 2])
+        initial (nb/random-weights backend model 47)
+        inference (core/run (nb/num-backend backend initial) model input)
+        first-pass (train/loss-and-gradients model initial input target)
+        trained (last (take 41 (iterate (fn [{:keys [weights]}]
+                                          (train/sgd-step model weights input target 0.05))
+                                        {:weights initial})))]
+    (is (= (arr/->vec inference) (arr/->vec (:prediction first-pass))))
+    (is (= [4] (:shape (:w (second initial)))))
+    (is (= [4] (:shape (:w (second (:gradients first-pass))))))
+    (is (nil? (nth (:gradients first-pass) 2)))
+    (is (< (:loss trained) (:loss first-pass)))))
+
+(deftest embedding-transformer-prefix-runs-and-trains
+  (let [model (m/sequential (m/embedding 5 4) (m/rmsnorm 4) (m/gelu)
+                            (m/linear 4 2))
+        input (arr/from-vec backend [2 0 2 1] [4])
+        target (arr/from-vec backend [0.1 -0.2, 0.3 0.0, -0.1 0.4, 0.2 0.1]
+                             [4 2])
+        initial (nb/random-weights backend model 53)
+        inference (core/run (nb/num-backend backend initial) model input)
+        first-pass (train/loss-and-gradients model initial input target)
+        trained (last (take 41 (iterate (fn [{:keys [weights]}]
+                                          (train/sgd-step model weights input target 0.05))
+                                        {:weights initial})))]
+    (is (= [5 4] (:shape (:w (first initial)))))
+    (is (= (arr/->vec inference) (arr/->vec (:prediction first-pass))))
+    (is (= [5 4] (:shape (:w (first (:gradients first-pass))))))
+    (is (= [4] (:shape (:w (second (:gradients first-pass))))))
+    (is (nil? (:input-gradient
+               (train/prediction-and-gradients
+                model initial input
+                (arr/from-vec backend (repeat 8 1.0) [4 2])))))
+    (is (< (:loss trained) (:loss first-pass)))))
+
+(deftest llama-decoder-block-runs-and-trains
+  (let [model (m/sequential (m/llama-block 4 2 8 {:position-offset 2}))
+        input (arr/from-vec backend
+                            [0.2 -0.1 0.3 0.4, -0.2 0.1 0.5 -0.3,
+                             0.6 0.2 -0.4 0.1] [3 4])
+        target (arr/from-vec backend
+                             [0.1 0.0 0.2 -0.1, 0.0 0.2 0.1 0.3,
+                              -0.2 0.1 0.0 0.2] [3 4])
+        initial (nb/random-weights backend model 67)
+        inference (core/run (nb/num-backend backend initial) model input)
+        first-pass (train/loss-and-gradients model initial input target)
+        epsilon 1.0e-5
+        qw (:qw (first initial)) values (vec (arr/->vec qw))
+        loss-at (fn [delta]
+                  (:loss
+                   (train/loss-and-gradients
+                    model [(assoc (first initial) :qw
+                                  (arr/from-vec backend
+                                                (assoc values 0 (+ (first values) delta))
+                                                (:shape qw)))]
+                    input target)))
+        numeric (/ (- (loss-at epsilon) (loss-at (- epsilon))) (* 2.0 epsilon))
+        analytic (first (arr/->vec (:qw (first (:gradients first-pass)))))
+        trained (last (take 31 (iterate (fn [{:keys [weights]}]
+                                          (train/sgd-step model weights input target 0.03))
+                                        {:weights initial})))]
+    (is (= (arr/->vec inference) (arr/->vec (:prediction first-pass))))
+    (is (= #{:attn-norm :qw :kw :vw :ow :ffn-norm :gate :up :down}
+           (set (keys (first (:gradients first-pass))))))
+    (is (< (Math/abs (- numeric analytic)) 1.0e-4))
+    (is (< (:loss trained) (:loss first-pass)))))
+
+(deftest complete-llama-lm-graph-trains-through-vocabulary-head
+  (let [model (m/sequential (m/embedding 6 4)
+                            (m/llama-block 4 2 8)
+                            (m/rmsnorm 4) (m/lm-head 4 6))
+        input (arr/from-vec backend [2 0 2] [3])
+        target (arr/from-vec backend (repeat 18 0.0) [3 6])
+        initial (nb/random-weights backend model 79)
+        first-pass (train/loss-and-gradients model initial input target)
+        trained (last (take 21 (iterate (fn [{:keys [weights]}]
+                                          (train/sgd-step model weights input target 0.02))
+                                        {:weights initial})))]
+    (is (= [3 6] (:shape (:prediction first-pass))))
+    (is (= [4 6] (:shape (:w (last (:gradients first-pass))))))
+    (is (< (:loss trained) (:loss first-pass)))))
+
+(deftest grouped-query-llama-trains-smaller-kv-projections
+  (let [model (m/sequential (m/llama-block 4 2 8 {:kv-heads 1}))
+        input (arr/from-vec backend [0.2 -0.1 0.3 0.4,
+                                     -0.2 0.1 0.5 -0.3] [2 4])
+        target (arr/from-vec backend (repeat 8 0.0) [2 4])
+        weights (nb/random-weights backend model 101)
+        result (train/loss-and-gradients model weights input target)]
+    (is (= [4 2] (:shape (:kw (first weights)))))
+    (is (= [4 2] (:shape (:vw (first (:gradients result))))))
+    (is (= [2 4] (:shape (:prediction result))))))
+
 (deftest training-contract-rejects-ambiguous-input
   (let [x (arr/from-vec backend [1 2] [1 2])]
     (is (thrown? #?(:clj Exception :cljs js/Error)
-                 (train/loss-and-gradients (m/sequential (m/gelu)) [nil] x x)))
+                 (train/loss-and-gradients (m/sequential (m/maxpool2d 2)) [nil] x x)))
     (is (thrown? #?(:clj Exception :cljs js/Error)
                  (train/loss-and-gradients (m/sequential (m/linear 2 2)) [] x x)))
     (let [model (m/sequential (m/linear 2 2))
@@ -55,6 +190,30 @@
       (is (not= (arr/->vec (:w (first initial)))
                 (arr/->vec (:w (first (:weights trained)))))))))
 
+(deftest cnn-flatten-bridges-convolution-to-linear-training
+  (let [model (m/sequential (m/conv2d 1 2 1) (m/relu)
+                            (m/flatten) (m/linear 8 1))
+        input (arr/from-vec backend
+                            [0.1 0.3 -0.2 0.5,
+                             -0.4 0.2 0.6 -0.1] [2 1 2 2])
+        target (arr/from-vec backend [0.4 -0.3] [2 1])
+        initial (nb/random-weights backend model 37)
+        inference (core/run (nb/num-backend backend initial) model input)
+        first-pass (train/loss-and-gradients model initial input target)
+        trained (last (take 31 (iterate (fn [{:keys [weights]}]
+                                          (train/sgd-step
+                                           model weights input target 0.05))
+                                        {:weights initial})))]
+    (is (= [2 1] (:shape inference)))
+    (is (= (arr/->vec inference) (arr/->vec (:prediction first-pass))))
+    (is (= [2 1 2 2] (:shape (:input-gradient
+                              (train/prediction-and-gradients
+                               model initial input
+                               (arr/from-vec backend [1.0 1.0] [2 1]))))))
+    (is (nil? (nth (:gradients first-pass) 2)))
+    (is (= [8 1] (:shape (:w (nth (:gradients first-pass) 3)))))
+    (is (< (:loss trained) (:loss first-pass)))))
+
 (deftest multi-head-attention-model-trains
   (testing "two-head attention participates in a trainable sequential graph"
     (let [model (m/sequential (m/linear 4 4) (m/attention 2) (m/linear 4 4))
@@ -76,7 +235,10 @@
                 (arr/->vec (:w (nth (:weights trained) 2))))))))
 
 (deftest learned-multihead-attention-trains-all-projections
-  (let [model (m/sequential (m/multihead-attention 4 2))
+  (let [model (m/sequential
+               (m/multihead-attention 4 2
+                                      {:causal? true :rope? true
+                                       :rope-theta 10000.0 :position-offset 2}))
         initial (nb/random-weights backend model 29)
         input (arr/from-vec backend
                             [0.2 -0.1 0.3 0.4, -0.2 0.1 0.5 -0.3,
@@ -84,6 +246,7 @@
         target (arr/from-vec backend
                              [0.1 0.0 0.2 -0.1, 0.0 0.2 0.1 0.3,
                               -0.2 0.1 0.0 0.2] [3 4])
+        inference (core/run (nb/num-backend backend initial) model input)
         first-pass (train/loss-and-gradients model initial input target)
         epsilon 1.0e-5
         loss-with-q0
@@ -102,6 +265,7 @@
         gradient (first (:gradients first-pass))]
     (is (= #{:qw :qb :kw :kb :vw :vb :ow :ob} (set (keys gradient))))
     (is (every? some? (vals gradient)))
+    (is (= (arr/->vec inference) (arr/->vec (:prediction first-pass))))
     (is (< (Math/abs (- numeric-q0 (first (arr/->vec (:qw gradient))))) 1.0e-5))
     (is (= [3 4] (:shape (:prediction first-pass))))
     (is (< (:loss trained) (:loss first-pass)))))
