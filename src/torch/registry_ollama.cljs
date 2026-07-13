@@ -1,6 +1,7 @@
 (ns torch.registry-ollama
   "Ollama callbacks routed through lazy resident model resources."
   (:require [torch.continuous-ollama :as continuous]
+            [torch.ollama :as ollama]
             [torch.registry-runtime :as registry-runtime]))
 
 (defn router [runtime*]
@@ -23,8 +24,17 @@
     (swap! routes dissoc request-id))
   nil)
 
+(defn- prepare-request [{:keys [runtime]} request]
+  (if (:chat? request)
+    (let [descriptor (registry-runtime/describe runtime (:model request))]
+      (assoc request :prompt
+             (ollama/render-chat-prompt (:messages request)
+                                        (:chat-template descriptor))))
+    request))
+
 (defn- routed-stream [router* request context]
-  (let [request-id (:request-id context)
+  (let [request (prepare-request router* request)
+        request-id (:request-id context)
         route (acquire-route! router* request context)
         source (continuous/submit-stream! (get-in route [:resource :host])
                                           request context)
@@ -52,7 +62,8 @@
             (.cancel reader reason))})))
 
 (defn- routed-generate [router* request context]
-  (let [request-id (:request-id context)
+  (let [request (prepare-request router* request)
+        request-id (:request-id context)
         route (acquire-route! router* request context)]
     (-> (continuous/submit! (get-in route [:resource :host]) request context)
         (.finally #(release-route! router* request-id route)))))
@@ -72,7 +83,7 @@
                  (assoc :size_vram (or (:size-vram row) (:size row)))
                  (assoc :context_length (:context-length row))
                  (dissoc :path :loaded :active :expires-at-ms
-                         :size-vram :context-length :show)))
+                         :size-vram :context-length :show :chat-template)))
            (registry-runtime/running-models (:runtime router*)))
     :show-model
     (fn [name verbose?]
@@ -80,6 +91,7 @@
             show (:show descriptor)]
         (cond-> (merge {:parameters "" :license ""
                         :capabilities ["completion"]
+                        :template (:chat-template descriptor "")
                         :details (:details descriptor)
                         :model_info (:model-info descriptor)}
                        show)

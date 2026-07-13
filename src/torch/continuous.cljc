@@ -52,13 +52,26 @@
                                :random-values (repeat 0.5)}
                               (dissoc options :deadline-ms))}))))
 
+(defn- sequence-capacity? [engine* prompt-count _options]
+  (every? (fn [runtime*]
+            (let [{:keys [block-count block-size]} (:pool runtime*)]
+              (<= prompt-count (* block-count block-size))))
+          (:runtimes engine*)))
+
 (defn submit
   "Backpressure-aware enqueue. Returns `{:engine ... :accepted? boolean}`
   instead of throwing when the configured waiting queue is full."
   [engine* request-id prompt-tokens options]
-  (if (>= (count (:waiting engine*)) (:max-waiting engine*))
+  (cond
+    (not (sequence-capacity? engine* (count prompt-tokens) options))
+    {:engine (update-in engine* [:metrics :rejected] inc)
+     :accepted? false :reason :sequence-capacity}
+
+    (>= (count (:waiting engine*)) (:max-waiting engine*))
     {:engine (update-in engine* [:metrics :rejected] inc)
      :accepted? false :reason :backpressure}
+
+    :else
     (let [engine* (-> (enqueue engine* request-id prompt-tokens options)
                       (update-in [:metrics :submitted] inc))
           waiting (count (:waiting engine*))]
@@ -118,6 +131,12 @@
            (seq (get-in runtime* [:pool :free])))))
    runtimes))
 
+(defn- at-context-capacity? [runtimes request-id]
+  (every? (fn [runtime*]
+            (let [{:keys [blocks]} (kv/block-table (:pool runtime*) request-id)]
+              (= (count blocks) (get-in runtime* [:pool :block-count]))))
+          runtimes))
+
 (defn- choose-token [{:keys [prompt-tokens generated logits options]}]
   (let [index (count generated)
         random-values (:random-values options)]
@@ -161,6 +180,9 @@
                  (finish-request state request-id generated
                                  (if (= token eos-id) :eos :length))
 
+                 (at-context-capacity? (:runtimes state) request-id)
+                 (finish-request state request-id generated :length)
+
                  (can-append? (:runtimes state) request-id)
                  (let [step ((:step-fn state) token (:runtimes state) request-id)]
                    (-> state
@@ -188,6 +210,10 @@
            (assoc prepared :engine
                   (finish-request engine request-id generated
                                   (if (= token eos-id) :eos :length)))
+
+           (at-context-capacity? (:runtimes engine) request-id)
+           (assoc prepared :engine
+                  (finish-request engine request-id generated :length))
 
            (can-append? (:runtimes engine) request-id)
            (-> prepared

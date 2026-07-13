@@ -1,6 +1,7 @@
 (ns torch.ollama
   "Ollama-compatible `/api/generate` request and streaming response contract."
-  (:require [torch.continuous :as continuous]
+  (:require [clojure.string :as str]
+            [torch.continuous :as continuous]
             [torch.tokenizer :as tokenizer]))
 
 (defn- parse-integer [text]
@@ -53,18 +54,54 @@
      :timeout-ms (when timeout_ms (long timeout_ms))
      :keep-alive-ms (parse-keep-alive keep_alive)}))
 
-(defn render-chat-prompt
-  "Render validated text-only chat history into a deterministic portable prompt.
-  Model-specific templates can replace this boundary when present in a catalog."
-  [messages]
+(defn- portable-chat [messages]
   (str (apply str
               (map (fn [{:keys [role content]}]
                      (case role
                        "system" (str "System: " content "\n")
                        "user" (str "User: " content "\n")
-                       "assistant" (str "Assistant: " content "\n")))
-                   messages))
+                       "assistant" (str "Assistant: " content "\n"))) messages))
        "Assistant:"))
+
+(defn- llama3-chat [messages]
+  (str (apply str
+              (map (fn [{:keys [role content]}]
+                     (str "<|start_header_id|>" role "<|end_header_id|>\n\n"
+                          content "<|eot_id|>")) messages))
+       "<|start_header_id|>assistant<|end_header_id|>\n\n"))
+
+(defn- chatml-chat [messages]
+  (str (apply str (map (fn [{:keys [role content]}]
+                         (str "<|im_start|>" role "\n" content "<|im_end|>\n"))
+                       messages))
+       "<|im_start|>assistant\n"))
+
+(defn- llama2-chat [messages]
+  (let [system (some #(when (= "system" (:role %)) (:content %)) messages)
+        turns (remove #(= "system" (:role %)) messages)]
+    (loop [turns turns first-user? true output ""]
+      (if-let [{:keys [role content]} (first turns)]
+        (case role
+          "user" (recur (next turns) false
+                        (str output "[INST] "
+                             (when (and first-user? system)
+                               (str "<<SYS>>\n" system "\n<</SYS>>\n\n"))
+                             content " [/INST]"))
+          "assistant" (recur (next turns) first-user? (str output " " content " </s>")))
+        output))))
+
+(defn render-chat-prompt
+  "Render chat using recognized GGUF Jinja template families. Unknown model
+  templates fail explicitly; models without metadata use a portable fallback."
+  ([messages] (portable-chat messages))
+  ([messages template]
+   (cond
+     (nil? template) (portable-chat messages)
+     (str/includes? template "<|start_header_id|>") (llama3-chat messages)
+     (str/includes? template "<|im_start|>") (chatml-chat messages)
+     (str/includes? template "[INST]") (llama2-chat messages)
+     :else (throw (ex-info "unsupported GGUF chat template"
+                           {:status 400 :template template})))))
 
 (defn normalize-chat-request
   "Validate Ollama `/api/chat` text messages and translate them to generation.

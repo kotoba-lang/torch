@@ -113,7 +113,9 @@
                          (continuous/submit engine* request-id prompt-ids options)]
                      (if accepted? engine
                          (throw (ex-info "continuous admission rejected"
-                                         {:reason reason :status 503}))))))
+                                         {:reason reason
+                                          :status (if (= :sequence-capacity reason)
+                                                    400 503)}))))))
                 (.then (fn [_] (schedule-pump! host*)))
                 (.catch #(.error controller %))))
           :cancel (fn [_] (cancel! host* request-id :client-disconnect))})))

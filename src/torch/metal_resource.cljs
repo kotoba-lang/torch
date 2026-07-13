@@ -17,6 +17,7 @@
      :context-length (:context-length config)
      :details (:details manifest)
      :model-info (:model-info manifest)
+     :chat-template (:chat-template manifest)
      :show {:modified_at (some-> (.-mtime stat) .toISOString)
             :parameters (:parameters manifest "")
             :license (:license manifest "")

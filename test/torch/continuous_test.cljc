@@ -126,6 +126,32 @@
     (is (= #{0} (set (get-in engine [:runtimes 0 :pool :free]))))
     (is (kv/valid? (get-in engine [:runtimes 0 :pool])))))
 
+(deftest submit-rejects-a-sequence-that-can-never-fit
+  (let [storage {:write! (fn [& _]) :copy-block! (fn [& _])
+                 :attention (fn [& _] [0.0])}
+        runtime (paged/runtime (kv/pool 2 2) storage)
+        engine (continuous/engine [runtime]
+                                  (fn [_ runtimes request-id]
+                                    {:logits [1.0]
+                                     :runtimes
+                                     (mapv #(-> (paged/append-kv! % request-id [] [])
+                                                :runtime)
+                                           runtimes)}) 1)
+        prompt-too-long (continuous/submit engine :prompt [1 2 3 4 5]
+                                           {:max-new-tokens 1})
+        decode-too-long (continuous/submit engine :decode [1 2]
+                                           {:max-new-tokens 4})]
+    (is (false? (:accepted? prompt-too-long)))
+    (is (= :sequence-capacity (:reason prompt-too-long)))
+    (is (:accepted? decode-too-long))
+    (is (empty? (get-in prompt-too-long [:engine :waiting])))
+    (is (= 1 (get-in prompt-too-long [:engine :metrics :rejected])))
+    (let [finished (-> (:engine decode-too-long)
+                       continuous/admit continuous/tick continuous/tick)]
+      (is (= :length (get-in finished [:completed :decode :reason])))
+      (is (= 2 (count (get-in finished [:completed :decode :generated-ids]))))
+      (is (= #{0 1} (set (get-in finished [:runtimes 0 :pool :free])))))))
+
 (deftest fused-batch-paged-llama-matches-ragged-full-sequences
   (let [model* (model/sequential
                 (model/embedding 6 4)

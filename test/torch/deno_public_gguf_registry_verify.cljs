@@ -55,7 +55,7 @@
                            (swap! events conj [:load (:name descriptor)])
                            (resource/load-resource
                             backend descriptor
-                            {:pool-blocks 16 :block-size 2 :max-running 2}))
+                            {:pool-blocks 64 :block-size 2 :max-running 2}))
                  unload-fn (fn [loaded]
                              (swap! events conj [:unload
                                                  (get-in loaded [:descriptor :name])])
@@ -65,7 +65,8 @@
                          (registry/registry (quot (* model-size 3) 2)
                                             load-fn unload-fn)
                          [(assoc (resource/descriptor "model-a:latest" bundle-path)
-                                 :digest "sha256:a")
+                                 :digest "sha256:a"
+                                 :chat-template "{{ '<|im_start|>' }}")
                           (assoc (resource/descriptor "model-b:latest" bundle-path)
                                  :digest "sha256:b")])
                  runtime* (registry-runtime/runtime registry*)
@@ -134,6 +135,7 @@
                                  (= 200 show-status) (= 404 missing-status)
                                  (= "gguf" (get-in show-body [:details :format]))
                                  (= "llama" (get-in show-body [:details :family]))
+                                 (= "{{ '<|im_start|>' }}" (:template show-body))
                                  (= ["completion"] (:capabilities show-body))
                                  (= 2048 (get-in show-body [:model_info
                                                             :llama.context_length]))

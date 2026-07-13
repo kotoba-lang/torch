@@ -96,3 +96,20 @@
          #?(:clj Exception :cljs js/Error) #"invalid Ollama chat"
          (ollama/normalize-chat-request
           {:model "tiny" :messages [{:role "tool" :content "result"}]})))))
+
+(deftest recognized-gguf-chat-template-families-render-special-tokens
+  (let [messages [{:role "system" :content "Rules"}
+                  {:role "user" :content "Hi"}]]
+    (is (= (str "<|start_header_id|>system<|end_header_id|>\n\nRules<|eot_id|>"
+                "<|start_header_id|>user<|end_header_id|>\n\nHi<|eot_id|>"
+                "<|start_header_id|>assistant<|end_header_id|>\n\n")
+           (ollama/render-chat-prompt
+            messages "{% for message %}<|start_header_id|>{% endfor %}")))
+    (is (= (str "<|im_start|>system\nRules<|im_end|>\n"
+                "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n")
+           (ollama/render-chat-prompt messages "{{ '<|im_start|>' }}")))
+    (is (= "[INST] <<SYS>>\nRules\n<</SYS>>\n\nHi [/INST]"
+           (ollama/render-chat-prompt messages "{% if %}[INST]{% endif %}")))
+    (is (thrown-with-msg?
+         #?(:clj Exception :cljs js/Error) #"unsupported GGUF chat template"
+         (ollama/render-chat-prompt messages "unknown jinja")))))

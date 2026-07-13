@@ -232,6 +232,11 @@ deadlines, timeout eviction, immediate block release, and counter/gauge snapshot
 for submissions, admissions, rejections, completions, prompt/decode tokens,
 microbatches, active queues, peaks, and free blocks per layer.
 
+Submission rejects a prompt that can never fit the physical paged-KV capacity.
+If decode reaches the per-sequence capacity, it completes with `length` and
+releases every block instead of remaining permanently paused. This invariant was
+also exercised by the longer ChatML control-token prompt on real Metal.
+
 The lower execution API also provides `llama-lm-paged-batch-step`: QKV and FFN
 projections remain batch tensors while each layer resolves request-specific RoPE
 positions and performs one fused ragged paged-attention dispatch. A length-1 and
@@ -256,7 +261,11 @@ it implements `GET /api/version`, `GET /api/tags`, `GET /api/ps`,
 `POST /api/show`, and streaming NDJSON or
 non-streaming `POST /api/generate` and `POST /api/chat`, including JSON 400/404
 errors. Chat validates ordered system/user/assistant text history, renders a
-deterministic portable prompt, and returns Ollama `message.role/content` chunks.
+model-specific prompt from GGUF `tokenizer.chat_template`, and returns Ollama
+`message.role/content` chunks. The renderer recognizes Llama 2 `[INST]`, Llama 3
+header tokens, and ChatML; an unknown Jinja family fails explicitly instead of
+silently applying the wrong prompt. Models without template metadata retain the
+deterministic portable prompt.
 Images, thinking, structured output, and tool calls remain explicit unsupported
 boundaries rather than being silently ignored. Its live
 Request/Response verifier checks headers, status codes, three NDJSON records, and

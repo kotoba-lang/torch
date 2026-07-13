@@ -99,6 +99,8 @@
                   [[:a "Hello"] [:b "Hi there"] [:c "Hello world"]])
             bundle {:format :torch/gguf-metal-bundle-v2
                     :config (assoc config :vocab vocab)
+                    :chat-template (get-in loaded [:gguf :metadata
+                                                   "tokenizer.chat_template"])
                     :details {:parent_model "" :format "gguf"
                               :family "llama" :families ["llama"]
                               :parameter_size "1.0M"
