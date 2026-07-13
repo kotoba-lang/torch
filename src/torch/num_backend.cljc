@@ -663,6 +663,40 @@
                             {:used cache-index :provided (count caches)})))
           {:logits value :caches updated})))))
 
+(defn llama-embedding-step
+  "Execute one token through the embedding, Llama blocks, and final norm,
+  stopping before the LM head. Returns the final hidden row and updated caches."
+  [model* weights token caches]
+  (let [layers (model/execution-layers model*)]
+    (when-not (= (count layers) (count weights))
+      (throw (ex-info "Llama embedding layers and weights must align" {})))
+    (loop [remaining (seq (map vector layers weights))
+           value token value-owned? false cache-index 0 updated []]
+      (if-let [[layer weight] (first remaining)]
+        (cond
+          (= :lm-head (model/layer-type layer))
+          (do
+            (when-not (= cache-index (count caches))
+              (throw (ex-info "unused Llama embedding caches"
+                              {:used cache-index :provided (count caches)})))
+            {:embedding value :caches updated})
+
+          (= :llama-block (model/layer-type layer))
+          (let [cache (nth caches cache-index nil)
+                _ (when-not cache
+                    (throw (ex-info "missing per-block embedding KV cache"
+                                    {:cache-index cache-index})))
+                step (llama-block-step layer weight value cache)
+                _ (when value-owned? (arr/release! value))]
+            (recur (next remaining) (:output step) true (inc cache-index)
+                   (conj updated (:cache step))))
+
+          :else
+          (let [output (layer-forward layer weight value nil)
+                _ (when value-owned? (arr/release! value))]
+            (recur (next remaining) output true cache-index updated)))
+        (throw (ex-info "Llama embedding model has no LM-head boundary" {}))))))
+
 (defn release-kv-cache!
   "Explicitly release the two device arrays in a superseded KV cache."
   [cache]

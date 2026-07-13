@@ -113,3 +113,15 @@
     (is (thrown-with-msg?
          #?(:clj Exception :cljs js/Error) #"unsupported GGUF chat template"
          (ollama/render-chat-prompt messages "unknown jinja")))))
+
+(deftest embed-request-normalizes-single-and-batched-input
+  (is (= {:model "embed" :inputs ["hello"] :truncate? true
+          :dimensions nil :keep-alive-ms 300000}
+         (ollama/normalize-embed-request {:model "embed" :input "hello"})))
+  (is (= ["a" "b"]
+         (:inputs (ollama/normalize-embed-request
+                   {:model "embed" :input ["a" "b"] :truncate false
+                    :dimensions 4 :keep_alive 0}))))
+  (is (thrown-with-msg?
+       #?(:clj Exception :cljs js/Error) #"invalid Ollama embed"
+       (ollama/normalize-embed-request {:model "embed" :input []}))))

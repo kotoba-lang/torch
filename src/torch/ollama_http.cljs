@@ -62,14 +62,14 @@
 
   - `:version` string
   - `:models` vector of Ollama tag maps
-  - `POST /api/generate` and text-only `POST /api/chat`
+  - `POST /api/generate`, text-only `POST /api/chat`, and `POST /api/embed`
   - `:generate!` normalized-request, request-context -> Promise/vector chunks
   - `:generate-stream!` normalized-request, context -> Promise/ReadableStream
   - `:cancel!` request-id, reason (optional)
   - `:request-id-fn` zero-arg ID supplier (optional)
 
   The returned function can be passed directly to `Deno.serve`."
-  [{:keys [version models running-models show-model generate! generate-stream!
+  [{:keys [version models running-models show-model generate! generate-stream! embed!
            cancel! request-id-fn]
     :or {version "0.0.0" models [] cancel! (fn [& _])
          request-id-fn #(str (random-uuid))}}]
@@ -106,6 +106,30 @@
                          (json-response 200 (show-model model (boolean verbose))))))
               (.catch (fn [error]
                         (error-response (or (:status (ex-data error)) 400) error)))))
+
+        (and (= method "POST") (= path "/api/embed"))
+        (if-not (fn? embed!)
+          (js/Promise.resolve (json-response 404 {:error "embeddings unavailable"}))
+          (let [started (.now js/performance)
+                context {:request-id (request-id-fn) :signal (.-signal request)}]
+            (-> (.json request)
+                (.then (fn [body]
+                         (let [normalized
+                               (ollama/normalize-embed-request
+                                (js->clj body :keywordize-keys true))]
+                           (-> (js/Promise.resolve (embed! normalized context))
+                               (.then
+                                (fn [{:keys [embeddings prompt-eval-count]}]
+                                  (json-response
+                                   200 {:model (:model normalized)
+                                        :embeddings embeddings
+                                        :total_duration
+                                        (* 1.0e6 (- (.now js/performance) started))
+                                        :load_duration 0
+                                        :prompt_eval_count prompt-eval-count})))))))
+                (.catch (fn [error]
+                          (error-response (or (:status (ex-data error)) 400)
+                                          error))))))
 
         (and (= method "POST")
              (or (= path "/api/generate") (= path "/api/chat")))

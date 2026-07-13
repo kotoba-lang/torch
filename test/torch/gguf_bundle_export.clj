@@ -113,7 +113,7 @@
                                  "llama.feed_forward_length" (:hidden-dim config)
                                  "llama.attention.head_count" (:head-count config)
                                  "llama.attention.head_count_kv" (:kv-head-count config)}
-                    :capabilities ["completion"]
+                    :capabilities ["completion" "embedding"]
                     :tokenizer (select-keys
                                 (:tokenizer loaded)
                                 [:tokens :merges :scores :model :space-prefix

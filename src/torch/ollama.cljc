@@ -129,6 +129,20 @@
            :options options :timeout_ms timeout_ms :keep_alive keep_alive})
          :messages messages :chat? true))
 
+(defn normalize-embed-request
+  "Validate Ollama `/api/embed`; returns a canonical vector of input strings."
+  [{:keys [model input truncate dimensions keep_alive] :as body}]
+  (let [inputs (cond (string? input) [input]
+                     (and (vector? input) (every? string? input)) input
+                     :else nil)]
+    (when-not (and (string? model) (seq model) (seq inputs)
+                   (every? seq inputs)
+                   (or (nil? truncate) (boolean? truncate))
+                   (or (nil? dimensions) (pos-int? dimensions)))
+      (throw (ex-info "invalid Ollama embed request" {:status 400 :body body})))
+    {:model model :inputs inputs :truncate? (not= false truncate)
+     :dimensions dimensions :keep-alive-ms (parse-keep-alive keep_alive)}))
+
 (defn submit-generate
   "Tokenize and submit an Ollama request to a continuous engine."
   [engine* tokenizer* request-id body now-ms]

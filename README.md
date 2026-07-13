@@ -258,7 +258,7 @@ released and reused to prefill request `:c`.
 engine submissions and emits Ollama-shaped token/final payloads.
 `torch.ollama-http/handler` is a standard Fetch handler suitable for `Deno.serve`;
 it implements `GET /api/version`, `GET /api/tags`, `GET /api/ps`,
-`POST /api/show`, and streaming NDJSON or
+`POST /api/show`, `POST /api/embed`, and streaming NDJSON or
 non-streaming `POST /api/generate` and `POST /api/chat`, including JSON 400/404
 errors. Chat validates ordered system/user/assistant text history, renders a
 model-specific prompt from GGUF `tokenizer.chat_template`, and returns Ollama
@@ -271,10 +271,18 @@ boundaries rather than being silently ignored. Its live
 Request/Response verifier checks headers, status codes, three NDJSON records, and
 the assembled non-stream response:
 
+`/api/embed` accepts one string or a batch, runs the real Llama embedding and
+decoder blocks through the resident model, stops before the LM head, takes the
+last causal hidden row, and returns L2-normalized vectors. Context overflow obeys
+`truncate`; unsupported output dimensions fail explicitly. The cached step is
+checked against full-sequence CPU hidden states, while the registry verifier runs
+two inputs through the public GGUF on Apple Metal and checks dimensions, unit
+norms, lifecycle refcounts, and final GPU cleanup.
+
 ```sh
 clojure -M:deno-ollama-http-verify
 deno run --allow-all target/deno-ollama-http-verify.cjs
-# version/tags, stream/non-stream generate, invalid request: passed
+# version/tags, generate/chat, batched embed, invalid request: passed
 ```
 
 `serve!` starts a real Deno listener (default `127.0.0.1:11434`) and exposes its
@@ -441,6 +449,7 @@ clojure -M:deno-public-gguf-registry-verify && \
 # Apple M4: model-name routed CPU parity / dynamic residency tags: passed
 # Ollama ps/show follow real Metal residency: passed
 # Ollama chat runs through the resident public-GGUF Metal model: passed
+# Ollama normalized batched embeddings run on Metal: passed
 # inactive model-a LRU-evicted when model-b loads under a 1.5-model budget
 # each model loaded/unloaded exactly once; resident bytes: 0
 # GPU baseline restored: passed

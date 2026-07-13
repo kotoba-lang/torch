@@ -40,6 +40,23 @@
                                  :options {:temperature 0.0 :num_predict 2}}))})
       (.then #(.json %))))
 
+(defn- embed [url model]
+  (-> (js/fetch
+       url #js {:method "POST" :headers #js {"content-type" "application/json"}
+                :body (js/JSON.stringify
+                       (clj->js {:model model :input ["Hi" "Hello"]
+                                 :keep_alive -1}))})
+      (.then #(.json %))))
+
+(defn- invalid-embed [url model]
+  (-> (js/fetch
+       url #js {:method "POST" :headers #js {"content-type" "application/json"}
+                :body (js/JSON.stringify
+                       (clj->js {:model model :input "Hi" :dimensions 8
+                                 :keep_alive -1}))})
+      (.then #(vector (.-status %) (.json %)))
+      (.then (fn [[status body]] (.then body #(vector status %))))))
+
 (defn -main [& [bundle-path]]
   (let [manifest (bundle/load-bundle bundle-path)
         expected (into (:prompt-ids manifest)
@@ -82,7 +99,8 @@
                  tags-url (str base "/api/tags")
                  ps-url (str base "/api/ps")
                  show-url (str base "/api/show")
-                 chat-url (str base "/api/chat")]
+                 chat-url (str base "/api/chat")
+                 embed-url (str base "/api/embed")]
              (println "Real GGUF registry routing on"
                       (gpu/adapter-description request))
              (-> (js/Promise.all
@@ -95,9 +113,12 @@
                  (.then
                   (fn [state]
                     (-> (js/Promise.all #js [(json-get tags-url) (json-get ps-url)
-                                             (chat chat-url "model-a:latest")])
+                                             (chat chat-url "model-a:latest")
+                                             (embed embed-url "model-a:latest")
+                                             (invalid-embed embed-url "model-a:latest")])
                         (.then #(assoc state :tags-a (aget % 0) :ps-a (aget % 1)
-                                      :chat-a (aget % 2))))))
+                                      :chat-a (aget % 2) :embed-a (aget % 3)
+                                      :invalid-embed (aget % 4))))))
                  (.then
                   (fn [state]
                     (-> (post generate-url "model-b:latest" 0)
@@ -107,7 +128,8 @@
                     (-> (js/Promise.all #js [(json-get tags-url) (json-get ps-url)])
                         (.then #(assoc state :tags-b (aget % 0) :ps-b (aget % 1))))))
                  (.then
-                  (fn [{:keys [initial a b tags-a tags-b ps-a ps-b chat-a]}]
+                  (fn [{:keys [initial a b tags-a tags-b ps-a ps-b chat-a embed-a
+                               invalid-embed]}]
                     (let [context-a (vec (js->clj (.-context a)))
                           context-b (vec (js->clj (.-context b)))
                           rows-a (js->clj (.-models tags-a)
@@ -136,7 +158,8 @@
                                  (= "gguf" (get-in show-body [:details :format]))
                                  (= "llama" (get-in show-body [:details :family]))
                                  (= "{{ '<|im_start|>' }}" (:template show-body))
-                                 (= ["completion"] (:capabilities show-body))
+                                 (= #{"completion" "embedding"}
+                                    (set (:capabilities show-body)))
                                  (= 2048 (get-in show-body [:model_info
                                                             :llama.context_length]))
                                  (= ["model-a:latest"] (mapv :name ps-a-rows))
@@ -145,7 +168,16 @@
                                  (= 2048 (:context_length (first ps-a-rows))))
                             chat? (and (true? (.-done chat-a))
                                        (= "assistant" (.. chat-a -message -role))
-                                       (string? (.. chat-a -message -content)))]
+                                       (string? (.. chat-a -message -content)))
+                            embeddings (js->clj (.-embeddings embed-a))
+                            [invalid-embed-status _] (js->clj invalid-embed)
+                            embed? (and (= [16 16] (mapv count embeddings))
+                                        (= 400 invalid-embed-status)
+                                        (every? #(< (js/Math.abs (- 1.0
+                                                                   (js/Math.sqrt
+                                                                    (reduce + (map (fn [x] (* x x)) %)))))
+                                                    1.0e-5)
+                                                embeddings))]
                       (registry-runtime/expire! runtime* (+ 1000 (.now js/Date)))
                       (.shutdown server)
                       (let [stats (registry-runtime/stats runtime*)
@@ -164,6 +196,8 @@
                                  (if management? "passed" "failed"))
                         (println "Ollama chat runs through resident Metal model:"
                                  (if chat? "passed" "failed"))
+                        (println "Ollama normalized embeddings run on Metal:"
+                                 (if embed? "passed" "failed"))
                         (println "inactive LRU eviction:"
                                  (if eviction? "passed" "failed"))
                         (println "load/unload exactly once:"
@@ -171,7 +205,7 @@
                         (println "registry resident bytes:" (:resident-bytes stats))
                         (println "GPU baseline restored:"
                                  (if released? "passed" "failed"))
-                        (when-not (and parity? tags? management? chat? eviction? lifecycle? released?
+                        (when-not (and parity? tags? management? chat? embed? eviction? lifecycle? released?
                                        (zero? (:resident-bytes stats)))
                           (throw (js/Error.
                                   "real GGUF registry verification failed")))))))))))

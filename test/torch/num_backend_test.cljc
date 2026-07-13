@@ -405,6 +405,31 @@
     (is (every? #(< (Math/abs %) 1.0e-5)
                 (map - (arr/->vec full) (:logits decoded))))))
 
+(deftest cached-llama-embedding-step-matches-final-hidden-state
+  (let [model (m/sequential (m/embedding 6 4)
+                            (m/llama-block 4 2 8)
+                            (m/llama-block 4 2 8)
+                            (m/rmsnorm 4) (m/lm-head 4 6))
+        weights (nb/random-weights backend model 74)
+        hidden-model (apply m/sequential
+                            (butlast (m/execution-layers model)))
+        token-ids [2 0 2]
+        full (core/run (nb/num-backend backend (vec (butlast weights)))
+                       hidden-model (arr/from-vec backend token-ids [3]))
+        initial (nb/init-llama-caches backend model 8)
+        decoded (reduce (fn [{:keys [caches embeddings]} token]
+                          (let [step (nb/llama-embedding-step
+                                      model weights
+                                      (arr/from-vec backend [token] [1]) caches)]
+                            {:caches (:caches step)
+                             :embeddings (into embeddings
+                                               (arr/->vec (:embedding step)))}))
+                        {:caches initial :embeddings []} token-ids)]
+    (is (= [3 4] (:shape full)))
+    (is (= [3 3] (mapv :length (:caches decoded))))
+    (is (every? #(< (Math/abs %) 1.0e-5)
+                (map - (arr/->vec full) (:embeddings decoded))))))
+
 (defn- cpu-paged-storage [block-count block-size heads kv-heads]
   (let [keys (atom (vec (repeat block-count (vec (repeat block-size nil)))))
         values (atom (vec (repeat block-count (vec (repeat block-size nil)))))]

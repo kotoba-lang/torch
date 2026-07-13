@@ -7,7 +7,8 @@
             [torch.metal-bundle :as bundle]
             [torch.metal-paged :as metal-paged]
             [torch.num-backend :as nb]
-            [torch.paged-runtime :as paged]))
+            [torch.paged-runtime :as paged]
+            [torch.tokenizer :as tokenizer]))
 
 (defn descriptor [name path]
   (let [stat (js/Deno.statSync path)
@@ -30,6 +31,51 @@
                (assoc step :logits
                       (if vocab (mapv vec (partition vocab values))
                           (vec values)))))))
+
+(defn- l2-normalize [values]
+  (let [norm (js/Math.sqrt (reduce + (map #(* % %) values)))]
+    (if (zero? norm) (vec values) (mapv #(/ % norm) values))))
+
+(defn- embed-one! [backend model weights tokenizer* context-length text truncate?]
+  (let [encoded (tokenizer/encode tokenizer* text)
+        _ (when (and (> (count encoded) context-length) (not truncate?))
+            (throw (ex-info "embedding input exceeds model context length"
+                            {:status 400 :tokens (count encoded)
+                             :context-length context-length})))
+        ids (vec (take context-length encoded))
+        caches* (atom (nb/init-llama-caches backend model (count ids)))]
+    (try
+      (let [embedding
+            (reduce (fn [previous token-id]
+                      (let [token (arr/from-vec backend [token-id] [1])
+                            step (nb/llama-embedding-step model weights token @caches*)]
+                        (arr/release! token)
+                        (when previous (arr/release! previous))
+                        (reset! caches* (:caches step))
+                        (:embedding step)))
+                    nil ids)]
+        (-> (arr/->vec embedding)
+            (.then #(hash-map :embedding (l2-normalize %) :tokens (count ids)))
+            (.finally #(do (arr/release! embedding)
+                           (nb/release-llama-caches! @caches*)))))
+      (catch :default error
+        (nb/release-llama-caches! @caches*)
+        (throw error)))))
+
+(defn- embed-batch! [backend model weights tokenizer* config request]
+  (let [embed-dim (:embed-dim config)
+        dimensions (:dimensions request)]
+    (when (and dimensions (not= dimensions embed-dim))
+      (throw (ex-info "requested embedding dimensions are unsupported by this model"
+                      {:status 400 :requested dimensions :available embed-dim})))
+    (reduce
+     (fn [promise text]
+       (.then promise
+              (fn [results]
+                (-> (embed-one! backend model weights tokenizer*
+                                (:context-length config) text (:truncate? request))
+                    (.then #(conj results %))))))
+     (js/Promise.resolve []) (:inputs request))))
 
 (defn load-resource
   ([backend descriptor*] (load-resource backend descriptor* {}))
@@ -68,6 +114,12 @@
          host* (continuous-ollama/host engine tokenizer)]
      (merge instance
             {:descriptor descriptor* :storages storages :host host*
+             :embed! #(-> (embed-batch! backend model weights tokenizer
+                                        (:config manifest) %)
+                          (.then (fn [rows]
+                                   {:embeddings (mapv :embedding rows)
+                                    :prompt-eval-count
+                                    (reduce + (map :tokens rows))})))
              :pool-blocks pool-blocks :block-size block-size}))))
 
 (defn unload-resource! [resource]

@@ -68,6 +68,21 @@
     (-> (continuous/submit! (get-in route [:resource :host]) request context)
         (.finally #(release-route! router* request-id route)))))
 
+(defn- routed-embed [router* request context]
+  (let [request-id (:request-id context)
+        route (acquire-route! router* request context)
+        embed! (get-in route [:resource :embed!])]
+    (if-not (fn? embed!)
+      (do (release-route! router* request-id route)
+          (js/Promise.reject
+           (ex-info "model does not support embeddings" {:status 400})))
+      (try
+        (-> (js/Promise.resolve (embed! request))
+            (.finally #(release-route! router* request-id route)))
+        (catch :default error
+          (release-route! router* request-id route)
+          (js/Promise.reject error))))))
+
 (defn service
   "Build callbacks consumed by `torch.ollama-http/handler`."
   ([router*] (service router* {}))
@@ -101,6 +116,7 @@
                                                              (str key)))) %)))))
     :generate-stream! #(js/Promise.resolve (routed-stream router* %1 %2))
     :generate! #(routed-generate router* %1 %2)
+    :embed! #(routed-embed router* %1 %2)
     :cancel! (fn [request-id reason]
                (when-let [route (get @(:routes router*) request-id)]
                  (continuous/cancel! (get-in route [:resource :host])
