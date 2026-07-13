@@ -10,7 +10,7 @@
             [torch.num-backend :as nb]
             [torch.paged-runtime :as paged]))
 
-(defn- storage [backend block-count block-size heads kv-heads head-dim]
+(defn storage [backend block-count block-size heads kv-heads head-dim]
   (let [kv-embed (* kv-heads head-dim)
         key-pool (arr/zeros backend [block-count block-size kv-embed])
         value-pool (arr/zeros backend [block-count block-size kv-embed])]
@@ -39,7 +39,7 @@
          (arr/release-all! [tables lengths*])
          (tensor/reshape output [batch 1 (last (:shape output))])))}))
 
-(defn- quiescent? [before after]
+(defn quiescent? [before after]
   (and (= (:live-buffers before) (:live-buffers after))
        (= (:live-bytes before) (:live-bytes after))
        (= (- (:created-buffers after) (:created-buffers before))

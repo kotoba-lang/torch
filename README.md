@@ -384,8 +384,31 @@ clojure -M:deno-public-gguf-continuous-verify && \
 Both single-request and batched paged Llama blocks now release projection,
 RoPE, attention, residual, and SwiGLU intermediates at their ownership boundary;
 the verifier's created/destroyed byte and buffer deltas must balance exactly.
-The remaining integration boundary is routing the live Ollama stream callbacks
-through this shared engine rather than their current per-request fixed caches.
+The final serving boundary in this sequence was routing live Ollama callbacks
+through the shared engine instead of per-request fixed caches.
+
+`torch.continuous-ollama` now closes that boundary. It serializes submit,
+admission, async GPU ticks, timeout expiry, and cancellation through one Promise
+lane; coalesces concurrently arriving HTTP requests before admission; publishes
+only each request's newly generated token delta; and supports both live NDJSON
+and collected non-stream responses. A real-socket verifier submits a streamed
+`Hello` and non-streamed `Hi there` concurrently, then disconnects a third live
+request after its first chunk:
+
+```sh
+clojure -M:deno-public-gguf-continuous-http-verify && \
+  deno run --allow-all target/deno-public-gguf-continuous-http-verify.cjs \
+  target/tiny-random-llama-metal.edn
+# Apple M4: concurrent stream/non-stream CPU parity: passed
+# HTTP requests shared fused microbatch: passed
+# completed reasons: length, length, cancelled
+# paged blocks reusable / GPU baseline restored: passed
+```
+
+This is now an actual shared paged Metal Ollama path, not parallel isolated
+fixed caches. Production gaps still include a compact binary model bundle,
+multi-model routing through the registry, long-context load testing, and a
+network-facing operational configuration rather than an integration listener.
 
 A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
 blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding
