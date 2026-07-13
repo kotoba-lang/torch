@@ -25,9 +25,7 @@
         (mapv #(.getFloat32 view (* 4 %) true) (range (quot length 4))))
       (throw (js/Error. "unsupported bundle tensor encoding")))))
 
-(defn load-bundle
-  "Synchronously read and validate a compact bundle from Deno filesystem."
-  [path]
+(defn- read-container [path]
   (let [bytes (js/Deno.readFileSync path)
         decoder (js/TextDecoder.)
         _ (when (< (.-byteLength bytes) 12)
@@ -45,7 +43,18 @@
                     (.decode decoder (.slice bytes manifest-start payload-base)))]
       (when-not (= :torch/gguf-metal-bundle-v2 (:format manifest))
         (throw (js/Error. "unsupported Metal bundle version")))
-      (update manifest :weights
+      {:bytes bytes :manifest manifest :payload-base payload-base})))
+
+(defn inspect-bundle
+  "Read and validate the manifest without decoding tensor payloads."
+  [path]
+  (:manifest (read-container path)))
+
+(defn load-bundle
+  "Synchronously read and validate a compact bundle from Deno filesystem."
+  [path]
+  (let [{:keys [bytes manifest payload-base]} (read-container path)]
+    (update manifest :weights
               (fn [weights]
                 (mapv (fn [entry]
                         (into {}
@@ -65,7 +74,7 @@
                                                          :bytes :values)
                                                        values))])))
                               entry))
-                      weights))))))
+                      weights)))))
 
 (defn build-model [{:keys [vocab embed-dim hidden-dim head-count kv-head-count
                            block-count rope-theta]}]

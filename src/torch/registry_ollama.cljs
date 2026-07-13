@@ -63,6 +63,30 @@
   ([router* {:keys [version] :or {version "0.0.0"}}]
    {:version version
     :models #(registry-runtime/tags (:runtime router*))
+    :running-models
+    #(mapv (fn [row]
+             (-> row
+                 (assoc :expires_at
+                        (when-let [value (:expires-at-ms row)]
+                          (.toISOString (js/Date. value))))
+                 (assoc :size_vram (or (:size-vram row) (:size row)))
+                 (assoc :context_length (:context-length row))
+                 (dissoc :path :loaded :active :expires-at-ms
+                         :size-vram :context-length :show)))
+           (registry-runtime/running-models (:runtime router*)))
+    :show-model
+    (fn [name verbose?]
+      (let [descriptor (registry-runtime/describe (:runtime router*) name)
+            show (:show descriptor)]
+        (cond-> (merge {:parameters "" :license ""
+                        :capabilities ["completion"]
+                        :details (:details descriptor)
+                        :model_info (:model-info descriptor)}
+                       show)
+          (not verbose?) (update :model_info
+                                 #(into {} (remove (fn [[key _]]
+                                                    (re-find #"tokenizer.*(tokens|scores|merges)"
+                                                             (str key)))) %)))))
     :generate-stream! #(js/Promise.resolve (routed-stream router* %1 %2))
     :generate! #(routed-generate router* %1 %2)
     :cancel! (fn [request-id reason]

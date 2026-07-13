@@ -52,7 +52,8 @@
   - `:request-id-fn` zero-arg ID supplier (optional)
 
   The returned function can be passed directly to `Deno.serve`."
-  [{:keys [version models generate! generate-stream! cancel! request-id-fn]
+  [{:keys [version models running-models show-model generate! generate-stream!
+           cancel! request-id-fn]
     :or {version "0.0.0" models [] cancel! (fn [& _])
          request-id-fn #(str (random-uuid))}}]
   (when-not (or (fn? generate!) (fn? generate-stream!))
@@ -68,6 +69,26 @@
         (and (= method "GET") (= path "/api/tags"))
         (js/Promise.resolve
          (json-response 200 {:models (if (fn? models) (models) models)}))
+
+        (and (= method "GET") (= path "/api/ps"))
+        (js/Promise.resolve
+         (json-response 200 {:models (if (fn? running-models)
+                                       (running-models) [])}))
+
+        (and (= method "POST") (= path "/api/show"))
+        (if-not (fn? show-model)
+          (js/Promise.resolve (json-response 404 {:error "model details unavailable"}))
+          (-> (.json request)
+              (.then (fn [body]
+                       (let [{:keys [model verbose]}
+                             (js->clj body :keywordize-keys true)]
+                         (when-not (and (string? model) (seq model)
+                                        (or (nil? verbose) (boolean? verbose)))
+                           (throw (ex-info "invalid Ollama show request"
+                                           {:status 400})))
+                         (json-response 200 (show-model model (boolean verbose))))))
+              (.catch (fn [error]
+                        (error-response (or (:status (ex-data error)) 400) error)))))
 
         (and (= method "POST") (= path "/api/generate"))
         (let [request-id (request-id-fn)

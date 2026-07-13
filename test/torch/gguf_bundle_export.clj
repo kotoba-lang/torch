@@ -99,6 +99,19 @@
                   [[:a "Hello"] [:b "Hi there"] [:c "Hello world"]])
             bundle {:format :torch/gguf-metal-bundle-v2
                     :config (assoc config :vocab vocab)
+                    :details {:parent_model "" :format "gguf"
+                              :family "llama" :families ["llama"]
+                              :parameter_size "1.0M"
+                              :quantization_level "Q4_K_M"}
+                    :model-info {"general.architecture" "llama"
+                                 "general.parameter_count" 1032256
+                                 "llama.block_count" (:block-count config)
+                                 "llama.context_length" (:context-length config)
+                                 "llama.embedding_length" (:embed-dim config)
+                                 "llama.feed_forward_length" (:hidden-dim config)
+                                 "llama.attention.head_count" (:head-count config)
+                                 "llama.attention.head_count_kv" (:kv-head-count config)}
+                    :capabilities ["completion"]
                     :tokenizer (select-keys
                                 (:tokenizer loaded)
                                 [:tokens :merges :scores :model :space-prefix

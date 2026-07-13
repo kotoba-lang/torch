@@ -147,6 +147,22 @@
                     :active (or (:active loaded) 0)})))
         (sort-by key (:catalog registry*))))
 
+(defn running-models
+  "Ollama `/api/ps` source rows for resources currently resident in memory."
+  [registry*]
+  (mapv (fn [[name {:keys [size expires-at-ms]}]]
+          (merge (get-in registry* [:catalog name])
+                 {:name name :model name :size size
+                  :size-vram size :expires-at-ms expires-at-ms}))
+        (sort-by key (:loaded registry*))))
+
+(defn describe
+  "Return the registered descriptor used to answer Ollama `/api/show`."
+  [registry* name]
+  (or (get-in registry* [:catalog name])
+      (throw (ex-info "unknown model" {:model name :reason :unknown-model
+                                       :status 404}))))
+
 (defn stats [registry*]
   (assoc (:metrics registry*)
          :resident-bytes (:resident-bytes registry*)

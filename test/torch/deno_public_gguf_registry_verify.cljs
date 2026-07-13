@@ -19,6 +19,17 @@
                              :options {:temperature 0.0 :num_predict 2}}))})
       (.then #(.json %))))
 
+(defn- json-get [url]
+  (-> (js/fetch url) (.then #(.json %))))
+
+(defn- show [url model]
+  (-> (js/fetch url #js {:method "POST"
+                          :headers #js {"content-type" "application/json"}
+                          :body (js/JSON.stringify (clj->js {:model model}))})
+      (.then (fn [response]
+               (-> (.json response)
+                   (.then #(vector (.-status response) %)))))))
+
 (defn -main [& [bundle-path]]
   (let [manifest (bundle/load-bundle bundle-path)
         expected (into (:prompt-ids manifest)
@@ -57,27 +68,32 @@
                  server (http/serve! service {:hostname "127.0.0.1" :port 0})
                  base (str "http://127.0.0.1:" (.-port (.-addr server)))
                  generate-url (str base "/api/generate")
-                 tags-url (str base "/api/tags")]
+                 tags-url (str base "/api/tags")
+                 ps-url (str base "/api/ps")
+                 show-url (str base "/api/show")]
              (println "Real GGUF registry routing on"
                       (gpu/adapter-description request))
-             (-> (post generate-url "model-a:latest" -1)
+             (-> (js/Promise.all
+                  #js [(json-get ps-url) (show show-url "model-a:latest")
+                       (show show-url "missing:latest")])
                  (.then
-                  (fn [a]
-                    (-> (js/fetch tags-url)
-                        (.then #(.json %))
-                        (.then (fn [tags]
-                                 {:a a :tags-a tags})))))
+                  (fn [initial]
+                    (-> (post generate-url "model-a:latest" -1)
+                        (.then #(hash-map :initial initial :a %)))))
+                 (.then
+                  (fn [state]
+                    (-> (js/Promise.all #js [(json-get tags-url) (json-get ps-url)])
+                        (.then #(assoc state :tags-a (aget % 0) :ps-a (aget % 1))))))
                  (.then
                   (fn [state]
                     (-> (post generate-url "model-b:latest" 0)
                         (.then #(assoc state :b %)))))
                  (.then
                   (fn [state]
-                    (-> (js/fetch tags-url)
-                        (.then #(.json %))
-                        (.then #(assoc state :tags-b %)))))
+                    (-> (js/Promise.all #js [(json-get tags-url) (json-get ps-url)])
+                        (.then #(assoc state :tags-b (aget % 0) :ps-b (aget % 1))))))
                  (.then
-                  (fn [{:keys [a b tags-a tags-b]}]
+                  (fn [{:keys [initial a b tags-a tags-b ps-a ps-b]}]
                     (let [context-a (vec (js->clj (.-context a)))
                           context-b (vec (js->clj (.-context b)))
                           rows-a (js->clj (.-models tags-a)
@@ -92,7 +108,26 @@
                                      (= false (loaded-a "model-b:latest"))
                                      (= false (loaded-b "model-a:latest"))
                                      (= true (loaded-b "model-b:latest")))
-                          eviction? (= 1 (:evictions stats-before-expire))]
+                          eviction? (= 1 (:evictions stats-before-expire))
+                          initial-ps (aget initial 0)
+                            [show-status show-body] (js->clj (aget initial 1)
+                                                               :keywordize-keys true)
+                            [missing-status _] (js->clj (aget initial 2)
+                                                        :keywordize-keys true)
+                            ps-a-rows (js->clj (.-models ps-a) :keywordize-keys true)
+                            ps-b-rows (js->clj (.-models ps-b) :keywordize-keys true)
+                            management?
+                            (and (zero? (.-length (.-models initial-ps)))
+                                 (= 200 show-status) (= 404 missing-status)
+                                 (= "gguf" (get-in show-body [:details :format]))
+                                 (= "llama" (get-in show-body [:details :family]))
+                                 (= ["completion"] (:capabilities show-body))
+                                 (= 2048 (get-in show-body [:model_info
+                                                            :llama.context_length]))
+                                 (= ["model-a:latest"] (mapv :name ps-a-rows))
+                                 (= ["model-b:latest"] (mapv :name ps-b-rows))
+                                 (pos? (:size_vram (first ps-a-rows)))
+                                 (= 2048 (:context_length (first ps-a-rows))))]
                       (registry-runtime/expire! runtime* (+ 1000 (.now js/Date)))
                       (.shutdown server)
                       (let [stats (registry-runtime/stats runtime*)
@@ -107,6 +142,8 @@
                                  (if parity? "passed" "failed"))
                         (println "dynamic tags follow residency:"
                                  (if tags? "passed" "failed"))
+                        (println "Ollama ps/show follow Metal residency:"
+                                 (if management? "passed" "failed"))
                         (println "inactive LRU eviction:"
                                  (if eviction? "passed" "failed"))
                         (println "load/unload exactly once:"
@@ -114,7 +151,7 @@
                         (println "registry resident bytes:" (:resident-bytes stats))
                         (println "GPU baseline restored:"
                                  (if released? "passed" "failed"))
-                        (when-not (and parity? tags? eviction? lifecycle? released?
+                        (when-not (and parity? tags? management? eviction? lifecycle? released?
                                        (zero? (:resident-bytes stats)))
                           (throw (js/Error.
                                   "real GGUF registry verification failed")))))))))))

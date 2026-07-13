@@ -43,6 +43,9 @@
         _ (registry-runtime/acquire! model-runtime "tiny:latest" 0)
         service {:version "0.12.0"
                  :models #(registry-runtime/tags model-runtime)
+                 :running-models #(registry-runtime/running-models model-runtime)
+                 :show-model (fn [name _]
+                               {:details {:family "llama"} :model_info {:name name}})
                  :generate! (fn [_ _] (js/Promise.resolve chunks))
                  :generate-stream! (fn [_ _]
                                      (js/Promise.resolve (stream-source)))
@@ -82,6 +85,11 @@
                                       (js/setTimeout #(resolve chunks) 10))))})
         version-request (js/Request. "http://localhost/api/version")
         tags-request (js/Request. "http://localhost/api/tags")
+        ps-request (js/Request. "http://localhost/api/ps")
+        show-request (js/Request. "http://localhost/api/show"
+                                  #js {:method "POST"
+                                       :headers #js {"content-type" "application/json"}
+                                       :body (js/JSON.stringify #js {:model "tiny:latest"})})
         stream-request
         (js/Request. "http://localhost/api/generate"
                      #js {:method "POST"
@@ -110,6 +118,7 @@
         _ (.abort abort-controller)]
     (-> (js/Promise.all
          #js [(handler version-request) (handler tags-request)
+              (handler ps-request) (handler show-request)
               (handler stream-request) (handler one-request)
               (handler bad-request) (js/fetch live-url) aborted-response
               live-first-byte])
@@ -117,27 +126,34 @@
          (fn [responses]
            (let [version (aget responses 0)
                  tags (aget responses 1)
-                 stream (aget responses 2)
-                 one (aget responses 3)
-                 bad (aget responses 4)
-                 live (aget responses 5)
-                 first-byte (aget responses 7)]
+                 ps (aget responses 2)
+                 show (aget responses 3)
+                 stream (aget responses 4)
+                 one (aget responses 5)
+                 bad (aget responses 6)
+                 live (aget responses 7)
+                 first-byte (aget responses 9)]
              (-> (js/Promise.all
-                  #js [(body-json version) (body-json tags) (.text stream)
+                  #js [(body-json version) (body-json tags) (body-json ps)
+                       (body-json show) (.text stream)
                        (body-json one) (body-json bad)])
                  (.then
                   (fn [bodies]
                     (let [version-body (aget bodies 0)
                           tags-body (aget bodies 1)
-                          stream-lines (-> (aget bodies 2) .trim (.split "\n"))
-                          one-body (aget bodies 3)
-                          bad-body (aget bodies 4)
+                          ps-body (aget bodies 2)
+                          show-body (aget bodies 3)
+                          stream-lines (-> (aget bodies 4) .trim (.split "\n"))
+                          one-body (aget bodies 5)
+                          bad-body (aget bodies 6)
                           _ (registry-runtime/release!
                              model-runtime "tiny:latest" 1 0)
                           _ (registry-runtime/expire! model-runtime 1)
                           ok? (and (= 200 (.-status version))
                                    (= "0.12.0" (.-version version-body))
                                    (= 1 (.-length (.-models tags-body)))
+                                   (= 1 (.-length (.-models ps-body)))
+                                   (= "llama" (.. show-body -details -family))
                                    (= "application/x-ndjson"
                                       (.get (.-headers stream) "content-type"))
                                    (= 3 (.-length stream-lines))
@@ -155,9 +171,11 @@
                                       @model-events)
                                    (= [["abort-me" :client-disconnect]]
                                       @cancellations))]
-                      (println "Ollama version/tags endpoints:"
+                      (println "Ollama version/tags/ps/show endpoints:"
                                (if (and (= 200 (.-status version))
-                                        (= 200 (.-status tags))) "passed" "failed"))
+                                        (= 200 (.-status tags))
+                                        (= 200 (.-status ps))
+                                        (= 200 (.-status show))) "passed" "failed"))
                       (println "Ollama stream/non-stream generate:"
                                (if ok? "passed" "failed"))
                       (println "Ollama invalid request status:"

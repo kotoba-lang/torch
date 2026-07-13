@@ -252,7 +252,8 @@ released and reused to prefill request `:c`.
 `torch.ollama` translates `/api/generate` options and deadlines into continuous
 engine submissions and emits Ollama-shaped token/final payloads.
 `torch.ollama-http/handler` is a standard Fetch handler suitable for `Deno.serve`;
-it implements `GET /api/version`, `GET /api/tags`, and streaming NDJSON or
+it implements `GET /api/version`, `GET /api/tags`, `GET /api/ps`,
+`POST /api/show`, and streaming NDJSON or
 non-streaming `POST /api/generate`, including JSON 400/404 errors. Its live
 Request/Response verifier checks headers, status codes, three NDJSON records, and
 the assembled non-stream response:
@@ -416,13 +417,16 @@ A catalog descriptor lazily reads `TGBNDL1`, uploads weights, constructs physica
 paged pools and a continuous host, while unload refuses active work and releases
 all pools/weights. Each HTTP request acquires the named resource and releases it
 with Ollama `keep_alive`; stream close/cancel is exactly-once. `/api/tags` reads
-the same live registry snapshot.
+the catalog plus residency flags, `/api/ps` lists only currently resident Metal
+resources, and `/api/show` reads model/configuration details from the compact
+bundle manifest without uploading its tensor payload.
 
 ```sh
 clojure -M:deno-public-gguf-registry-verify && \
   deno run --allow-all target/deno-public-gguf-registry-verify.cjs \
   target/tiny-random-llama-metal.tgb
 # Apple M4: model-name routed CPU parity / dynamic residency tags: passed
+# Ollama ps/show follow real Metal residency: passed
 # inactive model-a LRU-evicted when model-b loads under a 1.5-model budget
 # each model loaded/unloaded exactly once; resident bytes: 0
 # GPU baseline restored: passed

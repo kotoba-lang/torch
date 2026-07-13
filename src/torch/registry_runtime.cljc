@@ -40,4 +40,6 @@
 
 (defn snapshot [runtime*] @(:state runtime*))
 (defn tags [runtime*] (registry/tags (snapshot runtime*)))
+(defn running-models [runtime*] (registry/running-models (snapshot runtime*)))
+(defn describe [runtime* name] (registry/describe (snapshot runtime*) name))
 (defn stats [runtime*] (registry/stats (snapshot runtime*)))

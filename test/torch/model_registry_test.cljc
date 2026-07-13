@@ -75,3 +75,19 @@
     (is (= ["a" "b" "c"] (mapv :name tags)))
     (is (= [true false false] (mapv :loaded tags)))
     (is (= [1 0 0] (mapv :active tags)))))
+
+(deftest running-models-and-descriptions-reflect-live-state
+  (let [events (atom [])
+        registered (registry/register
+                    (fixture 100 events)
+                    {:name "meta" :size 10 :details {:format "gguf"}})
+        acquired (registry/acquire registered "meta" 10)
+        released (registry/release (:registry acquired) "meta" 20 50)]
+    (is (= {:format "gguf"} (:details (registry/describe released "meta"))))
+    (is (= [{:name "meta" :model "meta" :size 10 :size-vram 10
+             :details {:format "gguf"} :expires-at-ms 70}]
+           (registry/running-models released)))
+    (is (thrown-with-msg?
+         #?(:clj Exception :cljs js/Error) #"unknown model"
+         (registry/describe released "missing")))
+    (is (empty? (registry/running-models (registry/expire released 70))))))

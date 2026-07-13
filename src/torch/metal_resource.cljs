@@ -10,7 +10,17 @@
             [torch.paged-runtime :as paged]))
 
 (defn descriptor [name path]
-  {:name name :path path :size (.-size (js/Deno.statSync path))})
+  (let [stat (js/Deno.statSync path)
+        manifest (bundle/inspect-bundle path)
+        config (:config manifest)]
+    {:name name :path path :size (.-size stat)
+     :context-length (:context-length config)
+     :details (:details manifest)
+     :model-info (:model-info manifest)
+     :show {:modified_at (some-> (.-mtime stat) .toISOString)
+            :parameters (:parameters manifest "")
+            :license (:license manifest "")
+            :capabilities (:capabilities manifest ["completion"])}}))
 
 (defn- logits-result [logits step vocab]
   (-> (arr/->vec logits)
