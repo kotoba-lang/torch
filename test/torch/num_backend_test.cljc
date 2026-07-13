@@ -41,6 +41,45 @@
           e (Math/exp -2.0) s (+ 1.0 e)]
       (is (contract-approx-vec? [(/ 1.0 s) (/ e s)] out)))))
 
+(deftest silu-layer-matches-hand-computed
+  (testing "silu(x) = x * sigmoid(x), independently computed per element
+            (NOT by calling t/silu's own implementation) — the activation
+            real diffusion UNets use in place of relu"
+    (let [model (m/sequential (m/silu))
+          x (arr/from-vec backend [0 1 -1 2] [1 4])
+          out (arr/->vec (core/run (nb/num-backend backend [nil]) model x))
+          sigmoid (fn [v] (/ 1.0 (+ 1.0 (Math/exp (- v)))))
+          expect (mapv (fn [v] (* v (sigmoid v))) [0.0 1.0 -1.0 2.0])]
+      (is (contract-approx-vec? expect out)))))
+
+(deftest groupnorm-layer-matches-hand-computed
+  (testing "num-groups=2 over C=2 (each channel its own group) — reduces to
+            per-channel normalization, independently computed (NOT by
+            calling t/group-norm-nchw's own implementation). Channel 0 =
+            [1 3] -> mean=2, biased-var=1; channel 1 = [5 7] -> same
+            mean-centered pattern (mean=6, var=1) so both channels
+            normalize to the identical +-1/sqrt(1+eps) shape. Identity
+            affine (gamma=1, beta=0) so the layer output IS the normalized
+            value directly."
+    (let [model (m/sequential (m/groupnorm 2 2))
+          x (arr/from-vec backend [1 3 5 7] [1 2 1 2])
+          gamma (arr/from-vec backend [1 1] [2])
+          beta (arr/from-vec backend [0 0] [2])
+          weights [{:w gamma :b beta}]
+          out (arr/->vec (core/run (nb/num-backend backend weights) model x))
+          eps 1.0e-5
+          inv-std (/ 1.0 (Math/sqrt (+ 1.0 eps)))
+          expect [(- inv-std) inv-std (- inv-std) inv-std]]
+      (is (contract-approx-vec? expect out))))
+  (testing "no affine (nil weights) still normalizes — gamma=1/beta=0 implicit"
+    (let [model (m/sequential (m/groupnorm 2 2))
+          x (arr/from-vec backend [1 3 5 7] [1 2 1 2])
+          out (arr/->vec (core/run (nb/num-backend backend [nil]) model x))
+          eps 1.0e-5
+          inv-std (/ 1.0 (Math/sqrt (+ 1.0 eps)))
+          expect [(- inv-std) inv-std (- inv-std) inv-std]]
+      (is (contract-approx-vec? expect out)))))
+
 (deftest conv2d-single-channel-batch1-matches-hand-computed
   (testing "the [1 1 k] restricted conv2d path — same 3x3/all-ones-kernel
             example num.tensor-test already hand-verifies, run here through
