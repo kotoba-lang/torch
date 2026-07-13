@@ -54,6 +54,19 @@
       (is (= [1 1 2 2] (:shape out)))
       (is (contract-approx-vec? [12.0 16.0 24.0 28.0] (arr/->vec out))))))
 
+(deftest attention-layer-matches-hand-computed-self-attention
+  (testing "the model vocabulary dispatches parameter-free single-head self-attention"
+    (let [model (m/sequential (m/attention))
+          x (arr/from-vec backend [1 0, 0 1] [2 2])
+          out (core/run (nb/num-backend backend [nil]) model x)
+          ;; Q=K=V=I. Scores are diag(1/sqrt(2)); each output row is the
+          ;; corresponding softmax row because multiplying by V=I is identity.
+          e (Math/exp (/ 1.0 (Math/sqrt 2.0)))
+          hi (/ e (+ e 1.0))
+          lo (/ 1.0 (+ e 1.0))]
+      (is (= [2 2] (:shape out)))
+      (is (contract-approx-vec? [hi lo lo hi] (arr/->vec out))))))
+
 (deftest unsupported-layer-throws-clearly
   (testing "a layer type outside this backend's documented scope throws,
             not silently produces wrong numbers"

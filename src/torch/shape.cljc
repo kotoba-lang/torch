@@ -41,6 +41,18 @@
 (doseq [t [:relu :gelu :sigmoid :tanh :softmax :dropout :identity]]
   (defmethod layer-shape t [_ _ in] [:ok in]))
 
+;; --- parameter-free, single-head self-attention over [sequence embedding] --
+
+(defmethod layer-shape :attention [_ _ in]
+  (cond
+    (not= 2 (count in))
+    [:error (str "attention expects a [sequence embedding] input, got " in)]
+
+    (not (every? pos-int? in))
+    [:error "attention expects positive sequence and embedding dimensions"]
+
+    :else [:ok in]))
+
 ;; --- linear ----------------------------------------------------------------
 
 (defmethod layer-shape :linear [_ args in]
@@ -146,7 +158,7 @@
 (def built-in-types
   "The set of layer types this namespace understands."
   #{:linear :conv2d :maxpool2d :avgpool2d :embedding :batchnorm :layernorm
-    :dropout :flatten :relu :gelu :sigmoid :tanh :softmax :identity})
+    :dropout :flatten :relu :gelu :sigmoid :tanh :softmax :attention :identity})
 
 (defn known?
   "True if `t` is a built-in layer type."

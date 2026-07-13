@@ -19,6 +19,7 @@
   (testing "builders produce one-key layer literals"
     (is (= {:linear [784 256]} (m/linear 784 256)))
     (is (= {:relu {}} (m/relu)))
+    (is (= {:attention {}} (m/attention)))
     (is (= {:conv2d [3 16 3 2 1]} (m/conv2d 3 16 3 2 1))))
   (testing "layer-type / layer-args read a literal; model? distinguishes modules"
     (is (= :linear (m/layer-type {:linear [10 20]})))
@@ -49,6 +50,10 @@
 (deftest shape-flatten-embedding
   (is (= [:ok [3072]] (shape/layer-shape :flatten {} [3 32 32])))
   (is (= [:ok [128 64]] (shape/layer-shape :embedding [1000 64] [128]))))
+
+(deftest shape-attention
+  (is (= [:ok [8 64]] (shape/layer-shape :attention {} [8 64])))
+  (is (= :error (first (shape/layer-shape :attention {} [2 8 64])))))
 
 (deftest params-counts
   (is (= (+ (* 784 256) 256) (shape/layer-params :linear [784 256])))

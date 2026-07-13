@@ -11,7 +11,9 @@
   — `num.tensor/conv2d` itself is single-channel-single-image (see its own
   docstring); this backend does not attempt multi-channel/batched conv, and
   throws a clear error rather than silently computing something wrong for
-  any other channel/batch configuration. Every other layer type throws.
+  any other channel/batch configuration. `:attention` is parameter-free,
+  single-head self-attention over one `[sequence embedding]` input (no batch,
+  mask, projections, or separate Q/K/V). Every other layer type throws.
 
   WEIGHTS: torch-clj's model EDN is shape-and-parameter-COUNT only — it
   never carries actual weight values (by design, see torch.model). This
@@ -82,6 +84,11 @@
       :linear (t/add (nm/matmul x (:w weights)) (:b weights))
       :relu   (nm/relu x)
       :softmax (t/softmax x)
+      :attention (do
+                   (when-not (= 2 (count (:shape x)))
+                     (throw (ex-info "torch.num-backend: :attention expects [sequence embedding]"
+                                     {:shape (:shape x)})))
+                   (t/attention x x x))
       :conv2d (let [[batch _c h w] (:shape x)
                     _ (when (not= 1 batch)
                         (throw (ex-info "torch.num-backend: :conv2d only supports batch=1 here"
@@ -91,7 +98,8 @@
                     [oh ow] (:shape out)]
                 (t/reshape out [1 1 oh ow]))
       (throw (ex-info (str "torch.num-backend: layer type not supported: " t')
-                      {:layer lyr :supported #{:linear :relu :softmax :conv2d}})))))
+                      {:layer lyr :supported #{:linear :relu :softmax :conv2d
+                                               :attention}})))))
 
 (defn num-backend
   "An `IBackend` running `forward` through `backend` (a `num.protocol/IBackend`
