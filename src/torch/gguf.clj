@@ -318,8 +318,13 @@
       :add-eos? (get m "tokenizer.ggml.add_eos_token" false)})))
 
 (defn- upload-vector [gguf backend name]
-  (let [{:keys [shape values]} (read-tensor gguf name)]
-    (arr/from-vec backend values shape)))
+  (let [tensor (get-in gguf [:tensor-map name])]
+    (if (and (= 2 (count (:shape tensor)))
+             (#{:q4-k :q6-k :q8-0} (:type tensor)))
+      (let [{:keys [shape bytes]} (read-packed-tensor gguf name)]
+        (quantized/table backend bytes shape (:type tensor)))
+      (let [{:keys [shape values]} (read-tensor gguf name)]
+        (arr/from-vec backend values shape)))))
 
 (defn load-matrix
   "GGUF linear matrices are `[out in]`; torch.num-backend uses `[in out]`."
@@ -359,11 +364,13 @@
                  (load-matrix gguf backend "output.weight")
                  ;; Tied embeddings need a transposed materialization for the
                  ;; engine's `[embed vocab]` LM-head layout.
-                 (let [[vocab embed] (:shape embedding)
-                       values (vec (arr/->vec embedding))
-                       transposed (mapv (fn [i]
-                                          (let [e (quot i vocab) v (mod i vocab)]
-                                            (nth values (+ (* v embed) e))))
-                                        (range (* vocab embed)))]
-                   (arr/from-vec backend transposed [embed vocab])))]
+                 (if (quantized/table? embedding)
+                   (quantized/as-matrix embedding)
+                   (let [[vocab embed] (:shape embedding)
+                         values (vec (arr/->vec embedding))
+                         transposed (mapv (fn [i]
+                                            (let [e (quot i vocab) v (mod i vocab)]
+                                              (nth values (+ (* v embed) e))))
+                                          (range (* vocab embed)))]
+                     (arr/from-vec backend transposed [embed vocab]))))]
     (vec (concat [{:w embedding}] blocks [{:w final-norm} {:w output}]))))

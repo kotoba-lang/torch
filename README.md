@@ -154,8 +154,9 @@ embeddings.
 
 Q4_K, Q6_K, and Q8_0 linear tensors remain packed at their GGML bit rates and
 execute through fused CPU/Metal quantized matmul without a dense weight
-allocation. Quantized embedding tables currently dequantize to f32 during
-loading. Llama
+allocation. Quantized token embeddings use packed device-native lookup; when
+`output.weight` is tied/missing, the LM head shares that exact packed buffer
+through a zero-copy matrix view. Llama
 grouped-query attention is supported when
 `head_count_kv` evenly divides `head_count`, including training and fixed-capacity
 KV-cache decoding on Metal; K/V projections and caches use the reduced KV width.

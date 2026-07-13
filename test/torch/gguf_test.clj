@@ -311,3 +311,49 @@
         (is (= [8 4] (:shape (:down (second weights)))))
         (is (= [4 6] (:shape (:w (last weights)))))
         (is (= [2 6] (:shape output)))))))
+
+(deftest quantized-token-embedding-and-tied-head-share-packed-buffer
+  (let [metadata {"general.architecture" "llama"
+                  "llama.block_count" 1 "llama.embedding_length" 32
+                  "llama.feed_forward_length" 32 "llama.attention.head_count" 4
+                  "llama.attention.head_count_kv" 2 "llama.context_length" 32
+                  "tokenizer.ggml.tokens" ["a" "b"]}
+        shapes {"token_embd.weight" [2 32]
+                "blk.0.attn_norm.weight" [32]
+                "blk.0.attn_q.weight" [32 32] "blk.0.attn_k.weight" [16 32]
+                "blk.0.attn_v.weight" [16 32] "blk.0.attn_output.weight" [32 32]
+                "blk.0.ffn_norm.weight" [32]
+                "blk.0.ffn_gate.weight" [32 32] "blk.0.ffn_up.weight" [32 32]
+                "blk.0.ffn_down.weight" [32 32]
+                "output_norm.weight" [32]}
+        tensor-map (into {} (map (fn [[name shape]]
+                                   [name (cond-> {:shape shape :type :f32}
+                                           (= name "token_embd.weight")
+                                           (assoc :type :q8-0))]) shapes))
+        file {:metadata metadata :tensor-map tensor-map}
+        fake-read (fn [_ name]
+                    (let [shape (get shapes name) n (reduce * shape)]
+                      {:shape shape :values
+                       (if (= 1 (count shape)) (vec (repeat n 1.0))
+                           (vec (repeat n 0.001)))}))
+        packed-bytes (vec (mapcat (fn [scale]
+                                    (concat (let [bits (bit-and 0xffff
+                                                                (dtype/f32->f16-bits scale))]
+                                              [(bit-and bits 0xff)
+                                               (bit-and (bit-shift-right bits 8) 0xff)])
+                                            (map #(bit-and % 0xff) (range -16 16))))
+                                  [0.25 -0.5]))
+        backend (cpu/cpu-backend)]
+    (with-redefs [gguf/read-tensor fake-read
+                  gguf/read-packed-tensor (fn [_ _]
+                                            {:shape [2 32] :bytes packed-bytes
+                                             :type :q8-0})]
+      (let [model* (gguf/llama-model file)
+            weights (gguf/load-llama-weights file backend)
+            embedding (:w (first weights)) output (:w (last weights))
+            logits (core/run (nb/num-backend backend weights) model*
+                             (arr/from-vec backend [0 1] [2]))]
+        (is (quantized/table? embedding))
+        (is (quantized/matrix? output))
+        (is (identical? (:handle embedding) (:handle output)))
+        (is (= [2 2] (:shape logits)))))))

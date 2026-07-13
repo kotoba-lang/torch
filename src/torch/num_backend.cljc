@@ -209,7 +209,9 @@
                    (t/group-norm-nchw x groups (:w weights) (:b weights)
                                       (or eps 1.0e-5)))
       :layernorm (t/layer-norm-last x (:w weights) (:b weights) 1.0e-5)
-      :embedding (t/embedding x (:w weights))
+      :embedding (if (quantized/table? (:w weights))
+                   (quantized/embedding x (:w weights))
+                   (t/embedding x (:w weights)))
       :rmsnorm (let [[_features eps] largs]
                  (t/rms-norm-last x (:w weights) (or eps 1.0e-5)))
       :llama-block
@@ -447,6 +449,12 @@
   (doseq [array [(:key cache) (:value cache)] :when array]
     (arr/release! array))
   nil)
+
+(defn release-weights!
+  "Release every distinct tensor handle in a model weight vector exactly once.
+  This is safe for tied embedding/output views that share packed GPU storage."
+  [weights]
+  (arr/release-all! (mapcat (fn [entry] (when (map? entry) (vals entry))) weights)))
 
 (defn num-backend
   "An `IBackend` running `forward` through `backend` (a `num.protocol/IBackend`
