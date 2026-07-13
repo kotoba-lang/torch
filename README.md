@@ -231,7 +231,9 @@ matrix transposes, bias row reductions, fused attention forward/backward, and
 gradient accumulation. MSE forward and its VJP are also device-native; on an async
 backend `loss-and-gradients` returns `:loss` as a Promise for the final scalar
 readback while prediction and gradients are immediately usable GPU arrays. The
-optimizer convenience APIs still perform host-side immutable updates.
+immutable `sgd-step` update is composed from device elementwise multiply/subtract,
+so parameter and gradient buffers are never downloaded. AdamW and mixed-precision
+optimizer state updates remain host-side reference paths.
 
 Learned MultiheadAttention is verified on both JVM and compiled ClojureScript:
 all eight projection tensors receive gradients, a Q-weight gradient matches a
@@ -248,7 +250,10 @@ GEMMs, last-axis bias broadcasts, fused multi-head attention, transposes, bias
 reductions, MSE loss/VJP, and all eight parameter gradients stay in GPU buffers
 until final verification readback. The Apple M4 check covers explicit VJP plus
 ordinary MSE training, comparing prediction, input gradient, loss, and every
-projection weight/bias gradient against the CPU backend (20/20):
+projection weight/bias gradient against the CPU backend. It then performs eight
+public `sgd-step` iterations, checks the complete loss trajectory and all final
+weights against CPU, and confirms loss decreases from `0.11552` to `0.07441`
+(29/29 checks):
 
 ```sh
 clojure -M:deno-metal-attention-verify

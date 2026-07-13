@@ -4,6 +4,7 @@
   arrays, returning new immutable weight maps after one SGD step."
   (:require [num.array :as arr]
             [num.autograd :as ag :include-macros true]
+            [num.core :as nm]
             [torch.model :as model]
             [torch.optim :as optim]))
 
@@ -189,10 +190,11 @@
     (merge (dissoc pass :gradients) update)))
 
 (defn- descend [learning-rate parameter gradient]
-  (arr/from-vec (:backend parameter)
-                (mapv (fn [p g] (- p (* learning-rate g)))
-                      (arr/->vec parameter) (arr/->vec gradient))
-                (:shape parameter)))
+  (let [shape (:shape parameter)
+        scalar-field (arr/from-vec (:backend parameter)
+                                   (repeat (arr/nelems shape) learning-rate)
+                                   shape)]
+    (nm/sub parameter (nm/mul scalar-field gradient))))
 
 (defn sgd-step [model* weights input target learning-rate]
   (when-not (and (number? learning-rate) (pos? learning-rate))

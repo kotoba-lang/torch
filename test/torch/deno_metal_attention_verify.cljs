@@ -37,6 +37,17 @@
      (arr/from-vec backend input-values [3 4])
      (arr/from-vec backend target-values [3 4]))))
 
+(defn- run-training [backend model* steps]
+  (let [input (arr/from-vec backend input-values [3 4])
+        target (arr/from-vec backend target-values [3 4])]
+    (loop [step 0
+           weights (nb/random-weights backend model* 29)
+           losses []]
+      (if (= step steps)
+        {:weights weights :losses losses}
+        (let [result (train/sgd-step model* weights input target 0.05)]
+          (recur (inc step) (:weights result) (conj losses (:loss result))))))))
+
 (defn- flatten-result [result]
   (merge {:prediction (:prediction result)
           :input-gradient (:input-gradient result)}
@@ -56,6 +67,12 @@
                             (map (fn [[label array]] [label (arr/->vec array)]))
                             (flatten-result (run-vjp cpu-backend model*)))
         cpu-mse (run-mse cpu-backend model*)
+        cpu-training (run-training cpu-backend model* 8)
+        expected-trained
+        (prefix-keys "trained-"
+                     (into {}
+                           (map (fn [[label array]] [label (arr/->vec array)]))
+                           (first (:weights cpu-training))))
         expected-mse
         (prefix-keys "mse-"
                      (into {:prediction (arr/->vec (:prediction cpu-mse))}
@@ -67,6 +84,7 @@
            (let [backend (gpu/backend device)
                  actual-vjp (flatten-result (run-vjp backend model*))
                  actual-mse-pass (run-mse backend model*)
+                 actual-training (run-training backend model* 8)
                  actual-mse
                  (prefix-keys "mse-"
                               (into {:prediction (:prediction actual-mse-pass)}
@@ -88,19 +106,36 @@
                               actual-vjp)
                          (map (fn [[label array]]
                                 (check-array expected-mse label array))
-                              actual-mse))
+                              actual-mse)
+                         (map (fn [[label array]]
+                                (check-array expected-trained label array))
+                              (prefix-keys "trained-"
+                                           (first (:weights actual-training)))))
                  loss-check
                  (.then (->promise (:loss actual-mse-pass))
                         (fn [loss]
                           (when-not (< (Math/abs (- loss (:loss cpu-mse))) 2.0e-4)
                             (throw (js/Error. "Metal MSE loss diverged from CPU")))
                           (swap! passed inc)
-                          (println "✓ mse-loss")))]
+                          (println "✓ mse-loss")))
+                 training-loss-check
+                 (.then
+                  (js/Promise.all (into-array (map ->promise (:losses actual-training))))
+                  (fn [loss-array]
+                    (let [actual-losses (vec (js/Array.from loss-array))
+                          expected-losses (:losses cpu-training)]
+                      (when-not (and (approx-vec? expected-losses actual-losses 2.0e-4)
+                                     (< (last actual-losses) (first actual-losses)))
+                        (throw (js/Error. "Metal SGD loss trajectory diverged")))
+                      (swap! passed inc)
+                      (println "✓ trained-losses" actual-losses))))]
              (println "adapter:" (gpu/adapter-description device))
-             (-> (js/Promise.all (into-array (conj (vec array-checks) loss-check)))
+             (-> (js/Promise.all
+                  (into-array (conj (vec array-checks)
+                                    loss-check training-loss-check)))
                  (.then (fn [_]
-                          (println (str "Metal learned MultiheadAttention VJP: "
-                                        @passed "/" (+ 4 (* 2 (count parameter-names)))
+                          (println (str "Metal learned MultiheadAttention training: "
+                                        @passed "/" (+ 5 (* 3 (count parameter-names)))
                                         " passed"))))))))
         (.catch (fn [error]
                   (js/console.error (or (.-stack error) error))
