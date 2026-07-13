@@ -283,6 +283,46 @@
     (is (every? #(< (Math/abs %) 1.0e-6)
                 (map - (arr/->vec full) (:outputs fixed-decoded))))))
 
+(deftest batched-fixed-kv-cache-matches-full-causal-attention
+  (let [layer (m/multihead-attention
+               4 2 {:causal? true :rope? true :position-offset 2})
+        model (m/sequential layer)
+        weights (nb/random-weights backend model 67)
+        batches [[[0.2 -0.1 0.3 0.4]
+                  [-0.2 0.1 0.5 -0.3]
+                  [0.6 0.2 -0.4 0.1]]
+                 [[-0.3 0.7 0.1 -0.2]
+                  [0.4 -0.5 0.2 0.6]
+                  [0.1 0.3 -0.7 0.2]]]
+        input (arr/from-vec backend (vec (mapcat identity (mapcat identity batches)))
+                            [2 3 4])
+        expected (arr/->vec (core/run (nb/num-backend backend weights) model input))
+        initial (nb/init-kv-cache backend 5 4 :f32 2)
+        key-handle (:handle (:key initial))
+        value-handle (:handle (:value initial))
+        decoded
+        (reduce (fn [{:keys [cache steps]} time]
+                  (let [values (vec (mapcat #(nth % time) batches))
+                        step (nb/multihead-attention-step
+                              layer (first weights)
+                              (arr/from-vec backend values [2 1 4]) cache)]
+                    {:cache (:cache step)
+                     :steps (conj steps (arr/->vec (:output step)))}))
+                {:cache initial :steps []} (range 3))
+        actual (vec (for [batch (range 2) time (range 3) feature (range 4)]
+                      (nth (nth (:steps decoded) time)
+                           (+ (* batch 4) feature))))]
+    (is (= 3 (get-in decoded [:cache :length])))
+    (is (= 2 (get-in decoded [:cache :batch])))
+    (is (= [5 2 4] (:shape (get-in decoded [:cache :key]))))
+    (is (identical? key-handle (:handle (get-in decoded [:cache :key]))))
+    (is (identical? value-handle (:handle (get-in decoded [:cache :value]))))
+    (is (every? #(< (Math/abs %) 1.0e-5) (map - expected actual)))
+    (is (thrown-with-msg?
+         #?(:clj Exception :cljs js/Error) #"batch size mismatch"
+         (nb/multihead-attention-step
+          layer (first weights) (arr/zeros backend [1 1 4]) (:cache decoded))))))
+
 (deftest multi-block-llama-decoding-matches-full-causal-model
   (let [model (m/sequential (m/llama-block 4 2 8 {:position-offset 3})
                             (m/llama-block 4 2 8 {:position-offset 3}))
@@ -306,6 +346,40 @@
                            (map #(-> % :key :handle) (:caches decoded)))))
     (is (every? #(< (Math/abs %) 1.0e-5)
                 (map - (arr/->vec full) (:outputs decoded))))))
+
+(deftest batched-fixed-llama-decoding-matches-full-gqa-model
+  (let [model (m/sequential
+               (m/llama-block 4 2 8 {:position-offset 2 :kv-heads 1})
+               (m/llama-block 4 2 8 {:position-offset 2 :kv-heads 1}))
+        weights (nb/random-weights backend model 73)
+        batches [[[0.2 -0.1 0.3 0.4]
+                  [-0.2 0.1 0.5 -0.3]
+                  [0.6 0.2 -0.4 0.1]]
+                 [[-0.3 0.7 0.1 -0.2]
+                  [0.4 -0.5 0.2 0.6]
+                  [0.1 0.3 -0.7 0.2]]]
+        input (arr/from-vec backend (vec (mapcat identity (mapcat identity batches)))
+                            [2 3 4])
+        expected (arr/->vec (core/run (nb/num-backend backend weights) model input))
+        initial (nb/init-llama-caches backend model 5 :f32 2)
+        handles (mapv #(-> % :key :handle) initial)
+        decoded
+        (reduce (fn [{:keys [caches steps]} time]
+                  (let [values (vec (mapcat #(nth % time) batches))
+                        step (nb/llama-model-step
+                              model weights
+                              (arr/from-vec backend values [2 1 4]) caches)]
+                    {:caches (:caches step)
+                     :steps (conj steps (arr/->vec (:output step)))}))
+                {:caches initial :steps []} (range 3))
+        actual (vec (for [batch (range 2) time (range 3) feature (range 4)]
+                      (nth (nth (:steps decoded) time)
+                           (+ (* batch 4) feature))))]
+    (is (= [3 3] (mapv :length (:caches decoded))))
+    (is (= [2 2] (mapv :batch (:caches decoded))))
+    (is (every? true? (map identical? handles
+                           (map #(-> % :key :handle) (:caches decoded)))))
+    (is (every? #(< (Math/abs %) 1.0e-5) (map - expected actual)))))
 
 (deftest cached-llama-lm-step-produces-full-vocabulary-logits
   (let [model (m/sequential (m/embedding 6 4)

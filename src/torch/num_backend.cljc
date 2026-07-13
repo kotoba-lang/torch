@@ -297,24 +297,34 @@
            key (if (:rope? merged)
                  (t/rotary-embedding key0 heads rope-options) key0)
            fixed? (:fixed-capacity? cache)
-           _ (when (and fixed? (not= rank 2))
-               (throw (ex-info "fixed-capacity KV cache currently requires batch size 1"
-                               {:shape shape})))
+           cache-batch (long (or (:batch cache) 1))
+           _ (when (and fixed? (not= batch cache-batch))
+               (throw (ex-info "fixed-capacity KV cache batch size mismatch"
+                               {:input-batch batch :cache-batch cache-batch})))
            _ (when (and fixed? (>= old-length (:capacity cache)))
                (throw (ex-info "fixed-capacity KV cache is full"
                                {:length old-length :capacity (:capacity cache)})))
            axis (if (= rank 3) 1 0)
+           active-fixed (fn [backing source]
+                          (t/copy-into! backing source
+                                        (* old-length batch embed))
+                          (if (= rank 3)
+                            ;; The backing is token-major, so each append is one
+                            ;; contiguous `[batch,embed]` device copy. Materialize
+                            ;; a batch-first view only for the attention kernel.
+                            (t/transpose
+                             (assoc backing :shape [(inc old-length) batch embed])
+                             [1 0 2])
+                            (assoc backing :shape [(inc old-length) embed])))
            all-key (if fixed?
-                     (let [backing (:key cache)]
-                       (t/copy-into! backing key (* old-length embed))
-                       (assoc backing :shape [(inc old-length) embed]))
+                     (active-fixed (:key cache) key)
                      (if-let [old (:key cache)] (t/cat [old key] axis) key))
            all-value (if fixed?
-                       (let [backing (:value cache)]
-                         (t/copy-into! backing value (* old-length embed))
-                         (assoc backing :shape [(inc old-length) embed]))
+                       (active-fixed (:value cache) value)
                        (if-let [old (:value cache)] (t/cat [old value] axis) value))
            attended (t/multi-head-attention query all-key all-value heads)
+           _ (when (and fixed? (= rank 3))
+               (arr/release-all! [all-key all-value]))
            attended-flat (if (= rank 3) (t/reshape attended [batch embed]) attended)
            output (restore (t/add (matmul-weight attended-flat (:ow weights))
                                   (:ob weights)))]
@@ -326,32 +336,48 @@
 (declare release-kv-cache!)
 
 (defn init-kv-cache
-  "Preallocate a fixed-capacity, batch-1 KV cache on `backend`. No buffer is
-  reallocated while decoding up to `capacity` tokens."
+  "Preallocate a fixed-capacity KV cache on `backend`. No backing buffer is
+  reallocated while decoding up to `capacity` tokens. For `batch > 1`, storage
+  is token-major so each decode step is one contiguous device-to-device copy."
   ([backend capacity embed]
-   (init-kv-cache backend capacity embed :f32))
+   (init-kv-cache backend capacity embed :f32 1))
   ([backend capacity embed dtype]
-   (when-not (and (pos-int? capacity) (pos-int? embed))
-     (throw (ex-info "KV cache capacity and embedding must be positive integers"
-                     {:capacity capacity :embed embed})))
-   {:key (arr/zeros backend [capacity embed] dtype)
-    :value (arr/zeros backend [capacity embed] dtype)
-    :length 0 :capacity capacity :embed embed :fixed-capacity? true}))
+   (init-kv-cache backend capacity embed dtype 1))
+  ([backend capacity embed dtype batch]
+   (when-not (and (pos-int? capacity) (pos-int? embed) (pos-int? batch))
+     (throw (ex-info "KV cache capacity, embedding, and batch must be positive integers"
+                     {:capacity capacity :embed embed :batch batch})))
+   (let [shape (if (= batch 1) [capacity embed] [capacity batch embed])]
+     {:key (arr/zeros backend shape dtype)
+      :value (arr/zeros backend shape dtype)
+      :length 0 :capacity capacity :embed embed :batch batch
+      :fixed-capacity? true})))
 
 (defn llama-block-step
-  "Incrementally execute one batch-1 Llama block with a per-layer KV cache."
+  "Incrementally execute one token per batch through a Llama block. Input is
+  `[1,embed]` for batch 1 or batch-first `[batch,1,embed]`."
   [layer weights input cache]
   (let [[embed heads _hidden opts] (model/layer-args layer)
         opts (merge {:causal? true :rope? true} opts)
         kv-heads (long (or (:kv-heads opts) heads))
         kv-embed (* kv-heads (quot embed heads))
+        shape (:shape input)
+        rank (count shape)
+        batch (if (= rank 3) (long (first shape)) 1)
         length (long (or (:length cache) 0))
         eps (or (:eps opts) 1.0e-5)]
     (when-not (and (= :llama-block (model/layer-type layer))
-                   (= [1 embed] (:shape input)))
-      (throw (ex-info "llama block step requires [1 embed] input"
-                      {:shape (:shape input) :embed embed})))
-    (let [linear #(matmul-weight %1 (get weights %2))
+                   (or (= [1 embed] shape)
+                       (and (= rank 3) (= 1 (second shape))
+                            (= embed (last shape)))))
+      (throw (ex-info "llama block step requires [1,embed] or [batch,1,embed] input"
+                      {:shape shape :embed embed})))
+    (let [linear (fn [array weight-key]
+                   (if (= rank 3)
+                     (let [flat (t/reshape array [batch (last (:shape array))])
+                           projected (matmul-weight flat (get weights weight-key))]
+                       (t/reshape projected [batch 1 (last (:shape projected))]))
+                     (matmul-weight array (get weights weight-key))))
           normalized (t/rms-norm-last input (:attn-norm weights) eps)
           q0 (linear normalized :qw) k0 (linear normalized :kw)
           value (linear normalized :vw)
@@ -360,21 +386,31 @@
           query (t/rotary-embedding q0 heads rope-opts)
           key (t/rotary-embedding k0 kv-heads rope-opts)
           fixed? (:fixed-capacity? cache)
+          cache-batch (long (or (:batch cache) 1))
+          _ (when (and fixed? (not= batch cache-batch))
+              (throw (ex-info "fixed-capacity Llama KV cache batch size mismatch"
+                              {:input-batch batch :cache-batch cache-batch})))
           _ (when (and fixed? (>= length (:capacity cache)))
               (throw (ex-info "Llama KV cache is full"
                               {:length length :capacity (:capacity cache)})))
+          active-fixed (fn [backing source]
+                         (t/copy-into! backing source (* length batch kv-embed))
+                         (if (= rank 3)
+                           (t/transpose
+                            (assoc backing :shape [(inc length) batch kv-embed])
+                            [1 0 2])
+                           (assoc backing :shape [(inc length) kv-embed])))
+          axis (if (= rank 3) 1 0)
           all-key (if fixed?
-                    (let [backing (:key cache)]
-                      (t/copy-into! backing key (* length kv-embed))
-                      (assoc backing :shape [(inc length) kv-embed]))
-                    (if-let [old (:key cache)] (t/cat [old key] 0) key))
+                    (active-fixed (:key cache) key)
+                    (if-let [old (:key cache)] (t/cat [old key] axis) key))
           all-value (if fixed?
-                      (let [backing (:value cache)]
-                        (t/copy-into! backing value (* length kv-embed))
-                        (assoc backing :shape [(inc length) kv-embed]))
-                      (if-let [old (:value cache)] (t/cat [old value] 0) value))
+                      (active-fixed (:value cache) value)
+                      (if-let [old (:value cache)] (t/cat [old value] axis) value))
           attended (t/multi-head-attention query all-key all-value heads
                                            {:kv-heads kv-heads})
+          _ (when (and fixed? (= rank 3))
+              (arr/release-all! [all-key all-value]))
           residual (t/add input (linear attended :ow))
           ffn-input (t/rms-norm-last residual (:ffn-norm weights) eps)
           gate (t/silu (linear ffn-input :gate))
@@ -382,20 +418,23 @@
           output (t/add residual (linear (nm/mul gate up) :down))]
       {:output output
        :cache (if fixed? (assoc cache :length (inc length))
-                  {:key all-key :value all-value :length (inc length)})})))
+                  {:key all-key :value all-value :length (inc length)
+                   :batch batch})})))
 
 (defn init-llama-caches
   "Preallocate one fixed KV cache per Llama block in `model*`."
   ([backend model* capacity]
-   (init-llama-caches backend model* capacity :f32))
+   (init-llama-caches backend model* capacity :f32 1))
   ([backend model* capacity dtype]
+   (init-llama-caches backend model* capacity dtype 1))
+  ([backend model* capacity dtype batch]
    (->> (model/execution-layers model*)
         (filter #(= :llama-block (model/layer-type %)))
         (mapv (fn [layer]
                 (let [[embed heads _hidden opts] (model/layer-args layer)
                       kv-heads (long (or (:kv-heads opts) heads))]
                   (init-kv-cache backend capacity
-                                 (* kv-heads (quot embed heads)) dtype)))))))
+                                 (* kv-heads (quot embed heads)) dtype batch)))))))
 
 (defn llama-model-step
   "Run one token through every Llama block and update each layer's KV cache."

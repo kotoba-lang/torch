@@ -99,9 +99,10 @@ values without a host readback:
 The step accepts `[1 embed]` or `[batch 1 embed]`; its output matches the same
 layer's full causal pass token-for-token, verified on Apple Metal. A cache from
 `init-kv-cache` preallocates K/V once and appends device-to-device without changing
-either GPUBuffer handle. The older nil-start immutable cache remains supported.
-Fixed-capacity cache currently targets the common batch-1 generation path; batched
-serving and Ollama-style paged/block cache allocation remain future work.
+either GPUBuffer handle. Pass the batch size as the fifth argument, for example
+`(init-kv-cache backend 4096 embed-dim :f32 8)`. Its token-major backing makes
+each batched append contiguous while attention receives a batch-first view. The
+older nil-start immutable cache remains supported.
 
 `(m/llama-block embed heads hidden)` is a bias-free pre-normalized decoder
 block: RMSNorm → RoPE causal attention → residual → RMSNorm → SwiGLU → residual.
@@ -160,6 +161,16 @@ through a zero-copy matrix view. Llama
 grouped-query attention is supported when
 `head_count_kv` evenly divides `head_count`, including training and fixed-capacity
 KV-cache decoding on Metal; K/V projections and caches use the reduced KV width.
+Both general attention and complete Embedding → multi-block GQA Llama → LM-head
+decode have full/cached parity tests for batch 2 on Apple Metal, with stable
+GPUBuffer handles across every token.
+
+Host-side static batching is available through `generate-text-batch`. A single
+step callback receives one token per request and shared per-layer caches; rows
+that reach EOS early are padded so unfinished rows continue without changing the
+fixed GPU batch layout. Prompts currently need equal encoded lengths. Ragged
+prefill, continuous admission/eviction, and Ollama-style paged/block cache
+allocation remain future work.
 
 A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
 blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding
