@@ -228,8 +228,10 @@ scalar loss:
 
 On an f32 WebGPU backend, learned attention uses device-native projection GEMMs,
 matrix transposes, bias row reductions, fused attention forward/backward, and
-gradient accumulation. The ordinary MSE/optimizer convenience APIs still read
-host scalars and remain the synchronous reference path.
+gradient accumulation. MSE forward and its VJP are also device-native; on an async
+backend `loss-and-gradients` returns `:loss` as a Promise for the final scalar
+readback while prediction and gradients are immediately usable GPU arrays. The
+optimizer convenience APIs still perform host-side immutable updates.
 
 Learned MultiheadAttention is verified on both JVM and compiled ClojureScript:
 all eight projection tensors receive gradients, a Q-weight gradient matches a
@@ -243,9 +245,10 @@ node target/learned-attention-verify.cjs
 
 Its forward and explicit-VJP paths are device-native on WebGPU/Metal: projection
 GEMMs, last-axis bias broadcasts, fused multi-head attention, transposes, bias
-reductions, and all eight parameter gradients stay in GPU buffers until final
-verification readback. The Apple M4 check compares prediction, input gradient,
-and every projection weight/bias gradient against the CPU backend (10/10):
+reductions, MSE loss/VJP, and all eight parameter gradients stay in GPU buffers
+until final verification readback. The Apple M4 check covers explicit VJP plus
+ordinary MSE training, comparing prediction, input gradient, loss, and every
+projection weight/bias gradient against the CPU backend (20/20):
 
 ```sh
 clojure -M:deno-metal-attention-verify

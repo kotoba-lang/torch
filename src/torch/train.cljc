@@ -100,6 +100,13 @@
                   layer-parameters)))
         parameters))
 
+(defn- scalar-readback [array]
+  (let [values (arr/->vec array)]
+    #?(:cljs (if (instance? js/Promise values)
+               (.then values first)
+               (first values))
+       :clj (first values))))
+
 (defn prediction-and-gradients
   "Run a sequential model and apply an explicit vector-Jacobian product.
 
@@ -161,7 +168,7 @@
                   loss (ag/mse-loss* (:prediction graph) target)]
               (assoc graph :loss loss)))]
       (ag/backward! (:loss result) (arr/from-vec (:backend input) [loss-scale] []) tape)
-      {:loss (arr/->scalar (:data (:loss result)))
+      {:loss (scalar-readback (:data (:loss result)))
        :prediction (:data (:prediction result))
        :gradients (parameter-gradients (:parameters result))}))))
 
