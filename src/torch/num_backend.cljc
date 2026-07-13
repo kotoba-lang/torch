@@ -86,6 +86,9 @@
                 :layernorm (let [[features] a]
                              {:w (upload (repeat features 1.0) [features])
                               :b (upload (repeat features 0.0) [features])})
+                :embedding (let [[num-embeddings dim] a]
+                             {:w (upload (next-vec! (* num-embeddings dim))
+                                         [num-embeddings dim])})
                 :multihead-attention
                 (let [[embed _heads] a
                       matrix (fn [] (upload (next-vec! (* embed embed)) [embed embed]))
@@ -173,8 +176,9 @@
                    (t/group-norm-nchw x groups (:w weights) (:b weights)
                                       (or eps 1.0e-5)))
       :layernorm (t/layer-norm-last x (:w weights) (:b weights) 1.0e-5)
+      :embedding (t/embedding x (:w weights))
       (throw (ex-info (str "torch.num-backend: layer type not supported: " t')
-                      {:layer lyr :supported #{:linear :relu :silu :sigmoid :tanh :gelu :softmax :flatten :conv2d :layernorm
+                      {:layer lyr :supported #{:linear :relu :silu :sigmoid :tanh :gelu :softmax :flatten :conv2d :layernorm :embedding
                                                :groupnorm :attention
                                                :multihead-attention}})))))
 
@@ -199,11 +203,11 @@
                layer-options (or (:layer-options options)
                                  (repeat (count lyrs) nil))
                unsupported (when autocast-dtype
-                             (seq (remove #{:linear :relu :silu :sigmoid :tanh :gelu :flatten :conv2d :groupnorm :layernorm}
+                             (seq (remove #{:linear :relu :silu :sigmoid :tanh :gelu :flatten :conv2d :groupnorm :layernorm :embedding}
                                           (map model/layer-type lyrs))))]
            (when unsupported
              (throw (ex-info
-                     "torch.num-backend: autocast supports linear/relu/silu/sigmoid/tanh/gelu/flatten/conv2d/groupnorm/layernorm"
+                     "torch.num-backend: autocast supports linear/relu/silu/sigmoid/tanh/gelu/flatten/conv2d/groupnorm/layernorm/embedding"
                      {:unsupported (vec unsupported) :dtype autocast-dtype})))
            (when-not (= (count lyrs) (count layer-options))
              (throw (ex-info "torch.num-backend: layer-options count mismatch"
@@ -211,7 +215,9 @@
                               :layer-options (count layer-options)})))
            (let [x0 (if (= backend (:backend input)) input
                       (arr/from-vec backend (arr/->vec input) (:shape input)))
-                 x0 (if autocast-dtype (arr/cast x0 autocast-dtype) x0)]
+                 embedding-input? (= :embedding (model/layer-type (first lyrs)))
+                 x0 (if (and autocast-dtype (not embedding-input?))
+                      (arr/cast x0 autocast-dtype) x0)]
              (reduce (fn [x [lyr w runtime-options]]
                        (layer-forward lyr w x runtime-options))
                      x0

@@ -9,11 +9,12 @@
             [torch.optim :as optim]))
 
 (def supported-layers
-  #{:linear :conv2d :groupnorm :layernorm :flatten :relu :silu :sigmoid :tanh :gelu :softmax :attention
+  #{:linear :conv2d :groupnorm :layernorm :embedding :flatten :relu :silu :sigmoid :tanh :gelu :softmax :attention
     :multihead-attention})
 
 (def parameter-keys
   {:linear #{:w :b} :conv2d #{:w :b} :groupnorm #{:w :b} :layernorm #{:w :b}
+   :embedding #{:w}
    :multihead-attention #{:qw :qb :kw :kb :vw :vb :ow :ob}})
 
 (defn- fail [message data]
@@ -75,6 +76,10 @@
     (let [w (ag/value (:w weight)) b (ag/value (:b weight))]
       (track state (ag/layer-norm-last* (:value state) w b 1.0e-5)
              {:w w :b b}))
+
+    :embedding
+    (let [w (ag/value (:w weight))]
+      (track state (ag/embedding* (:data (:value state)) w) {:w w}))
 
     :relu (track state (ag/relu* (:value state)) nil)
     :silu (track state (ag/silu* (:value state)) nil)
@@ -228,9 +233,9 @@
     (fail "loss-scale must be a positive number" {:loss-scale loss-scale}))
   (let [layers (model/execution-layers model*)
         _ (when (and autocast-dtype
-                     (seq (remove #{:conv2d :groupnorm :layernorm :flatten :silu :relu :sigmoid :tanh :gelu}
+                     (seq (remove #{:conv2d :groupnorm :layernorm :embedding :flatten :silu :relu :sigmoid :tanh :gelu}
                                   (map model/layer-type layers))))
-            (fail "training autocast supports conv2d/groupnorm/layernorm/flatten/silu/relu/sigmoid/tanh/gelu only"
+            (fail "training autocast supports conv2d/groupnorm/layernorm/embedding/flatten/silu/relu/sigmoid/tanh/gelu only"
                   {:dtype autocast-dtype}))
         cast-array #(if autocast-dtype (arr/cast % autocast-dtype) %)
         weights (if autocast-dtype
@@ -240,7 +245,8 @@
                                   weight)))
                         weights)
                   weights)
-        input (cast-array input)
+        embedding-input? (= :embedding (model/layer-type (first layers)))
+        input (if embedding-input? input (cast-array input))
         target (cast-array target)
         layer-options (or layer-options (repeat (count layers) nil))]
     (validate-weights! layers weights)
