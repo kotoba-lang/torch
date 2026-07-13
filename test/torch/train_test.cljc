@@ -99,3 +99,34 @@
     (is (< (Math/abs (- numeric-q0 (first (arr/->vec (:qw gradient))))) 1.0e-5))
     (is (= [3 4] (:shape (:prediction first-pass))))
     (is (< (:loss trained) (:loss first-pass)))))
+
+(deftest explicit-vjp-matches-mse-attention-gradients
+  (let [model (m/sequential (m/multihead-attention 4 2))
+        weights (nb/random-weights backend model 31)
+        input (arr/from-vec backend
+                            [0.2 -0.1 0.3 0.4, -0.2 0.1 0.5 -0.3,
+                             0.6 0.2 -0.4 0.1] [3 4])
+        target (arr/from-vec backend
+                             [0.1 0.0 0.2 -0.1, 0.0 0.2 0.1 0.3,
+                              -0.2 0.1 0.0 0.2] [3 4])
+        mse (train/loss-and-gradients model weights input target)
+        prediction-values (arr/->vec (:prediction mse))
+        target-values (arr/->vec target)
+        n (count prediction-values)
+        upstream (arr/from-vec backend
+                               (mapv #(/ (* 2.0 (- %1 %2)) n)
+                                     prediction-values target-values)
+                               [3 4])
+        vjp (train/prediction-and-gradients model weights input upstream)
+        mse-gradient (first (:gradients mse))
+        vjp-gradient (first (:gradients vjp))]
+    (is (= (:shape (:prediction mse)) (:shape (:prediction vjp))))
+    (is (= (:shape input) (:shape (:input-gradient vjp))))
+    (doseq [parameter [:qw :qb :kw :kb :vw :vb :ow :ob]]
+      (is (every? #(< (Math/abs %) 1.0e-6)
+                  (map - (arr/->vec (get mse-gradient parameter))
+                       (arr/->vec (get vjp-gradient parameter))))
+          (str parameter " VJP differs from MSE backward")))
+    (is (thrown? #?(:clj Exception :cljs js/Error)
+                 (train/prediction-and-gradients
+                  model weights input (arr/from-vec backend [1.0] [1]))))))

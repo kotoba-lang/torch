@@ -84,6 +84,49 @@
                                (:ob parameters))]
       (track state output parameters))))
 
+(defn- forward-graph [layers weights input]
+  (let [input-value (ag/value input)
+        state (reduce forward-layer
+                      {:value input-value :parameters []}
+                      (map vector layers weights))]
+    {:input input-value
+     :prediction (:value state)
+     :parameters (:parameters state)}))
+
+(defn- parameter-gradients [parameters]
+  (mapv (fn [layer-parameters]
+          (when layer-parameters
+            (into {} (map (fn [[key value]] [key @(:grad value)]))
+                  layer-parameters)))
+        parameters))
+
+(defn prediction-and-gradients
+  "Run a sequential model and apply an explicit vector-Jacobian product.
+
+  `upstream-gradient` must match the prediction shape and backend. This is the
+  model-level equivalent of PyTorch's `prediction.backward(gradient)`: it does
+  not impose a loss function or synchronously read a scalar, so async GPU
+  backends can keep forward activations and the complete backward pass on the
+  device. Returns prediction, input gradient, and one parameter-gradient entry
+  per normalized layer."
+  [model* weights input upstream-gradient]
+  (let [layers (model/layers model*)]
+    (validate-weights! layers weights)
+    (when-not (= (:backend input) (:backend upstream-gradient))
+      (fail "upstream gradient must use the input backend"
+            {:input-backend (:backend input)
+             :gradient-backend (:backend upstream-gradient)}))
+    (let [[graph tape] (ag/with-tape (forward-graph layers weights input))]
+      (when-not (= (:shape (:data (:prediction graph)))
+                   (:shape upstream-gradient))
+        (fail "upstream gradient shape must match prediction"
+              {:prediction (:shape (:data (:prediction graph)))
+               :gradient (:shape upstream-gradient)}))
+      (ag/backward! (:prediction graph) upstream-gradient tape)
+      {:prediction (:data (:prediction graph))
+       :input-gradient @(:grad (:input graph))
+       :gradients (parameter-gradients (:parameters graph))})))
+
 (defn loss-and-gradients
   "Run a supported sequential model with MSE and return prediction/gradients.
 
@@ -114,18 +157,13 @@
     (validate-weights! layers weights)
     (let [[result tape]
           (ag/with-tape
-            (let [initial {:value (ag/value input) :parameters []}
-                  state (reduce forward-layer initial (map vector layers weights))
-                  loss (ag/mse-loss* (:value state) target)]
-              {:loss loss :prediction (:value state) :parameters (:parameters state)}))]
+            (let [graph (forward-graph layers weights input)
+                  loss (ag/mse-loss* (:prediction graph) target)]
+              (assoc graph :loss loss)))]
       (ag/backward! (:loss result) (arr/from-vec (:backend input) [loss-scale] []) tape)
       {:loss (arr/->scalar (:data (:loss result)))
        :prediction (:data (:prediction result))
-       :gradients
-       (mapv (fn [parameters]
-               (when parameters
-                 (into {} (map (fn [[key value]] [key @(:grad value)])) parameters)))
-             (:parameters result))}))))
+       :gradients (parameter-gradients (:parameters result))}))))
 
 (defn mixed-precision-adamw-step
   "Run typed forward, scaled backward, overflow handling, and f32 AdamW update.

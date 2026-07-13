@@ -216,6 +216,21 @@ trainer, not yet a replacement for PyTorch's broader optimizer catalog, GPU auto
 batched/masked attention, checkpoint loading, or mixed
 precision coverage for every layer.
 
+For an explicit vector-Jacobian product, `prediction-and-gradients` accepts an
+upstream tensor with the prediction's shape. This is equivalent to PyTorch's
+`prediction.backward(gradient)` and avoids imposing or synchronously reading a
+scalar loss:
+
+```clojure
+(train/prediction-and-gradients model weights input upstream-gradient)
+;; => {:prediction ... :input-gradient ... :gradients [...]}
+```
+
+On an f32 WebGPU backend, learned attention uses device-native projection GEMMs,
+matrix transposes, bias row reductions, fused attention forward/backward, and
+gradient accumulation. The ordinary MSE/optimizer convenience APIs still read
+host scalars and remain the synchronous reference path.
+
 Learned MultiheadAttention is verified on both JVM and compiled ClojureScript:
 all eight projection tensors receive gradients, a Q-weight gradient matches a
 central finite difference, identity projections match parameter-free attention,
@@ -226,10 +241,11 @@ clojure -M:cljs-learned-attention-verify
 node target/learned-attention-verify.cjs
 ```
 
-Its complete forward path is also device-native on WebGPU/Metal: four GEMMs,
-last-axis bias broadcasts, and fused multi-head attention stay in GPU buffers
-until final verification readback. The Apple Metal check compares deterministic
-learned projections against the CPU backend:
+Its forward and explicit-VJP paths are device-native on WebGPU/Metal: projection
+GEMMs, last-axis bias broadcasts, fused multi-head attention, transposes, bias
+reductions, and all eight parameter gradients stay in GPU buffers until final
+verification readback. The Apple M4 check compares prediction, input gradient,
+and every projection weight/bias gradient against the CPU backend (10/10):
 
 ```sh
 clojure -M:deno-metal-attention-verify
