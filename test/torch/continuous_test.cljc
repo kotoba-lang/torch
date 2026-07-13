@@ -60,15 +60,25 @@
                                         (cpu-storage 3 2 2 1)))
                        (range 2))
         calls (atom [])
+        batch-calls (atom [])
         step-fn (fn [token runtimes request-id]
                   (swap! calls conj [request-id token])
                   (let [step (nb/llama-lm-paged-step
                               model* weights (arr/from-vec backend [token] [1])
                               runtimes request-id)]
                     (assoc step :logits (arr/->vec (:logits step)))))
-        admitted (-> (continuous/engine runtimes step-fn 2)
+        batch-step-fn
+        (fn [tokens runtimes request-ids]
+          (swap! batch-calls conj [request-ids tokens])
+          (let [step (nb/llama-lm-paged-batch-step
+                      model* weights
+                      (arr/from-vec backend tokens [(count tokens) 1])
+                      runtimes request-ids)]
+            (assoc step :logits
+                   (mapv vec (partition 6 (arr/->vec (:logits step)))))))
+        admitted (-> (continuous/engine runtimes step-fn batch-step-fn 2)
                      (continuous/enqueue :a [2]
-                                         {:temperature 0.0 :max-new-tokens 1
+                                         {:temperature 0.0 :max-new-tokens 2
                                           :eos-id -1})
                      (continuous/enqueue :b [1 3 2]
                                          {:temperature 0.0 :max-new-tokens 2
@@ -80,20 +90,26 @@
     (is (= [:a :b] (:order admitted)))
     (is (= [:c] (mapv :id (:waiting admitted))))
     (is (every? empty? (map #(get-in % [:pool :free]) (:runtimes admitted))))
-    (let [tick1 (continuous/tick admitted)]
-      (is (= [:b :c] (:order tick1))
-          "a releases its block and c is immediately ragged-prefilled")
-      (is (= :length (get-in tick1 [:completed :a :reason])))
+    (let [tick1 (continuous/tick-batched admitted)]
+      (is (= [:a :b] (:order tick1)))
+      (is (= [:c] (mapv :id (:waiting tick1))))
+      (is (= 2 (get-in tick1 [:runtimes 0 :pool :sequences :a :length])))
       (is (= 4 (get-in tick1 [:runtimes 0 :pool :sequences :b :length])))
-      (is (= 1 (get-in tick1 [:runtimes 0 :pool :sequences :c :length])))
-      (let [tick2 (continuous/tick tick1)]
-        (is (empty? (:running tick2)))
-        (is (= #{:a :b :c} (set (keys (:completed tick2))))
-            "different prompt lengths and completion times share one pool")
-        (is (every? #(= #{0 1 2} (set (get-in % [:pool :free])))
-                    (:runtimes tick2)))
-        (is (every? #(kv/valid? (:pool %)) (:runtimes tick2)))
-        (is (= 6 (count @calls)))))))
+      (let [tick2 (continuous/tick-batched tick1)]
+        (is (= [:c] (:order tick2))
+            "a/b release blocks and c is immediately ragged-prefilled")
+        (is (= 1 (get-in tick2 [:runtimes 0 :pool :sequences :c :length])))
+        (let [tick3 (continuous/tick-batched tick2)]
+          (is (empty? (:running tick3)))
+          (is (= #{:a :b :c} (set (keys (:completed tick3))))
+              "different prompt lengths and completion times share one pool")
+          (is (every? #(= #{0 1 2} (set (get-in % [:pool :free])))
+                      (:runtimes tick3)))
+          (is (every? #(kv/valid? (:pool %)) (:runtimes tick3)))
+          (is (= 5 (count @calls)) "ragged prefill remains request-local")
+          (is (= 1 (count @batch-calls)))
+          (is (= [:a :b] (ffirst @batch-calls)))
+          (is (= 2 (count (second (first @batch-calls))))))))))
 
 (deftest head-of-line-request-waits-without-mutating-layer-pools
   (let [storage {:write! (fn [& _]) :copy-block! (fn [& _])

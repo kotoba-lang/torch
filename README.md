@@ -221,9 +221,11 @@ deno run --allow-all target/deno-continuous-verify.cjs
 #           shared physical pools release: passed
 ```
 
-This is real continuous paged execution but still serializes request steps within
-each scheduling tick. A fused multi-request paged-attention dispatch, cancellation,
-timeouts, backpressure, metrics, and an HTTP compatibility surface remain.
+`tick-batched` and `tick-batched-async` classify EOS/length completions first,
+release their blocks, pause rows that cannot grow, and group every remaining
+runnable request into one Llama batch call in stable order. Ragged prefill is still
+request-local. Cancellation, timeouts, backpressure, metrics, and an HTTP
+compatibility surface remain.
 
 The lower execution API also provides `llama-lm-paged-batch-step`: QKV and FFN
 projections remain batch tensors while each layer resolves request-specific RoPE
@@ -238,9 +240,9 @@ deno run --allow-all target/deno-paged-batch-llama-verify.cjs
 #           batched physical pools release: passed
 ```
 
-The continuous scheduler still calls single-request steps; selecting runnable
-requests into this batch API is the remaining orchestration change before the
-fused dispatch is used automatically by serving ticks.
+The continuous Metal verifier configures both callbacks and proves that `[:a :b]`
+is selected automatically into one fused decode call before their blocks are
+released and reused to prefill request `:c`.
 
 A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
 blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding
