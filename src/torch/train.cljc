@@ -10,12 +10,13 @@
 
 (def supported-layers
   #{:linear :conv2d :groupnorm :layernorm :rmsnorm :embedding :flatten :relu :silu :sigmoid :tanh :gelu :softmax :attention
-    :multihead-attention})
+    :multihead-attention :llama-block})
 
 (def parameter-keys
   {:linear #{:w :b} :conv2d #{:w :b} :groupnorm #{:w :b} :layernorm #{:w :b}
    :embedding #{:w}
    :rmsnorm #{:w}
+   :llama-block #{:attn-norm :qw :kw :vw :ow :ffn-norm :gate :up :down}
    :multihead-attention #{:qw :qb :kw :kb :vw :vb :ow :ob}})
 
 (defn- fail [message data]
@@ -105,6 +106,39 @@
              (ag/multi-head-attention* (:value state) (:value state)
                                        (:value state) heads)
              nil))
+
+    :llama-block
+    (let [[embed heads hidden opts] (model/layer-args layer)
+          opts (merge {:causal? true :rope? true} opts runtime-options)
+          eps (or (:eps opts) 1.0e-5)
+          input (:value state)
+          shape (:shape (:data input)) rank (count shape)
+          [batch sequence] (if (= rank 3) (take 2 shape) [1 (first shape)])
+          parameters (into {} (map (fn [[key array]] [key (ag/value array)]) weight))
+          flatten (fn [v]
+                    (if (= rank 3)
+                      (ag/reshape* v [(* batch sequence) (last (:shape (:data v)))]) v))
+          restore (fn [v features]
+                    (if (= rank 3) (ag/reshape* v [batch sequence features]) v))
+          linear (fn [v key out]
+                   (restore (ag/matmul* (flatten v) (get parameters key)) out))
+          normalized (ag/rms-norm-last* input (:attn-norm parameters) eps)
+          q0 (linear normalized :qw embed)
+          k0 (linear normalized :kw embed)
+          value (linear normalized :vw embed)
+          rope-opts {:theta (or (:rope-theta opts) 10000.0)
+                     :position-offset (or (:position-offset opts) 0)}
+          query (ag/rotary-embedding* q0 heads rope-opts)
+          key (ag/rotary-embedding* k0 heads rope-opts)
+          attended (ag/multi-head-attention* query key value heads {:causal? true})
+          attention-output (linear attended :ow embed)
+          residual (ag/add* input attention-output)
+          ffn-input (ag/rms-norm-last* residual (:ffn-norm parameters) eps)
+          gate (ag/silu* (linear ffn-input :gate hidden))
+          up (linear ffn-input :up hidden)
+          down (linear (ag/mul* gate up) :down embed)
+          output (ag/add* residual down)]
+      (track state output parameters))
 
     :multihead-attention
     (let [[embed heads opts] (model/layer-args layer)

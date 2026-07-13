@@ -282,3 +282,27 @@
     (is (= 8 (get-in fixed-decoded [:cache :capacity])))
     (is (every? #(< (Math/abs %) 1.0e-6)
                 (map - (arr/->vec full) (:outputs fixed-decoded))))))
+
+(deftest multi-block-llama-decoding-matches-full-causal-model
+  (let [model (m/sequential (m/llama-block 4 2 8 {:position-offset 3})
+                            (m/llama-block 4 2 8 {:position-offset 3}))
+        weights (nb/random-weights backend model 71)
+        tokens [[0.2 -0.1 0.3 0.4]
+                [-0.2 0.1 0.5 -0.3]
+                [0.6 0.2 -0.4 0.1]]
+        input (arr/from-vec backend (vec (mapcat identity tokens)) [3 4])
+        full (core/run (nb/num-backend backend weights) model input)
+        initial-caches (nb/init-llama-caches backend model 8)
+        handles (mapv #(-> % :key :handle) initial-caches)
+        decoded (reduce (fn [{:keys [caches outputs]} token]
+                          (let [step (nb/llama-model-step
+                                      model weights
+                                      (arr/from-vec backend token [1 4]) caches)]
+                            {:caches (:caches step)
+                             :outputs (into outputs (arr/->vec (:output step)))}))
+                        {:caches initial-caches :outputs []} tokens)]
+    (is (= [3 3] (mapv :length (:caches decoded))))
+    (is (every? true? (map identical? handles
+                           (map #(-> % :key :handle) (:caches decoded)))))
+    (is (every? #(< (Math/abs %) 1.0e-5)
+                (map - (arr/->vec full) (:outputs decoded))))))

@@ -85,6 +85,18 @@
                    " must divide embed-dim " embed-dim)]
       :else [:ok in])))
 
+(defmethod layer-shape :llama-block [_ args in]
+  (let [[embed heads hidden] args]
+    (cond
+      (not (#{2 3} (count in)))
+      [:error "llama-block expects [sequence embed] or [batch sequence embed]"]
+      (not (every? pos-int? [embed heads hidden]))
+      [:error "llama-block dimensions must be positive integers"]
+      (not= embed (last in)) [:error "llama-block embed dimension mismatch"]
+      (not (zero? (mod embed heads))) [:error "llama-block heads must divide embed"]
+      (odd? (quot embed heads)) [:error "llama-block head dimension must be even"]
+      :else [:ok in])))
+
 ;; --- linear ----------------------------------------------------------------
 
 (defmethod layer-shape :linear [_ args in]
@@ -233,12 +245,15 @@
 (defmethod layer-params :groupnorm [_ args] (* 2 (nth-arg args 1 0)))
 (defmethod layer-params :multihead-attention [_ args]
   (let [embed (nth-arg args 0 0)] (* 4 (+ (* embed embed) embed))))
+(defmethod layer-params :llama-block [_ args]
+  (let [embed (nth-arg args 0 0) hidden (nth-arg args 2 0)]
+    (+ (* 2 embed) (* 4 embed embed) (* 3 embed hidden))))
 
 (def built-in-types
   "The set of layer types this namespace understands."
   #{:linear :conv2d :maxpool2d :avgpool2d :embedding :batchnorm :layernorm :rmsnorm
     :groupnorm :dropout :flatten :relu :silu :gelu :sigmoid :tanh :softmax
-    :attention :multihead-attention :identity})
+    :attention :multihead-attention :llama-block :identity})
 
 (defn known?
   "True if `t` is a built-in layer type."

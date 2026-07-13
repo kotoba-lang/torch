@@ -15,7 +15,8 @@
 (def ^:private min-arity
   "Minimum positional-arg count for built-in layer types that need args."
   {:linear 2 :conv2d 3 :maxpool2d 1 :avgpool2d 1 :embedding 2
-   :batchnorm 1 :layernorm 1 :rmsnorm 1 :groupnorm 2 :multihead-attention 2})
+   :batchnorm 1 :layernorm 1 :rmsnorm 1 :groupnorm 2 :multihead-attention 2
+   :llama-block 3})
 
 (defn- check-layer [ports* path lyr]
   (cond

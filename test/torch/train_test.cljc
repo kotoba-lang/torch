@@ -99,6 +99,38 @@
                 (arr/from-vec backend (repeat 8 1.0) [4 2])))))
     (is (< (:loss trained) (:loss first-pass)))))
 
+(deftest llama-decoder-block-runs-and-trains
+  (let [model (m/sequential (m/llama-block 4 2 8 {:position-offset 2}))
+        input (arr/from-vec backend
+                            [0.2 -0.1 0.3 0.4, -0.2 0.1 0.5 -0.3,
+                             0.6 0.2 -0.4 0.1] [3 4])
+        target (arr/from-vec backend
+                             [0.1 0.0 0.2 -0.1, 0.0 0.2 0.1 0.3,
+                              -0.2 0.1 0.0 0.2] [3 4])
+        initial (nb/random-weights backend model 67)
+        inference (core/run (nb/num-backend backend initial) model input)
+        first-pass (train/loss-and-gradients model initial input target)
+        epsilon 1.0e-5
+        qw (:qw (first initial)) values (vec (arr/->vec qw))
+        loss-at (fn [delta]
+                  (:loss
+                   (train/loss-and-gradients
+                    model [(assoc (first initial) :qw
+                                  (arr/from-vec backend
+                                                (assoc values 0 (+ (first values) delta))
+                                                (:shape qw)))]
+                    input target)))
+        numeric (/ (- (loss-at epsilon) (loss-at (- epsilon))) (* 2.0 epsilon))
+        analytic (first (arr/->vec (:qw (first (:gradients first-pass)))))
+        trained (last (take 31 (iterate (fn [{:keys [weights]}]
+                                          (train/sgd-step model weights input target 0.03))
+                                        {:weights initial})))]
+    (is (= (arr/->vec inference) (arr/->vec (:prediction first-pass))))
+    (is (= #{:attn-norm :qw :kw :vw :ow :ffn-norm :gate :up :down}
+           (set (keys (first (:gradients first-pass))))))
+    (is (< (Math/abs (- numeric analytic)) 1.0e-4))
+    (is (< (:loss trained) (:loss first-pass)))))
+
 (deftest training-contract-rejects-ambiguous-input
   (let [x (arr/from-vec backend [1 2] [1 2])]
     (is (thrown? #?(:clj Exception :cljs js/Error)

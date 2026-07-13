@@ -103,6 +103,21 @@ either GPUBuffer handle. The older nil-start immutable cache remains supported.
 Fixed-capacity cache currently targets the common batch-1 generation path; batched
 serving and Ollama-style paged/block cache allocation remain future work.
 
+`(m/llama-block embed heads hidden)` is a bias-free pre-normalized decoder
+block: RMSNorm → RoPE causal attention → residual → RMSNorm → SwiGLU → residual.
+Blocks are ordinary model layers for full-sequence inference and training. For
+incremental multi-layer decoding, allocate one cache per block and advance all
+blocks with one token:
+
+```clojure
+(def caches (nb/init-llama-caches backend model 4096))
+(nb/llama-model-step model weights one-token caches)
+;; => {:output hidden-state :caches updated-per-layer-caches}
+```
+
+Two stacked blocks are verified token-for-token against their full causal model
+on Apple Metal while every layer retains its originally allocated K/V handles.
+
 When `:context` is present, Q is projected from the current model value while K/V
 are projected from the separate context sequence, enabling UNet-style cross-attention
 with different query/key lengths. VJP and MSE results expose the context gradient at
@@ -291,7 +306,7 @@ tested. Backward is still a synchronous host reference implementation, so this
 is real mixed-precision numerical behavior but not GPU-resident autograd.
 
 The reference path supports recursively nested sequential models composed from
-`:linear/:conv2d/:embedding/:groupnorm/:layernorm/:rmsnorm/:flatten/:relu/:silu/:sigmoid/:tanh/:gelu/:softmax/:attention/:multihead-attention`, with MSE and
+`:linear/:conv2d/:embedding/:groupnorm/:layernorm/:rmsnorm/:flatten/:relu/:silu/:sigmoid/:tanh/:gelu/:softmax/:attention/:multihead-attention/:llama-block`, with MSE and
 positive-rate SGD plus immutable AdamW. NCHW grouped convolution, affine GroupNorm, SiLU, and
 multi-head self-attention all have real reverse-mode gradients; tests verify
 both finite-difference agreement in `num` and decreasing loss through the

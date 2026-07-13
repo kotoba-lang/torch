@@ -21,6 +21,7 @@
     (is (= {:relu {}} (m/relu)))
     (is (= {:silu {}} (m/silu)))
     (is (= {:rmsnorm [16]} (m/rmsnorm 16)))
+    (is (= {:llama-block [16 4 32]} (m/llama-block 16 4 32)))
     (is (= {:groupnorm [4 32]} (m/groupnorm 4 32)))
     (is (= {:attention {}} (m/attention)))
     (is (= {:multihead-attention [64 8]} (m/multihead-attention 64 8)))
