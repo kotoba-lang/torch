@@ -41,17 +41,28 @@
 (doseq [t [:relu :gelu :sigmoid :tanh :softmax :dropout :identity]]
   (defmethod layer-shape t [_ _ in] [:ok in]))
 
-;; --- parameter-free, single-head self-attention over [sequence embedding] --
+;; --- parameter-free, self-attention over [sequence embedding] --------------
+;; :attention [num-heads?] — num-heads defaults to 1 (single-head, the
+;; original shape this method supported); `args` may be `{}` (the zero-arg
+;; `torch.model/attention` constructor's stored form) or `[num-heads]`.
 
-(defmethod layer-shape :attention [_ _ in]
-  (cond
-    (not= 2 (count in))
-    [:error (str "attention expects a [sequence embedding] input, got " in)]
+(defmethod layer-shape :attention [_ args in]
+  (let [num-heads (nth-arg args 0 1)]
+    (cond
+      (not= 2 (count in))
+      [:error (str "attention expects a [sequence embedding] input, got " in)]
 
-    (not (every? pos-int? in))
-    [:error "attention expects positive sequence and embedding dimensions"]
+      (not (every? pos-int? in))
+      [:error "attention expects positive sequence and embedding dimensions"]
 
-    :else [:ok in]))
+      (not (pos-int? num-heads))
+      [:error "attention num-heads must be a positive int"]
+
+      (not (zero? (mod (long (second in)) (long num-heads))))
+      [:error (str "attention num-heads " num-heads " must evenly divide embedding "
+                   (second in))]
+
+      :else [:ok in])))
 
 ;; --- linear ----------------------------------------------------------------
 

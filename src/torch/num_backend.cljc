@@ -7,13 +7,18 @@
   SCOPE (deliberately not full PyTorch-layer coverage — see ADR-2607131500):
   `:linear` `:relu` `:softmax` are fully supported at any batch size (they
   map directly onto already-real, already-verified num ops). `:conv2d` is
-  supported ONLY for the single-in-channel/single-out-channel/batch=1 case
-  — `num.tensor/conv2d` itself is single-channel-single-image (see its own
-  docstring); this backend does not attempt multi-channel/batched conv, and
-  throws a clear error rather than silently computing something wrong for
-  any other channel/batch configuration. `:attention` is parameter-free,
-  single-head self-attention over one `[sequence embedding]` input (no batch,
-  mask, projections, or separate Q/K/V). Every other layer type throws.
+  batch=1 only (no batched conv) but now supports ANY channel count — the
+  weight's own rank picks the path: a rank-2 `[kh kw]` kernel dispatches to
+  `num.tensor/conv2d` (single-channel, the original restricted form, kept
+  for exact backward compatibility with weights already built against it), a
+  rank-4 `[C_out C_in kh kw]` kernel dispatches to `num.tensor/conv2d-mc`
+  (any channel count — `random-weights` below produces this rank-4 form for
+  every new `:conv2d` layer). `:attention` is parameter-free self-attention
+  over one `[sequence embedding]` input (no batch, mask, or learned Q/K/V
+  projections) — `num-heads` (layer arg 0, default 1) selects multi-head via
+  `num.tensor/multi-head-attention`, which is EXACTLY `num.tensor/attention`
+  at num-heads=1 (verified in num's own test suite). Every other layer type
+  throws.
 
   WEIGHTS: torch-clj's model EDN is shape-and-parameter-COUNT only — it
   never carries actual weight values (by design, see torch.model). This
@@ -53,8 +58,11 @@
 (defn random-weights
   "A weights vector for `model*` (one entry per NORMALIZED layer, `nil` for
   parameterless layers) on `backend`, seeded from `seed` for reproducibility.
-  `:linear [in out]` -> `{:w [in out] :b [out]}`; `:conv2d [1 1 k]` (the only
-  supported channel config here) -> `{:w [k k] :b nil}`."
+  `:linear [in out]` -> `{:w [in out] :b [out]}`; `:conv2d [in-ch out-ch k]`
+  -> `{:w [out-ch in-ch k k] :b nil}` (rank-4 — any channel count, dispatched
+  by `layer-forward` to `num.tensor/conv2d-mc`); `:attention` has no weights
+  (parameter-free) regardless of num-heads, so it's `nil` here like any other
+  parameterless layer."
   [backend model* seed]
   (let [lyrs (model/layers model*)
         seed* (atom (long seed))
@@ -66,10 +74,9 @@
                           {:w (arr/from-vec backend (next-vec! (* in out)) [in out])
                            :b (arr/from-vec backend (next-vec! out) [out])})
                 :conv2d (let [[in-ch out-ch k] a]
-                          (when (or (not= 1 in-ch) (not= 1 out-ch))
-                            (throw (ex-info "torch.num-backend/random-weights: only in_ch=out_ch=1 conv2d is supported"
-                                            {:layer lyr})))
-                          {:w (arr/from-vec backend (next-vec! (* k k)) [k k]) :b nil})
+                          {:w (arr/from-vec backend (next-vec! (* out-ch in-ch k k))
+                                            [out-ch in-ch k k])
+                           :b nil})
                 nil)))
           lyrs)))
 
@@ -79,24 +86,38 @@
   "Apply one layer to `x` (an NDArray, batch-first), given its weights entry
   (or nil). Throws on any layer type not in this backend's documented scope."
   [lyr weights x]
-  (let [t' (model/layer-type lyr)]
+  (let [t' (model/layer-type lyr) largs (model/layer-args lyr)]
     (case t'
       :linear (t/add (nm/matmul x (:w weights)) (:b weights))
       :relu   (nm/relu x)
       :softmax (t/softmax x)
-      :attention (do
+      :attention (let [num-heads (if (and (vector? largs) (seq largs)) (first largs) 1)]
                    (when-not (= 2 (count (:shape x)))
                      (throw (ex-info "torch.num-backend: :attention expects [sequence embedding]"
                                      {:shape (:shape x)})))
-                   (t/attention x x x))
+                   (t/multi-head-attention x x x num-heads))
+      ;; Two kernel conventions, dispatched on the WEIGHT's own rank (not the
+      ;; layer args) so the original single-channel path stays byte-for-byte
+      ;; compatible with weights already built against it:
+      ;;   kernel rank 2 [kh kw]        -> t/conv2d       (in_ch=out_ch=1 only)
+      ;;   kernel rank 4 [Cout Cin kh kw] -> t/conv2d-mc   (any channel count)
       :conv2d (let [[batch _c h w] (:shape x)
                     _ (when (not= 1 batch)
                         (throw (ex-info "torch.num-backend: :conv2d only supports batch=1 here"
                                         {:shape (:shape x)})))
-                    img (t/reshape x [h w])
-                    out (t/conv2d img (:w weights))
-                    [oh ow] (:shape out)]
-                (t/reshape out [1 1 oh ow]))
+                    kshape (:shape (:w weights))]
+                (case (count kshape)
+                  2 (let [img (t/reshape x [h w])
+                          out (t/conv2d img (:w weights))
+                          [oh ow] (:shape out)]
+                      (t/reshape out [1 1 oh ow]))
+                  4 (let [cin (second kshape)
+                          img (t/reshape x [cin h w])
+                          out (t/conv2d-mc img (:w weights))
+                          [cout oh ow] (:shape out)]
+                      (t/reshape out [1 cout oh ow]))
+                  (throw (ex-info "torch.num-backend: :conv2d weight must be rank-2 [kh kw] or rank-4 [C_out C_in kh kw]"
+                                  {:kernel-shape kshape}))))
       (throw (ex-info (str "torch.num-backend: layer type not supported: " t')
                       {:layer lyr :supported #{:linear :relu :softmax :conv2d
                                                :attention}})))))

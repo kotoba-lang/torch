@@ -45,7 +45,13 @@
 (defn sigmoid    [] {:sigmoid {}})
 (defn tanh       [] {:tanh {}})
 (defn softmax    [] {:softmax {}})
-(defn attention  [] {:attention {}})
+(defn attention
+  "Parameter-free self-attention over `[sequence embedding]`. Zero-arg is
+  single-head (unchanged `{:attention {}}` shape); `num-heads` selects
+  multi-head — `embedding` must divide evenly by it (checked by
+  `torch.shape/layer-shape`, not here — this constructor is pure data)."
+  ([] {:attention {}})
+  ([num-heads] {:attention [num-heads]}))
 
 ;; ---------------------------------------------------------------------------
 ;; model container

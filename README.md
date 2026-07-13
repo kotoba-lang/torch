@@ -60,9 +60,14 @@ Built-in layer types: `:linear :conv2d :maxpool2d :avgpool2d :embedding
 :batchnorm :layernorm :dropout :flatten :relu :gelu :sigmoid :tanh :softmax
 :attention`.
 
-`:attention` currently means parameter-free, single-head self-attention over a
-single `[sequence embedding]` tensor. It has no batch axis, mask, learned QKV
-projections, or multi-head split; those remain explicit future work.
+`:attention` means parameter-free self-attention over a single
+`[sequence embedding]` tensor — `(m/attention)` is single-head,
+`(m/attention num-heads)` splits `embedding` evenly across heads (an error if
+it doesn't divide). It has no batch axis, mask, or learned QKV projections;
+those remain explicit future work. `:conv2d` supports any channel count
+(`(m/conv2d in-ch out-ch k)`), batch=1 only — `torch.num-backend/random-weights`
+produces a `[out-ch in-ch k k]` kernel; hand-supplied rank-2 `[k k]` kernels
+(the original in_ch=out_ch=1 form) still work unchanged.
 
 ## Shape & parameter engine (`torch.shape`, `torch.core`)
 
