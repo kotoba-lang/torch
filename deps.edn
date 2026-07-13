@@ -5,17 +5,23 @@
  ;; (real execution is a host-injected IBackend port).
  :deps {io.github.kotoba-lang/dsl-core
         {:git/sha "9bedd2b9d05133a2d9b0656a55135f142ab11a36"}
-        ;; Includes tensor attention, autograd (incl. conv2d*/attention*
-        ;; backward), multi-channel conv2d (conv2d-mc), multi-head
-        ;; attention, and NCHW UNet primitives.
+        ;; Development checkout includes differentiable NCHW convolution,
+        ;; GroupNorm, SiLU, and multi-head attention. Replace with its merged
+        ;; git SHA before publishing this branch.
         io.github.kotoba-lang/num
-        {:git/sha "4b04bd1e2e13a9edfe9cf910b37ae54c2c9fb7a3"}}
+        {:local/root "../num"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
                       {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
          :main-opts ["-m" "cognitect.test-runner"]
          :exec-fn cognitect.test-runner.api/test}
+       :deno-autocast-verify
+       {:extra-paths ["test"]
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-autocast-verify :output-to \"target/deno-autocast-verify.cjs\"}"
+                    "-c" "torch.deno-autocast-verify"]}
        ;; clj-kondo as a Clojars lib (no Homebrew/system install needed).
        :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
          :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"

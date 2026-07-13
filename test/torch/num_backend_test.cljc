@@ -181,3 +181,50 @@
         ;; softmax output: non-negative, sums to ~1
         (is (every? #(>= % 0.0) out))
         (is (contract-approx? 1.0 (reduce + out)))))))
+
+(deftest physical-autocast-runs-linear-silu-in-sixteen-bit-storage
+  (let [model (m/sequential (m/linear 2 3) (m/silu) (m/linear 3 2))
+        weights (nb/random-weights backend model 91)
+        input (arr/from-vec backend [0.25 -0.75 1.0 0.5] [2 2])
+        f32-output (core/run (nb/num-backend backend weights) model input)]
+    (doseq [[dtype* tolerance] [[:f16 0.001] [:bf16 0.01]]]
+      (let [output (core/run (nb/num-backend backend weights
+                                              {:autocast-dtype dtype*})
+                             model input)]
+        (is (= dtype* (:dtype output)))
+        (is (every? #(< % tolerance)
+                    (map #(Math/abs (- %1 %2))
+                         (arr/->vec f32-output) (arr/->vec output))))))))
+
+(deftest random-weights-can-upload-directly-to-autocast-storage
+  (let [model (m/sequential (m/linear 2 3) (m/silu))
+        weights (nb/random-weights backend model 12 {:dtype :f16})]
+    (is (= :f16 (:dtype (:w (first weights)))))
+    (is (= :f16 (:dtype (:b (first weights)))))
+    (is (nil? (second weights)))))
+
+(deftest physical-autocast-runs-conv-groupnorm-silu
+  (let [model (m/sequential (m/conv2d 2 4 3 1 1)
+                            (m/groupnorm 2 4)
+                            (m/silu))
+        weights (nb/random-weights backend model 3)
+        input (arr/from-vec backend (mapv #(- (* 0.03 %) 0.4) (range 32))
+                            [1 2 4 4])
+        expected (core/run (nb/num-backend backend weights) model input)]
+    (doseq [[dtype* tolerance] [[:f16 0.004] [:bf16 0.03]]]
+      (let [actual (core/run (nb/num-backend backend weights
+                                              {:autocast-dtype dtype*})
+                             model input)]
+        (is (= dtype* (:dtype actual)))
+        (is (every? #(< % tolerance)
+                    (map #(Math/abs (- %1 %2))
+                         (arr/->vec expected) (arr/->vec actual))))))))
+
+(deftest autocast-rejects-unimplemented-layer-kernels
+  (let [model (m/sequential (m/softmax))
+        weights (nb/random-weights backend model 3)
+        input (arr/from-vec backend [1.0 2.0] [1 2])]
+    (is (thrown-with-msg?
+         #?(:clj Exception :cljs js/Error) #"autocast supports"
+         (core/run (nb/num-backend backend weights {:autocast-dtype :f16})
+                   model input)))))

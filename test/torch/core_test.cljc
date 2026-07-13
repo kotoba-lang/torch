@@ -19,6 +19,8 @@
   (testing "builders produce one-key layer literals"
     (is (= {:linear [784 256]} (m/linear 784 256)))
     (is (= {:relu {}} (m/relu)))
+    (is (= {:silu {}} (m/silu)))
+    (is (= {:groupnorm [4 32]} (m/groupnorm 4 32)))
     (is (= {:attention {}} (m/attention)))
     (is (= {:conv2d [3 16 3 2 1]} (m/conv2d 3 16 3 2 1))))
   (testing "layer-type / layer-args read a literal; model? distinguishes modules"
@@ -41,7 +43,10 @@
 (deftest shape-conv-and-pool
   (testing "conv2d over a CHW image, with stride/pad"
     (is (= [:ok [16 32 32]] (shape/layer-shape :conv2d [3 16 3 1 1] [3 32 32])))
-    (is (= [:ok [16 30 30]] (shape/layer-shape :conv2d [3 16 3]     [3 32 32]))))
+    (is (= [:ok [16 30 30]] (shape/layer-shape :conv2d [3 16 3]     [3 32 32])))
+    (is (= [:ok [8 7 8]]
+           (shape/layer-shape :conv2d [4 8 [3 2] [2 2] [1 0] [2 1] 2]
+                              [4 16 16]))))
   (testing "maxpool halves spatial dims"
     (is (= [:ok [16 16 16]] (shape/layer-shape :maxpool2d [2] [16 32 32]))))
   (testing "channel mismatch reported"
@@ -56,19 +61,17 @@
   (is (= :error (first (shape/layer-shape :attention {} [2 8 64])))))
 
 (deftest shape-groupnorm
-  (is (= [:ok [16 8 8]] (shape/layer-shape :groupnorm [4 16] [16 8 8])))
-  (is (= :error (first (shape/layer-shape :groupnorm [4 16] [32 8 8])))
-      "channels arg must match input channels")
-  (is (= :error (first (shape/layer-shape :groupnorm [5 16] [16 8 8])))
-      "num-groups must evenly divide channels")
-  (is (= :error (first (shape/layer-shape :groupnorm [4 16] [16 8])))
-      "requires a [C H W] input"))
+  (is (= [:ok [32 16 16]]
+         (shape/layer-shape :groupnorm [4 32] [32 16 16])))
+  (is (= :error (first (shape/layer-shape :groupnorm [3 32] [32 16 16])))))
 
 (deftest params-counts
   (is (= (+ (* 784 256) 256) (shape/layer-params :linear [784 256])))
   (is (= (+ (* 3 16 3 3) 16) (shape/layer-params :conv2d [3 16 3])))
+  (is (= (+ (* 8 2 3 2) 8)
+         (shape/layer-params :conv2d [4 8 [3 2] 1 0 1 2])))
+  (is (= 64 (shape/layer-params :groupnorm [4 32])))
   (is (= (* 1000 64) (shape/layer-params :embedding [1000 64])))
-  (is (= (* 2 16) (shape/layer-params :groupnorm [4 16])))
   (is (zero? (shape/layer-params :relu {}))))
 
 ;; ---------------------------------------------------------------------------

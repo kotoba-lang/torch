@@ -18,10 +18,15 @@
   [args i default]
   (if (and (vector? args) (> (count args) i)) (nth args i) default))
 
+(defn- pair-value [value]
+  (let [pair (if (sequential? value) (vec value) [value value])]
+    (when (and (= 2 (count pair)) (every? integer? pair)) pair)))
+
 (defn- conv-out
-  "Floor((dim + 2*pad - k) / stride) + 1, or nil if it underflows."
-  [dim k stride pad]
-  (let [n (+ (quot (- (+ dim (* 2 pad)) k) stride) 1)]
+  "PyTorch floor output size, including dilation, or nil if it underflows."
+  [dim k stride pad dilation]
+  (let [effective-k (inc (* dilation (dec k)))
+        n (+ (quot (- (+ dim (* 2 pad)) effective-k) stride) 1)]
     (when (pos? n) n)))
 
 ;; ---------------------------------------------------------------------------
@@ -38,7 +43,7 @@
 
 ;; --- elementwise / activation (shape-preserving) ---------------------------
 
-(doseq [t [:relu :gelu :sigmoid :tanh :softmax :silu :dropout :identity]]
+(doseq [t [:relu :silu :gelu :sigmoid :tanh :softmax :dropout :identity]]
   (defmethod layer-shape t [_ _ in] [:ok in]))
 
 ;; --- parameter-free, self-attention over [sequence embedding] --------------
@@ -102,25 +107,18 @@
 (doseq [t [:batchnorm :layernorm]]
   (defmethod layer-shape t [_ _ in] [:ok in]))
 
-;; --- groupnorm : [num-groups channels] over a [C H W] shape (matches
-;; :conv2d's convention — num.tensor/group-norm-nchw is a real NCHW op) ------
-
 (defmethod layer-shape :groupnorm [_ args in]
-  (let [num-groups (nth-arg args 0 nil) channels (nth-arg args 1 nil)]
+  (let [groups (nth-arg args 0 nil)
+        channels (nth-arg args 1 nil)]
     (cond
-      (not (and (pos-int? num-groups) (pos-int? channels)))
-      [:error "groupnorm expects [num-groups channels] positive ints"]
-
       (not= 3 (count in))
       [:error (str "groupnorm expects a [C H W] input, got " in)]
-
-      (not= (first in) channels)
+      (not (and (pos-int? groups) (pos-int? channels)))
+      [:error "groupnorm expects [num-groups num-channels] positive ints"]
+      (not= channels (first in))
       [:error (str "groupnorm channels " channels " ≠ input channels " (first in))]
-
-      (not (zero? (mod (long channels) (long num-groups))))
-      [:error (str "groupnorm num-groups " num-groups " must evenly divide channels "
-                   channels)]
-
+      (not (zero? (mod channels groups)))
+      [:error "groupnorm num-channels must be divisible by num-groups"]
       :else [:ok in])))
 
 ;; --- conv2d : [in-ch out-ch k stride? pad?] over a [C H W] shape ------------
@@ -128,23 +126,33 @@
 (defmethod layer-shape :conv2d [_ args in]
   (let [in-ch  (nth-arg args 0 nil)
         out-ch (nth-arg args 1 nil)
-        k      (nth-arg args 2 nil)
-        stride (nth-arg args 3 1)
-        pad    (nth-arg args 4 0)]
+        kernel (pair-value (nth-arg args 2 nil))
+        stride (pair-value (nth-arg args 3 1))
+        pad (pair-value (nth-arg args 4 0))
+        dilation (pair-value (nth-arg args 5 1))
+        groups (nth-arg args 6 1)]
     (cond
       (not= 3 (count in))
       [:error (str "conv2d expects a [C H W] input, got " in)]
-      (not (and (pos-int? in-ch) (pos-int? out-ch) (pos-int? k)))
+      (not (and (pos-int? in-ch) (pos-int? out-ch)
+                kernel (every? pos-int? kernel)))
       [:error "conv2d expects [in out k] positive ints"]
+      (not (and stride (every? pos-int? stride)
+                pad (every? #(and (integer? %) (not (neg? %))) pad)
+                dilation (every? pos-int? dilation)))
+      [:error "conv2d stride/dilation must be positive and padding non-negative"]
+      (not (and (pos-int? groups) (zero? (mod in-ch groups))
+                (zero? (mod out-ch groups))))
+      [:error "conv2d groups must divide input and output channels"]
       (not= (first in) in-ch)
       [:error (str "conv2d in-channels " in-ch " ≠ input channels " (first in))]
       :else
-      (let [[_ h w] in
-            h' (conv-out h k stride pad)
-            w' (conv-out w k stride pad)]
+      (let [[_ h w] in [kh kw] kernel [sh sw] stride [ph pw] pad [dh dw] dilation
+            h' (conv-out h kh sh ph dh)
+            w' (conv-out w kw sw pw dw)]
         (if (and h' w')
           [:ok [out-ch h' w']]
-          [:error (str "conv2d kernel " k " too large for " [h w])])))))
+          [:error (str "conv2d kernel " kernel " too large for " [h w])])))))
 
 ;; --- pooling : [k stride? pad?] over [C H W] --------------------------------
 
@@ -157,8 +165,8 @@
       (not (pos-int? k))  [:error "pool expects [k …] positive int"]
       :else
       (let [[c h w] in
-            h' (conv-out h k stride pad)
-            w' (conv-out w k stride pad)]
+            h' (conv-out h k stride pad 1)
+            w' (conv-out w k stride pad 1)]
         (if (and h' w')
           [:ok [c h' w']]
           [:error (str "pool kernel " k " too large for " [h w])])))))
@@ -178,20 +186,22 @@
     (+ (* in out) out)))                       ; weight + bias
 
 (defmethod layer-params :conv2d [_ args]
-  (let [in (nth-arg args 0 0) out (nth-arg args 1 0) k (nth-arg args 2 0)]
-    (+ (* in out k k) out)))
+  (let [in (nth-arg args 0 0) out (nth-arg args 1 0)
+        [kh kw] (or (pair-value (nth-arg args 2 0)) [0 0])
+        groups (nth-arg args 6 1)]
+    (+ (* out (quot in groups) kh kw) out)))
 
 (defmethod layer-params :embedding [_ args]
   (* (nth-arg args 0 0) (nth-arg args 1 0)))
 
 (defmethod layer-params :batchnorm [_ args] (* 2 (nth-arg args 0 0)))
 (defmethod layer-params :layernorm [_ args] (* 2 (nth-arg args 0 0)))
-(defmethod layer-params :groupnorm [_ args] (* 2 (nth-arg args 1 0))) ; affine gamma+beta over channels
+(defmethod layer-params :groupnorm [_ args] (* 2 (nth-arg args 1 0)))
 
 (def built-in-types
   "The set of layer types this namespace understands."
   #{:linear :conv2d :maxpool2d :avgpool2d :embedding :batchnorm :layernorm
-    :groupnorm :dropout :flatten :relu :gelu :sigmoid :tanh :softmax :silu
+    :groupnorm :dropout :flatten :relu :silu :gelu :sigmoid :tanh :softmax
     :attention :identity})
 
 (defn known?

@@ -57,17 +57,19 @@ bare vector, read as an implicit sequential). Builders are threadable data:
 ```
 
 Built-in layer types: `:linear :conv2d :maxpool2d :avgpool2d :embedding
-:batchnorm :layernorm :dropout :flatten :relu :gelu :sigmoid :tanh :softmax
-:attention`.
+:batchnorm :layernorm :groupnorm :dropout :flatten :relu :silu :gelu
+:sigmoid :tanh :softmax :attention`.
 
 `:attention` means parameter-free self-attention over a single
 `[sequence embedding]` tensor — `(m/attention)` is single-head,
 `(m/attention num-heads)` splits `embedding` evenly across heads (an error if
 it doesn't divide). It has no batch axis, mask, or learned QKV projections;
-those remain explicit future work. `:conv2d` supports any channel count
-(`(m/conv2d in-ch out-ch k)`), batch=1 only — `torch.num-backend/random-weights`
-produces a `[out-ch in-ch k k]` kernel; hand-supplied rank-2 `[k k]` kernels
-(the original in_ch=out_ch=1 form) still work unchanged.
+those remain explicit future work. `:conv2d` executes full NCHW batches and
+supports scalar/pair kernels, stride, padding, dilation, groups, depthwise
+convolution, and bias. `torch.num-backend/random-weights` produces a
+`[out-ch in-ch/groups kh kw]` kernel; hand-supplied rank-2 `[kh kw]` kernels
+(the original single-channel form) still work unchanged. `:groupnorm` uses
+`(m/groupnorm num-groups num-channels)` and `:silu` uses `(m/silu)`.
 
 ## Shape & parameter engine (`torch.shape`, `torch.core`)
 
@@ -135,6 +137,33 @@ A host that binds a real engine implements `IBackend`; `core/run` then performs
 an actual forward pass. With no backend, torch-clj is shape-only and `run`
 throws — by design.
 
+### Reference autocast
+
+`torch.num-backend/num-backend` accepts `{:autocast-dtype :f16}` or `:bf16`.
+Inputs and parameters are materialized in num's physical two-byte storage, and
+linear, NCHW convolution, GroupNorm, ReLU, and SiLU keep that dtype through
+typed reference operations. The CPU oracle supports both types; num's
+Deno→Metal backend supports packed f16 GEMM, elementwise, convolution, and
+GroupNorm kernels with f32 accumulation.
+
+For an asynchronous GPU backend, generate or load weights directly in target
+storage with `(random-weights backend model seed {:dtype :f16})`. This avoids a
+device→host→device cast; existing typed weights are reused without copying.
+
+The full torch model dispatch is verified on Apple M4 Metal:
+
+```sh
+clojure -M:deno-autocast-verify
+deno run --allow-all target/deno-autocast-verify.cjs
+# torch conv→GroupNorm→SiLU f16: passed
+```
+
+Autocast deliberately rejects softmax and attention until their typed kernels
+exist instead of silently returning f32. Training
+autograd still uses f32 master tensors: GradScaler's overflow control is ready,
+but autocast forward and backward are not yet connected into a complete
+mixed-precision trainer.
+
 ## Reference training (`torch.train`)
 
 The model EDN and the same weight vector accepted by `torch.num-backend` now
@@ -154,10 +183,36 @@ drive reverse-mode autodiff and immutable SGD updates directly:
 (:weights step) ; new arrays; the original weights remain unchanged
 ```
 
-This path intentionally supports only flat sequential
-`:linear/:relu/:softmax` models with MSE and positive-rate SGD. It is a tested
-integration seam, not yet a replacement for PyTorch optimizers, GPU autograd,
-convolution/attention backward passes, checkpoint loading, or mixed precision.
+For stateful optimization, `torch.optim/adamw-step` consumes the aligned
+weights and gradients returned by `torch.train/loss-and-gradients`. It returns
+both new weights and immutable first/second-moment state; pass that state into
+the next step. Learning rate, betas, epsilon, and decoupled weight decay are
+configurable, with AdamW defaults when omitted.
+
+`torch.optim/grad-scaler` and `scaled-adamw-step` provide dynamic loss scaling:
+call `loss-and-gradients` with the scaler's `:scale`, then pass the scaled
+gradients to the optimizer. Gradients are unscaled before AdamW, non-finite
+values skip the update and back off the scale, and stable steps grow it at the
+configured interval. Unscaled gradients and optimizer state remain f32; this
+is the control path used by the mixed-precision training API below.
+
+`torch.train/mixed-precision-adamw-step` now connects these pieces for
+conv2d/GroupNorm/SiLU/ReLU models: it casts the forward pass to f16 or bf16,
+computes f32 gradients, unscales and checks them, then updates immutable f32
+master weights with AdamW. Non-finite gradients skip the optimizer step and
+back off the scaler; both successful updates and forced-overflow skips are
+tested. Backward is still a synchronous host reference implementation, so this
+is real mixed-precision numerical behavior but not GPU-resident autograd.
+
+The reference path supports flat sequential models composed from
+`:linear/:conv2d/:groupnorm/:relu/:silu/:softmax/:attention`, with MSE and
+positive-rate SGD plus immutable AdamW. NCHW grouped convolution, affine GroupNorm, SiLU, and
+multi-head self-attention all have real reverse-mode gradients; tests verify
+both finite-difference agreement in `num` and decreasing loss through the
+public torch model/weight representation. It remains a synchronous reference
+trainer, not yet a replacement for PyTorch's broader optimizer catalog, GPU autograd,
+batched/masked learned-projection attention, checkpoint loading, or mixed
+precision coverage for every layer.
 
 ## Test
 
