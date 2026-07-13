@@ -119,6 +119,19 @@
       (f16! out 0.25))
     (.toByteArray out)))
 
+(defn- q8-0-matrix-fixture []
+  (let [out (ByteArrayOutputStream.)]
+    (write! out (.getBytes "GGUF" StandardCharsets/US_ASCII))
+    (u32! out 3) (u64! out 1) (u64! out 1)
+    (string! out "general.alignment") (u32! out 4) (u32! out 32)
+    (string! out "linear.weight") (u32! out 2) (u64! out 32) (u64! out 2)
+    (u32! out 8) (u64! out 0)
+    (pad-to! out 32)
+    (doseq [d [0.25 -0.5]]
+      (f16! out d)
+      (doseq [quant (range -16 16)] (.write out (bit-and quant 0xff))))
+    (.toByteArray out)))
+
 (deftest parses-v3-metadata-directory-and-alignment
   (let [file (gguf/parse-bytes (fixture))]
     (is (= 3 (:version file)))
@@ -205,6 +218,20 @@
     (is (= :q6-k (:quant-type weight)))
     (is (= 420 (:byte-count weight)))
     (is (= [expected expected] (arr/->vec output)))))
+
+(deftest keeps-q8-zero-linear-weight-packed-through-torch-inference
+  (let [backend (cpu/cpu-backend)
+        file (gguf/parse-bytes (q8-0-matrix-fixture))
+        weight (gguf/load-matrix file backend "linear.weight")
+        model* (model/sequential (model/linear 32 2))
+        output (core/run (nb/num-backend
+                          backend [{:w weight
+                                    :b (arr/from-vec backend [0.0 0.0] [2])}])
+                         model* (arr/from-vec backend (repeat 32 1.0) [1 32]))]
+    (is (quantized/matrix? weight))
+    (is (= :q8-0 (:quant-type weight)))
+    (is (= 68 (:byte-count weight)))
+    (is (= [-4.0 8.0] (arr/->vec output)))))
 
 (deftest file-backed-loader-uses-positional-ranges
   (let [path (Files/createTempFile "torch-gguf-" ".gguf"
