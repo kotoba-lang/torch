@@ -146,13 +146,14 @@ their asynchronous logits readback.
 
 `torch.gguf/load-file` parses GGUF v2/v3 with long file offsets, typed/nested
 metadata arrays, `general.alignment`, and bounds-checked positional reads rather
-than loading the entire model file. `read-tensor` decodes F32, F16, and Q8_0;
+than loading the entire model file. `read-tensor` decodes F32, F16, Q8_0, Q4_K,
+and Q6_K (including their packed per-block scale layouts);
 `llama-model`, `gguf-tokenizer`, and `load-llama-weights` construct the model,
 tokenizer, transpose GGUF linear matrices, upload weights, and handle tied output
 embeddings.
 
-Q8_0 currently dequantizes to f32 during loading. Q4_K and other K-quants do not
-yet execute directly. Llama grouped-query attention is supported when
+Quantized tensors currently dequantize to f32 during loading rather than using
+fused quantized matmul. Llama grouped-query attention is supported when
 `head_count_kv` evenly divides `head_count`, including training and fixed-capacity
 KV-cache decoding on Metal; K/V projections and caches use the reduced KV width.
 

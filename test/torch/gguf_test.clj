@@ -56,6 +56,39 @@
     (doseq [v (range -16 16)] (.write out (bit-and v 0xff)))
     (.toByteArray out)))
 
+(defn- q4-k-fixture []
+  (let [out (ByteArrayOutputStream.)]
+    (write! out (.getBytes "GGUF" StandardCharsets/US_ASCII))
+    (u32! out 3) (u64! out 1) (u64! out 1)
+    (string! out "general.alignment") (u32! out 4) (u32! out 32)
+    (string! out "q4-k.weight") (u32! out 1) (u64! out 256)
+    (u32! out 12) (u64! out 0)
+    (pad-to! out 32)
+    ;; d=.5, dmin=.25. All eight 6-bit scale/min pairs exercise both packing
+    ;; layouts, including upper bits stored in the first eight bytes.
+    (f16! out 0.5) (f16! out 0.25)
+    ;; scales [1 2 3 4 49 34 19 60], mins [9 10 11 12 45 30 51 20]
+    (doseq [v [193 130 67 196, 137 74 203 76, 209 226 51 76]] (.write out v))
+    ;; Each byte holds one low-nibble value followed 32 positions later by its
+    ;; high-nibble value. 0x21 therefore yields q=1 then q=2.
+    (dotimes [_ 128] (.write out 0x21))
+    (.toByteArray out)))
+
+(defn- q6-k-fixture []
+  (let [out (ByteArrayOutputStream.)]
+    (write! out (.getBytes "GGUF" StandardCharsets/US_ASCII))
+    (u32! out 3) (u64! out 1) (u64! out 1)
+    (string! out "general.alignment") (u32! out 4) (u32! out 32)
+    (string! out "q6-k.weight") (u32! out 1) (u64! out 256)
+    (u32! out 14) (u64! out 0)
+    (pad-to! out 32)
+    ;; Zero low/high quant bits decode to q=-32. Signed scales -8..7 make
+    ;; every 16-value subblock independently observable with d=.25.
+    (dotimes [_ (+ 128 64)] (.write out 0))
+    (doseq [scale (range -8 8)] (.write out (bit-and scale 0xff)))
+    (f16! out 0.25)
+    (.toByteArray out)))
+
 (deftest parses-v3-metadata-directory-and-alignment
   (let [file (gguf/parse-bytes (fixture))]
     (is (= 3 (:version file)))
@@ -73,6 +106,35 @@
            (:values (gguf/read-tensor file "f16.weight"))))
     (is (= (mapv #(* 0.25 %) (range -16 16))
            (:values (gguf/read-tensor file "q8.weight"))))))
+
+(deftest decodes-q4-k-packed-scales-mins-and-nibbles
+  (let [tensor (gguf/read-tensor (gguf/parse-bytes (q4-k-fixture))
+                                 "q4-k.weight")
+        values (:values tensor)]
+    (is (= :q4-k (:type tensor)))
+    (is (= [256] (:shape tensor)))
+    (is (= (vec (mapcat (fn [index]
+                          (let [scales [1 2 3 4 49 34 19 60]
+                                mins [9 10 11 12 45 30 51 20]
+                                quant (if (even? index) 1 2)]
+                            (repeat 32 (- (* 0.5 (nth scales index) quant)
+                                          (* 0.25 (nth mins index))))))
+                        (range 8)))
+           values))))
+
+(deftest quantized-tensors-require-complete-blocks-per-row
+  (let [file (gguf/parse-bytes (q4-k-fixture))
+        malformed (assoc-in file [:tensor-map "q4-k.weight" :shape] [2 128])]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                          #"row width must be divisible"
+                          (gguf/read-tensor malformed "q4-k.weight")))))
+
+(deftest decodes-q6-k-low-high-bits-and-signed-scales
+  (let [tensor (gguf/read-tensor (gguf/parse-bytes (q6-k-fixture))
+                                 "q6-k.weight")]
+    (is (= :q6-k (:type tensor)))
+    (is (= (vec (mapcat #(repeat 16 (* -8.0 %)) (range -8 8)))
+           (:values tensor)))))
 
 (deftest file-backed-loader-uses-positional-ranges
   (let [path (Files/createTempFile "torch-gguf-" ".gguf"
@@ -122,12 +184,13 @@
   (let [metadata {"general.architecture" "llama"
                   "llama.block_count" 1 "llama.embedding_length" 4
                   "llama.feed_forward_length" 8 "llama.attention.head_count" 2
+                  "llama.attention.head_count_kv" 1
                   "llama.context_length" 32
                   "tokenizer.ggml.tokens" ["0" "1" "2" "3" "4" "5"]}
         shapes {"token_embd.weight" [6 4]
                 "blk.0.attn_norm.weight" [4]
-                "blk.0.attn_q.weight" [4 4] "blk.0.attn_k.weight" [4 4]
-                "blk.0.attn_v.weight" [4 4] "blk.0.attn_output.weight" [4 4]
+                "blk.0.attn_q.weight" [4 4] "blk.0.attn_k.weight" [2 4]
+                "blk.0.attn_v.weight" [2 4] "blk.0.attn_output.weight" [4 4]
                 "blk.0.ffn_norm.weight" [4]
                 "blk.0.ffn_gate.weight" [8 4] "blk.0.ffn_up.weight" [8 4]
                 "blk.0.ffn_down.weight" [4 8]
@@ -145,6 +208,8 @@
             output (core/run (nb/num-backend backend weights) model*
                              (arr/from-vec backend [2 0] [2]))]
         (is (= 4 (count weights)))
+        (is (= [4 2] (:shape (:kw (second weights)))))
+        (is (= [4 2] (:shape (:vw (second weights)))))
         (is (= [4 8] (:shape (:gate (second weights)))))
         (is (= [8 4] (:shape (:down (second weights)))))
         (is (= [4 6] (:shape (:w (last weights)))))

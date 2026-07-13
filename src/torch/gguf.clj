@@ -15,7 +15,7 @@
   {0 :uint8 1 :int8 2 :uint16 3 :int16 4 :uint32 5 :int32
    6 :float32 7 :bool 8 :string 9 :array 10 :uint64 11 :int64 12 :float64})
 
-(def tensor-types {0 :f32 1 :f16 8 :q8-0})
+(def tensor-types {0 :f32 1 :f16 8 :q8-0 12 :q4-k 14 :q6-k})
 
 (defn- source-size [{:keys [bytes path]}]
   (if bytes (alength ^bytes bytes) (Files/size ^Path path)))
@@ -140,14 +140,89 @@
 (defn- nelems [shape] (reduce * 1 shape))
 
 (defn- tensor-byte-count [{:keys [type shape]}]
-  (let [n (nelems shape)]
+  (let [n (nelems shape)
+        row-width (long (or (last shape) 1))
+        require-row-block!
+        (fn [block label]
+          (when-not (zero? (mod row-width block))
+            (throw (ex-info (str label " tensor row width must be divisible by " block)
+                            {:shape shape :row-width row-width :block block}))))]
     (case type
       :f32 (* 4 n)
       :f16 (* 2 n)
-      :q8-0 (do (when-not (zero? (mod n 32))
-                  (throw (ex-info "Q8_0 tensor element count must divide 32" {:count n})))
+      :q8-0 (do (require-row-block! 32 "Q8_0")
                 (* 34 (quot n 32)))
+      :q4-k (do (require-row-block! 256 "Q4_K")
+                ;; fp16 d + fp16 dmin + 12 packed scale/min bytes + 128 quants
+                (* 144 (quot n 256)))
+      :q6-k (do (require-row-block! 256 "Q6_K")
+                ;; 128 low-nibble + 64 high-2-bit + 16 int8 scales + fp16 d
+                (* 210 (quot n 256)))
       (throw (ex-info "unsupported GGUF tensor type" {:type type})))))
+
+(defn- q4-k-scale-min
+  "Unpack one of eight 6-bit `(scale,min)` pairs from Q4_K's 12-byte table."
+  [scales index]
+  (if (< index 4)
+    [(bit-and (nth scales index) 0x3f)
+     (bit-and (nth scales (+ index 4)) 0x3f)]
+    [(bit-or (bit-and (nth scales (+ index 4)) 0x0f)
+             (bit-shift-left (bit-shift-right (nth scales (- index 4)) 6) 4))
+     (bit-or (bit-shift-right (nth scales (+ index 4)) 4)
+             (bit-shift-left (bit-shift-right (nth scales index) 6) 4))]))
+
+(defn- decode-q4-k-block [^ByteBuffer buffer]
+  (let [d (dtype/f16-bits->f32 (.getShort buffer))
+        dmin (dtype/f16-bits->f32 (.getShort buffer))
+        scales (mapv (fn [_] (bit-and 0xff (int (.get buffer)))) (range 12))
+        quants (mapv (fn [_] (bit-and 0xff (int (.get buffer)))) (range 128))]
+    (vec
+     (mapcat
+      (fn [pair]
+        (let [[scale0 min0] (q4-k-scale-min scales (* 2 pair))
+              [scale1 min1] (q4-k-scale-min scales (inc (* 2 pair)))
+              offset (* pair 32)]
+          (concat
+           (map (fn [byte]
+                  (- (* d scale0 (bit-and byte 0x0f)) (* dmin min0)))
+                (subvec quants offset (+ offset 32)))
+           (map (fn [byte]
+                  (- (* d scale1 (bit-shift-right byte 4)) (* dmin min1)))
+                (subvec quants offset (+ offset 32))))))
+      (range 4)))))
+
+(defn- decode-q6-k-block [^ByteBuffer buffer]
+  (let [low (mapv (fn [_] (bit-and 0xff (int (.get buffer)))) (range 128))
+        high (mapv (fn [_] (bit-and 0xff (int (.get buffer)))) (range 64))
+        scales (mapv (fn [_] (int (.get buffer))) (range 16))
+        d (dtype/f16-bits->f32 (.getShort buffer))
+        output (double-array 256)]
+    (dotimes [half 2]
+      (let [low-offset (* half 64) high-offset (* half 32)
+            scale-offset (* half 8) output-offset (* half 128)]
+        (dotimes [l 32]
+          (let [scale-pair (quot l 16)
+                lo0 (nth low (+ low-offset l))
+                lo1 (nth low (+ low-offset l 32))
+                hi (nth high (+ high-offset l))
+                quants [(- (bit-or (bit-and lo0 0x0f)
+                                   (bit-shift-left (bit-and hi 0x03) 4)) 32)
+                        (- (bit-or (bit-and lo1 0x0f)
+                                   (bit-shift-left (bit-and (bit-shift-right hi 2) 0x03) 4)) 32)
+                        (- (bit-or (bit-shift-right lo0 4)
+                                   (bit-shift-left (bit-and (bit-shift-right hi 4) 0x03) 4)) 32)
+                        (- (bit-or (bit-shift-right lo1 4)
+                                   (bit-shift-left (bit-shift-right hi 6) 4)) 32)]
+                positions [l (+ l 32) (+ l 64) (+ l 96)]
+                scale-indices [(+ scale-offset scale-pair)
+                               (+ scale-offset scale-pair 2)
+                               (+ scale-offset scale-pair 4)
+                               (+ scale-offset scale-pair 6)]]
+            (dotimes [group 4]
+              (aset output (+ output-offset (nth positions group))
+                    (* d (nth scales (nth scale-indices group))
+                       (nth quants group))))))))
+    (vec output)))
 
 (defn- decode-tensor [{:keys [type shape data-offset] :as tensor} source]
   (let [bytes (read-range source data-offset (tensor-byte-count tensor))
@@ -160,10 +235,14 @@
       (vec (mapcat (fn [_]
                      (let [scale (dtype/f16-bits->f32 (.getShort buffer))]
                        (mapv (fn [_] (* scale (int (.get buffer)))) (range 32))))
-                   (range (quot n 32)))))))
+                   (range (quot n 32))))
+      :q4-k (vec (mapcat (fn [_] (decode-q4-k-block buffer))
+                         (range (quot n 256))))
+      :q6-k (vec (mapcat (fn [_] (decode-q6-k-block buffer))
+                         (range (quot n 256)))))))
 
 (defn read-tensor
-  "Decode a named F32/F16/Q8_0 tensor to `{:shape :values :type}`."
+  "Decode a named F32/F16/Q8_0/Q4_K/Q6_K tensor to `{:shape :values :type}`."
   [gguf name]
   (let [tensor (get-in gguf [:tensor-map name])]
     (when-not tensor
