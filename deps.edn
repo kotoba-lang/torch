@@ -6,9 +6,10 @@
  :deps {io.github.kotoba-lang/dsl-core
         {:git/sha "9bedd2b9d05133a2d9b0656a55135f142ab11a36"}
         ;; Includes differentiable NCHW convolution, GroupNorm, SiLU,
-        ;; multi-head attention, typed Metal tensors, and UNet autograd.
+        ;; multi-head attention, typed Metal tensors, UNet autograd, and a
+        ;; real-Metal async twin of multi-head attention (num.tensor-async).
         io.github.kotoba-lang/num
-        {:git/sha "9eb57f0674c2e9f2b50367094810663f924f4d46"}}
+        {:git/sha "d68d98a9744a220f9bbb476fb7c2cec6db440637"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
