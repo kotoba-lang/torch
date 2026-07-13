@@ -8,6 +8,58 @@
 (defn- zeros-like [parameter]
   (arr/zeros (:backend parameter) (:shape parameter)))
 
+(defn grad-scaler
+  "Create immutable dynamic loss-scaling state."
+  ([] (grad-scaler {}))
+  ([options]
+   (let [{:keys [initial-scale growth-factor backoff-factor growth-interval]}
+         (merge {:initial-scale 65536.0 :growth-factor 2.0
+                 :backoff-factor 0.5 :growth-interval 2000}
+                options)]
+     (when-not (and (pos? initial-scale) (> growth-factor 1.0)
+                    (< 0.0 backoff-factor 1.0) (pos-int? growth-interval))
+       (fail "invalid GradScaler options" {:options options}))
+     {:scale initial-scale :growth-factor growth-factor
+      :backoff-factor backoff-factor :growth-interval growth-interval
+      :growth-tracker 0})))
+
+(defn- finite-number? [x]
+  #?(:clj (Double/isFinite (double x))
+     :cljs (js/isFinite x)))
+
+(defn unscale-gradients
+  "Divide aligned gradients by `scale`, returning gradients and overflow flag."
+  [gradients scale]
+  (when-not (and (number? scale) (pos? scale))
+    (fail "scale must be positive" {:scale scale}))
+  (let [found-inf? (volatile! false)
+        unscaled
+        (mapv (fn [gradient]
+                (when gradient
+                  (into {}
+                        (map (fn [[key value]]
+                               (let [xs (mapv (fn [x]
+                                                (when-not (finite-number? x)
+                                                  (vreset! found-inf? true))
+                                                (/ x scale))
+                                              (arr/->vec value))]
+                                 [key (arr/from-vec (:backend value) xs (:shape value))])))
+                        gradient)))
+              gradients)]
+    {:gradients unscaled :found-inf? @found-inf?}))
+
+(defn update-grad-scaler
+  "Grow the scale after stable steps or back it off after overflow."
+  [scaler found-inf?]
+  (if found-inf?
+    (assoc scaler :scale (* (:scale scaler) (:backoff-factor scaler))
+                  :growth-tracker 0)
+    (let [tracker (inc (:growth-tracker scaler))]
+      (if (= tracker (:growth-interval scaler))
+        (assoc scaler :scale (* (:scale scaler) (:growth-factor scaler))
+                      :growth-tracker 0)
+        (assoc scaler :growth-tracker tracker)))))
+
 (defn- update-parameter
   [parameter gradient moment variance step
    {:keys [learning-rate beta1 beta2 eps weight-decay]}]
@@ -81,3 +133,22 @@
                                          :variance (:variance values)}])) result)))
                results)]
        {:weights next-weights :state {:step step :slots next-slots}}))))
+
+(defn scaled-adamw-step
+  "Unscale gradients and conditionally apply AdamW.
+
+  On overflow, weights and optimizer state are returned unchanged while the
+  scaler backs off. `:skipped?` makes the control-flow decision explicit."
+  ([weights scaled-gradients optimizer-state scaler]
+   (scaled-adamw-step weights scaled-gradients optimizer-state scaler {}))
+  ([weights scaled-gradients optimizer-state scaler options]
+   (let [{:keys [gradients found-inf?]}
+         (unscale-gradients scaled-gradients (:scale scaler))
+         next-scaler (update-grad-scaler scaler found-inf?)]
+     (if found-inf?
+       {:weights weights :optimizer-state optimizer-state
+        :scaler next-scaler :skipped? true}
+       (let [{:keys [weights state]}
+             (adamw-step weights gradients optimizer-state options)]
+         {:weights weights :optimizer-state state
+          :scaler next-scaler :skipped? false})))))

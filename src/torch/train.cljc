@@ -69,8 +69,15 @@
              nil))))
 
 (defn loss-and-gradients
-  "Run a supported sequential model with MSE and return prediction/gradients."
-  [model* weights input target]
+  "Run a supported sequential model with MSE and return prediction/gradients.
+
+  Optional `:loss-scale` multiplies the backward seed while keeping the
+  reported loss unchanged. This is the reference seam used by GradScaler."
+  ([model* weights input target]
+   (loss-and-gradients model* weights input target {}))
+  ([model* weights input target {:keys [loss-scale] :or {loss-scale 1.0}}]
+  (when-not (and (number? loss-scale) (pos? loss-scale))
+    (fail "loss-scale must be a positive number" {:loss-scale loss-scale}))
   (let [layers (model/layers model*)]
     (validate-weights! layers weights)
     (let [[result tape]
@@ -79,14 +86,14 @@
                   state (reduce forward-layer initial (map vector layers weights))
                   loss (ag/mse-loss* (:value state) target)]
               {:loss loss :prediction (:value state) :parameters (:parameters state)}))]
-      (ag/backward! (:loss result) (arr/from-vec (:backend input) [1.0] []) tape)
+      (ag/backward! (:loss result) (arr/from-vec (:backend input) [loss-scale] []) tape)
       {:loss (arr/->scalar (:data (:loss result)))
        :prediction (:data (:prediction result))
        :gradients
        (mapv (fn [parameters]
                (when parameters
                  (into {} (map (fn [[key value]] [key @(:grad value)])) parameters)))
-             (:parameters result))})))
+             (:parameters result))}))))
 
 (defn- descend [learning-rate parameter gradient]
   (arr/from-vec (:backend parameter)

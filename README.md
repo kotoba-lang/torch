@@ -162,6 +162,13 @@ both new weights and immutable first/second-moment state; pass that state into
 the next step. Learning rate, betas, epsilon, and decoupled weight decay are
 configurable, with AdamW defaults when omitted.
 
+`torch.optim/grad-scaler` and `scaled-adamw-step` provide dynamic loss scaling:
+call `loss-and-gradients` with the scaler's `:scale`, then pass the scaled
+gradients to the optimizer. Gradients are unscaled before AdamW, non-finite
+values skip the update and back off the scale, and stable steps grow it at the
+configured interval. Storage and kernels are still f32; this is the control
+path required for future real fp16/bf16 autocast, not a mixed-precision claim.
+
 The reference path supports flat sequential models composed from
 `:linear/:conv2d/:groupnorm/:relu/:silu/:softmax/:attention`, with MSE and
 positive-rate SGD plus immutable AdamW. NCHW grouped convolution, affine GroupNorm, SiLU, and
