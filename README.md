@@ -152,9 +152,10 @@ and Q6_K (including their packed per-block scale layouts);
 tokenizer, transpose GGUF linear matrices, upload weights, and handle tied output
 embeddings.
 
-Q4_K linear tensors remain packed at 4.5 bits/weight and execute through fused
-CPU/Metal quantized matmul without a dense weight allocation. Q6_K, Q8_0, and
-quantized embedding tables currently dequantize to f32 during loading. Llama
+Q4_K and Q6_K linear tensors remain packed at 4.5/6.5625 bits per weight and
+execute through fused CPU/Metal quantized matmul without a dense weight
+allocation. Q8_0 and quantized embedding tables currently dequantize to f32
+during loading. Llama
 grouped-query attention is supported when
 `head_count_kv` evenly divides `head_count`, including training and fixed-capacity
 KV-cache decoding on Metal; K/V projections and caches use the reduced KV width.

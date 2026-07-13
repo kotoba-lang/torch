@@ -325,9 +325,9 @@
   "GGUF linear matrices are `[out in]`; torch.num-backend uses `[in out]`."
   [gguf backend name]
   (let [tensor (get-in gguf [:tensor-map name])]
-    (if (= :q4-k (:type tensor))
+    (if (#{:q4-k :q6-k} (:type tensor))
       (let [{:keys [shape bytes]} (read-packed-tensor gguf name)]
-        (quantized/matrix backend bytes shape :q4-k))
+        (quantized/matrix backend bytes shape (:type tensor)))
       (let [{[out in] :shape values :values} (read-tensor gguf name)
             transposed (mapv (fn [i]
                                (let [input-index (quot i out) output-index (mod i out)]

@@ -105,6 +105,20 @@
       (dotimes [_ 128] (.write out 0x21)))
     (.toByteArray out)))
 
+(defn- q6-k-matrix-fixture []
+  (let [out (ByteArrayOutputStream.)]
+    (write! out (.getBytes "GGUF" StandardCharsets/US_ASCII))
+    (u32! out 3) (u64! out 1) (u64! out 1)
+    (string! out "general.alignment") (u32! out 4) (u32! out 32)
+    (string! out "linear.weight") (u32! out 2) (u64! out 256) (u64! out 2)
+    (u32! out 14) (u64! out 0)
+    (pad-to! out 32)
+    (dotimes [_ 2]
+      (dotimes [_ (+ 128 64)] (.write out 0))
+      (doseq [scale (range -8 8)] (.write out (bit-and scale 0xff)))
+      (f16! out 0.25))
+    (.toByteArray out)))
+
 (deftest parses-v3-metadata-directory-and-alignment
   (let [file (gguf/parse-bytes (fixture))]
     (is (= 3 (:version file)))
@@ -174,6 +188,22 @@
     (is (quantized/matrix? weight))
     (is (= 288 (:byte-count weight)))
     (is (= [1 2] (:shape output)))
+    (is (= [expected expected] (arr/->vec output)))))
+
+(deftest keeps-q6-k-linear-weight-packed-through-torch-inference
+  (let [backend (cpu/cpu-backend)
+        file (gguf/parse-bytes (q6-k-matrix-fixture))
+        weight (gguf/load-matrix file backend "linear.weight")
+        model* (model/sequential (model/linear 256 2))
+        output (core/run (nb/num-backend
+                          backend [{:w weight
+                                    :b (arr/from-vec backend [0.0 0.0] [2])}])
+                         model* (arr/from-vec backend (repeat 256 1.0) [1 256]))
+        expected (reduce + (mapcat #(repeat 16 (* 0.25 % -32.0))
+                                   (range -8 8)))]
+    (is (quantized/matrix? weight))
+    (is (= :q6-k (:quant-type weight)))
+    (is (= 420 (:byte-count weight)))
     (is (= [expected expected] (arr/->vec output)))))
 
 (deftest file-backed-loader-uses-positional-ranges
