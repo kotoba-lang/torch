@@ -2,33 +2,13 @@
   "Run an exported real GGUF checkpoint through the complete Llama graph on Metal."
   (:require [num.array :as arr]
             [num.deno-gpu :as gpu]
-            [num.quantized :as quantized]
             [torch.generate :as generate]
             [torch.metal-bundle :as bundle]
-            [torch.model :as model]
             [torch.num-backend :as nb]))
 
-(defn build-model [{:keys [vocab embed-dim hidden-dim head-count kv-head-count
-                            block-count rope-theta]}]
-  (apply model/sequential
-         (concat [(model/embedding vocab embed-dim)]
-                 (repeat block-count
-                         (model/llama-block embed-dim head-count hidden-dim
-                                            {:kv-heads kv-head-count
-                                             :rope-theta rope-theta}))
-                 [(model/rmsnorm embed-dim) (model/lm-head embed-dim vocab)])))
+(def build-model bundle/build-model)
 
-(defn- upload-weight [backend {:keys [kind shape source-shape quant-type bytes values]}]
-  (case kind
-    :quantized-matrix (quantized/matrix backend bytes source-shape quant-type)
-    :quantized-table (quantized/table backend bytes shape quant-type)
-    :dense (arr/from-vec backend values shape)))
-
-(defn upload-weights [backend weights]
-  (mapv (fn [entry]
-          (into {} (map (fn [[key weight]] [key (upload-weight backend weight)]))
-                entry))
-        weights))
+(def upload-weights bundle/upload-weights)
 
 (defn step-read [backend model* weights token-id caches]
   (let [token (arr/from-vec backend [token-id] [1])

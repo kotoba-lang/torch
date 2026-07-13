@@ -2,42 +2,15 @@
   "Real GGUF weights through ragged paged continuous Metal microbatches."
   (:require [num.array :as arr]
             [num.deno-gpu :as gpu]
-            [num.tensor :as tensor]
             [torch.continuous :as continuous]
             [torch.deno-public-gguf-metal-verify :as metal]
             [torch.kv-cache :as kv]
             [torch.metal-bundle :as bundle]
+            [torch.metal-paged :as metal-paged]
             [torch.num-backend :as nb]
             [torch.paged-runtime :as paged]))
 
-(defn storage [backend block-count block-size heads kv-heads head-dim]
-  (let [kv-embed (* kv-heads head-dim)
-        key-pool (arr/zeros backend [block-count block-size kv-embed])
-        value-pool (arr/zeros backend [block-count block-size kv-embed])]
-    {:key-pool key-pool :value-pool value-pool
-     :write! #(gpu/paged-kv-write! key-pool value-pool %1 %2 %3 %4)
-     :copy-block! #(gpu/paged-kv-copy-block! key-pool value-pool %1 %2 %3)
-     :attention
-     (fn [query blocks length]
-       (let [table (arr/from-vec backend blocks [(count blocks)])
-             output (gpu/paged-gqa-attention query key-pool value-pool
-                                             table length heads kv-heads)]
-         (arr/release! table) output))
-     :attention-many
-     (fn [query block-tables lengths]
-       (let [batch (count lengths)
-             max-blocks (apply max (map count block-tables))
-             tables (arr/from-vec
-                     backend
-                     (vec (mapcat #(take max-blocks (concat % (repeat 0)))
-                                  block-tables))
-                     [batch max-blocks])
-             lengths* (arr/from-vec backend lengths [batch])
-             output (gpu/paged-gqa-attention-batch
-                     (tensor/reshape query [batch (last (:shape query))])
-                     key-pool value-pool tables lengths* heads kv-heads)]
-         (arr/release-all! [tables lengths*])
-         (tensor/reshape output [batch 1 (last (:shape output))])))}))
+(def storage metal-paged/storage)
 
 (defn quiescent? [before after]
   (and (= (:live-buffers before) (:live-buffers after))

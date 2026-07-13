@@ -409,9 +409,28 @@ clojure -M:deno-public-gguf-continuous-http-verify && \
 ```
 
 This is now an actual shared paged Metal Ollama path, not parallel isolated
-fixed caches. Production gaps still include multi-model routing through the
-registry, long-context load testing, and a
-network-facing operational configuration rather than an integration listener.
+fixed caches. The next boundary was multi-model routing through the registry.
+
+`torch.metal-resource` and `torch.registry-ollama` add real multi-model routing.
+A catalog descriptor lazily reads `TGBNDL1`, uploads weights, constructs physical
+paged pools and a continuous host, while unload refuses active work and releases
+all pools/weights. Each HTTP request acquires the named resource and releases it
+with Ollama `keep_alive`; stream close/cancel is exactly-once. `/api/tags` reads
+the same live registry snapshot.
+
+```sh
+clojure -M:deno-public-gguf-registry-verify && \
+  deno run --allow-all target/deno-public-gguf-registry-verify.cjs \
+  target/tiny-random-llama-metal.tgb
+# Apple M4: model-name routed CPU parity / dynamic residency tags: passed
+# inactive model-a LRU-evicted when model-b loads under a 1.5-model budget
+# each model loaded/unloaded exactly once; resident bytes: 0
+# GPU baseline restored: passed
+```
+
+The remaining production work is now operational scale rather than a missing
+model route: long-context soak/load tests, durable catalog configuration,
+authentication, telemetry, and deployment hardening.
 
 A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
 blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding

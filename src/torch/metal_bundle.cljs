@@ -1,6 +1,10 @@
 (ns torch.metal-bundle
   "Reader for TGBNDL1 manifest + binary tensor payload containers."
-  (:require [cljs.reader :as reader]))
+  (:require [cljs.reader :as reader]
+            [num.array :as arr]
+            [num.quantized :as quantized]
+            [torch.model :as model]
+            [torch.tokenizer :as tokenizer]))
 
 (def magic "TGBNDL1\n")
 
@@ -62,3 +66,33 @@
                                                        values))])))
                               entry))
                       weights))))))
+
+(defn build-model [{:keys [vocab embed-dim hidden-dim head-count kv-head-count
+                           block-count rope-theta]}]
+  (apply model/sequential
+         (concat [(model/embedding vocab embed-dim)]
+                 (repeat block-count
+                         (model/llama-block embed-dim head-count hidden-dim
+                                            {:kv-heads kv-head-count
+                                             :rope-theta rope-theta}))
+                 [(model/rmsnorm embed-dim) (model/lm-head embed-dim vocab)])))
+
+(defn- upload-weight [backend {:keys [kind shape source-shape quant-type bytes values]}]
+  (case kind
+    :quantized-matrix (quantized/matrix backend bytes source-shape quant-type)
+    :quantized-table (quantized/table backend bytes shape quant-type)
+    :dense (arr/from-vec backend values shape)))
+
+(defn upload-weights [backend weights]
+  (mapv (fn [entry]
+          (into {} (map (fn [[key weight]] [key (upload-weight backend weight)]))
+                entry))
+        weights))
+
+(defn instantiate
+  "Upload one loaded bundle into a backend and construct runtime model/tokenizer."
+  [backend manifest]
+  {:manifest manifest :model (build-model (:config manifest))
+   :weights (upload-weights backend (:weights manifest))
+   :tokenizer (tokenizer/tokenizer (:tokenizer manifest))
+   :backend backend})
