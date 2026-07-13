@@ -188,6 +188,23 @@ step to this bridge are still required. Request cancellation/timeouts and a
 production concurrent HTTP server also remain before claiming Ollama-equivalent
 continuous serving.
 
+The bridge now executes a complete Embedding → two GQA Llama blocks → RMSNorm →
+LM-head decode against those physical kernels. The live verifier compares every
+token's vocabulary logits with the ordinary full causal CPU model, checks the
+allocator/device placements, and releases both layers' physical pools:
+
+```sh
+clojure -M:deno-paged-llama-verify
+deno run --allow-all target/deno-paged-llama-verify.cjs
+# Apple M4: full two-block paged Llama parity: passed
+#           allocator/device placement alignment: passed
+#           physical paged pools release: passed
+```
+
+That verifier temporarily overrides the pinned `num` dependency with the sibling
+`../num` checkout. Normal consumers still use the published SHA; the override can
+be removed after the paged Metal revision is merged and pinned.
+
 A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
 blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding
 Q4_K-packed, tied LM head, causal prefill, and fixed-capacity KV-cache decode.

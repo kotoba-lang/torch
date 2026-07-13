@@ -53,6 +53,15 @@
         :main-opts ["-m" "cljs.main"
                     "-co" "{:optimizations :simple :target :nodejs :main torch.deno-kv-cache-verify :output-to \"target/deno-kv-cache-verify.cjs\"}"
                     "-c" "torch.deno-kv-cache-verify"]}
+       :deno-paged-llama-verify
+       {:extra-paths ["test"]
+        ;; The paged Metal primitives are intentionally verified against the
+        ;; sibling num checkout until that revision is published and pinned.
+        :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-paged-llama-verify :output-to \"target/deno-paged-llama-verify.cjs\"}"
+                    "-c" "torch.deno-paged-llama-verify"]}
        :deno-quantized-llama-benchmark
        {:extra-paths ["test"]
         :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}

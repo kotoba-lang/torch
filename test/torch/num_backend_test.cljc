@@ -7,9 +7,12 @@
   (:require [clojure.test :refer [deftest is testing]]
             [num.array :as arr]
             [num.cpu :as cpu]
+            [num.tensor :as t]
             [torch.model :as m]
             [torch.core :as core]
-            [torch.num-backend :as nb]))
+            [torch.kv-cache :as kv]
+            [torch.num-backend :as nb]
+            [torch.paged-runtime :as paged]))
 
 (def backend (cpu/cpu-backend))
 
@@ -401,6 +404,66 @@
     (is (= [3 3] (mapv :length (:caches decoded))))
     (is (every? #(< (Math/abs %) 1.0e-5)
                 (map - (arr/->vec full) (:logits decoded))))))
+
+(defn- cpu-paged-storage [block-count block-size heads kv-heads]
+  (let [keys (atom (vec (repeat block-count (vec (repeat block-size nil)))))
+        values (atom (vec (repeat block-count (vec (repeat block-size nil)))))]
+    {:write! (fn [key value block offset]
+               (swap! keys assoc-in [block offset] (arr/->vec key))
+               (swap! values assoc-in [block offset] (arr/->vec value)))
+     :copy-block! (fn [source destination tokens]
+                    (doseq [offset (range tokens)]
+                      (swap! keys assoc-in [destination offset]
+                             (get-in @keys [source offset]))
+                      (swap! values assoc-in [destination offset]
+                             (get-in @values [source offset]))))
+     :attention
+     (fn [query blocks length]
+       (let [logical (for [position (range length)]
+                       [(nth blocks (quot position block-size))
+                        (mod position block-size)])
+             key-values (vec (mapcat #(get-in @keys %) logical))
+             value-values (vec (mapcat #(get-in @values %) logical))
+             kv-width (quot (count key-values) length)]
+         (t/multi-head-attention
+          query
+          (arr/from-vec backend key-values [length kv-width])
+          (arr/from-vec backend value-values [length kv-width])
+          heads {:kv-heads kv-heads})))}))
+
+(deftest paged-llama-lm-step-matches-full-causal-model
+  (let [model (m/sequential (m/embedding 6 4)
+                            (m/llama-block 4 2 8 {:kv-heads 1})
+                            (m/llama-block 4 2 8 {:kv-heads 1})
+                            (m/rmsnorm 4) (m/lm-head 4 6))
+        weights (nb/random-weights backend model 79)
+        token-ids [2 0 2]
+        full (arr/->vec
+              (core/run (nb/num-backend backend weights) model
+                        (arr/from-vec backend token-ids [3])))
+        runtimes (mapv (fn [_]
+                         (-> (paged/runtime (kv/pool 4 2)
+                                            (cpu-paged-storage 4 2 2 1))
+                             (paged/allocate-sequence :request)))
+                       (range 2))
+        decoded
+        (reduce (fn [{:keys [runtimes logits placements]} token]
+                  (let [step (nb/llama-lm-paged-step
+                              model weights (arr/from-vec backend [token] [1])
+                              runtimes :request)]
+                    {:runtimes (:runtimes step)
+                     :logits (into logits (arr/->vec (:logits step)))
+                     :placements (conj placements (:placements step))}))
+                {:runtimes runtimes :logits [] :placements []} token-ids)]
+    (is (= [[{:block 0 :offset 0} {:block 0 :offset 0}]
+            [{:block 0 :offset 1} {:block 0 :offset 1}]
+            [{:block 1 :offset 0} {:block 1 :offset 0}]]
+           (:placements decoded)))
+    (is (= [3 3] (mapv #(get-in % [:pool :sequences :request :length])
+                       (:runtimes decoded))))
+    (is (every? #(kv/valid? (:pool %)) (:runtimes decoded)))
+    (is (every? #(< (Math/abs %) 1.0e-5)
+                (map - full (:logits decoded))))))
 
 (deftest grouped-query-llama-cache-matches-full-model
   (let [model (m/sequential (m/llama-block 4 2 8 {:kv-heads 1}))

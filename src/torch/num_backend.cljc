@@ -33,6 +33,7 @@
             [num.quantized :as quantized]
             [num.tensor :as t]
             [torch.model :as model]
+            [torch.paged-runtime :as paged]
             [torch.ports :as ports]))
 
 (defn- matmul-weight [input weight]
@@ -420,6 +421,70 @@
        :cache (if fixed? (assoc cache :length (inc length))
                   {:key all-key :value all-value :length (inc length)
                    :batch batch})})))
+
+(defn llama-block-paged-step
+  "Execute one batch-1 Llama token using a `torch.paged-runtime` physical cache.
+  The storage callback owns device payloads; the runtime owns the logical block
+  table, prefix sharing, COW, and sequence length."
+  [layer weights input runtime* sequence-id]
+  (let [[embed heads _hidden opts] (model/layer-args layer)
+        opts (merge {:causal? true :rope? true} opts)
+        kv-heads (long (or (:kv-heads opts) heads))
+        {:keys [length]} (get-in runtime* [:pool :sequences sequence-id])
+        eps (or (:eps opts) 1.0e-5)]
+    (when-not (and (= :llama-block (model/layer-type layer))
+                   (= [1 embed] (:shape input))
+                   (some? length))
+      (throw (ex-info "paged Llama step requires a registered sequence and [1,embed] input"
+                      {:shape (:shape input) :embed embed
+                       :sequence-id sequence-id})))
+    (let [linear #(matmul-weight %1 (get weights %2))
+          normalized (t/rms-norm-last input (:attn-norm weights) eps)
+          q0 (linear normalized :qw)
+          k0 (linear normalized :kw)
+          value (linear normalized :vw)
+          rope-options {:theta (or (:rope-theta opts) 10000.0)
+                        :position-offset (+ (or (:position-offset opts) 0)
+                                            length)}
+          query (t/rotary-embedding q0 heads rope-options)
+          key (t/rotary-embedding k0 kv-heads rope-options)
+          appended (paged/append-kv! runtime* sequence-id key value)
+          runtime* (:runtime appended)
+          attended (paged/attention runtime* sequence-id query)
+          residual (t/add input (linear attended :ow))
+          ffn-input (t/rms-norm-last residual (:ffn-norm weights) eps)
+          gate (t/silu (linear ffn-input :gate))
+          up (linear ffn-input :up)
+          output (t/add residual (linear (nm/mul gate up) :down))]
+      {:output output :runtime runtime* :placement (:placement appended)})))
+
+(defn llama-lm-paged-step
+  "Execute one token ID through Embedding, paged Llama blocks, final norm, and
+  LM head. `runtimes` contains one independently backed paged runtime per block."
+  [model* weights token runtimes sequence-id]
+  (let [layers (model/execution-layers model*)]
+    (when-not (= (count layers) (count weights))
+      (throw (ex-info "Llama LM layers and weights must align" {})))
+    (loop [remaining (seq (map vector layers weights))
+           value token runtime-index 0 updated [] placements []]
+      (if-let [[layer weight] (first remaining)]
+        (if (= :llama-block (model/layer-type layer))
+          (let [runtime* (nth runtimes runtime-index nil)
+                _ (when-not runtime*
+                    (throw (ex-info "missing per-block paged runtime"
+                                    {:runtime-index runtime-index})))
+                step (llama-block-paged-step layer weight value runtime*
+                                              sequence-id)]
+            (recur (next remaining) (:output step) (inc runtime-index)
+                   (conj updated (:runtime step))
+                   (conj placements (:placement step))))
+          (recur (next remaining) (layer-forward layer weight value nil)
+                 runtime-index updated placements))
+        (do
+          (when-not (= runtime-index (count runtimes))
+            (throw (ex-info "unused paged Llama runtimes"
+                            {:used runtime-index :provided (count runtimes)})))
+          {:logits value :runtimes updated :placements placements})))))
 
 (defn init-llama-caches
   "Preallocate one fixed KV cache per Llama block in `model*`."
