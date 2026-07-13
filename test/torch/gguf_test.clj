@@ -3,6 +3,7 @@
             [num.array :as arr]
             [num.cpu :as cpu]
             [num.dtype :as dtype]
+            [num.quantized :as quantized]
             [torch.core :as core]
             [torch.gguf :as gguf]
             [torch.model :as model]
@@ -89,6 +90,21 @@
     (f16! out 0.25)
     (.toByteArray out)))
 
+(defn- q4-k-matrix-fixture []
+  (let [out (ByteArrayOutputStream.)]
+    (write! out (.getBytes "GGUF" StandardCharsets/US_ASCII))
+    (u32! out 3) (u64! out 1) (u64! out 1)
+    (string! out "general.alignment") (u32! out 4) (u32! out 32)
+    ;; GGML dimensions are [in,out], surfaced by the loader as [out,in].
+    (string! out "linear.weight") (u32! out 2) (u64! out 256) (u64! out 2)
+    (u32! out 12) (u64! out 0)
+    (pad-to! out 32)
+    (dotimes [_ 2]
+      (f16! out 0.5) (f16! out 0.25)
+      (doseq [v [193 130 67 196, 137 74 203 76, 209 226 51 76]] (.write out v))
+      (dotimes [_ 128] (.write out 0x21)))
+    (.toByteArray out)))
+
 (deftest parses-v3-metadata-directory-and-alignment
   (let [file (gguf/parse-bytes (fixture))]
     (is (= 3 (:version file)))
@@ -135,6 +151,30 @@
     (is (= :q6-k (:type tensor)))
     (is (= (vec (mapcat #(repeat 16 (* -8.0 %)) (range -8 8)))
            (:values tensor)))))
+
+(deftest keeps-q4-k-linear-weight-packed-through-torch-inference
+  (let [backend (cpu/cpu-backend)
+        file (gguf/parse-bytes (q4-k-matrix-fixture))
+        packed (gguf/read-packed-tensor file "linear.weight")
+        weight (gguf/load-matrix file backend "linear.weight")
+        model* (model/sequential (model/linear 256 2))
+        output (core/run (nb/num-backend
+                          backend [{:w weight
+                                    :b (arr/from-vec backend [0.0 0.0] [2])}])
+                         model* (arr/from-vec backend (repeat 256 1.0) [1 256]))
+        expected (reduce +
+                         (mapcat (fn [index]
+                                   (let [scales [1 2 3 4 49 34 19 60]
+                                         mins [9 10 11 12 45 30 51 20]
+                                         quant (if (even? index) 1 2)]
+                                     (repeat 32 (- (* 0.5 (nth scales index) quant)
+                                                   (* 0.25 (nth mins index))))))
+                                 (range 8)))]
+    (is (= 288 (count (:bytes packed))))
+    (is (quantized/matrix? weight))
+    (is (= 288 (:byte-count weight)))
+    (is (= [1 2] (:shape output)))
+    (is (= [expected expected] (arr/->vec output)))))
 
 (deftest file-backed-loader-uses-positional-ranges
   (let [path (Files/createTempFile "torch-gguf-" ".gguf"

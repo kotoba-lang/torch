@@ -4,6 +4,7 @@
   (:require [clojure.string :as str]
             [num.array :as arr]
             [num.dtype :as dtype]
+            [num.quantized :as quantized]
             [torch.model :as model]
             [torch.tokenizer :as tokenizer])
   (:import [java.io RandomAccessFile]
@@ -249,6 +250,20 @@
       (throw (ex-info "GGUF tensor not found" {:name name})))
     (assoc tensor :values (decode-tensor tensor (:source gguf)))))
 
+(defn read-packed-tensor
+  "Read exact encoded bytes without dequantizing."
+  [gguf name]
+  (let [tensor (get-in gguf [:tensor-map name])]
+    (when-not tensor
+      (throw (ex-info "GGUF tensor not found" {:name name})))
+    (when-not (#{:q4-k :q6-k :q8-0} (:type tensor))
+      (throw (ex-info "GGUF tensor is not packed quantized data"
+                      {:name name :type (:type tensor)})))
+    (assoc tensor :bytes
+           (mapv #(bit-and 0xff %)
+                 (read-range (:source gguf) (:data-offset tensor)
+                             (tensor-byte-count tensor))))))
+
 (defn llama-config
   "Extract the Llama architecture fields required by torch's decoder model."
   [gguf]
@@ -306,15 +321,19 @@
   (let [{:keys [shape values]} (read-tensor gguf name)]
     (arr/from-vec backend values shape)))
 
-(defn- upload-matrix
+(defn load-matrix
   "GGUF linear matrices are `[out in]`; torch.num-backend uses `[in out]`."
   [gguf backend name]
-  (let [{[out in] :shape values :values} (read-tensor gguf name)
-        transposed (mapv (fn [i]
-                           (let [input-index (quot i out) output-index (mod i out)]
-                             (nth values (+ (* output-index in) input-index))))
-                         (range (* in out)))]
-    (arr/from-vec backend transposed [in out])))
+  (let [tensor (get-in gguf [:tensor-map name])]
+    (if (= :q4-k (:type tensor))
+      (let [{:keys [shape bytes]} (read-packed-tensor gguf name)]
+        (quantized/matrix backend bytes shape :q4-k))
+      (let [{[out in] :shape values :values} (read-tensor gguf name)
+            transposed (mapv (fn [i]
+                               (let [input-index (quot i out) output-index (mod i out)]
+                                 (nth values (+ (* output-index in) input-index))))
+                             (range (* in out)))]
+        (arr/from-vec backend transposed [in out])))))
 
 (defn load-llama-weights
   "Decode and upload standard Llama GGUF tensors into the weights vector used
@@ -326,18 +345,18 @@
         (mapv (fn [index]
                 (let [prefix (str "blk." index ".")]
                   {:attn-norm (upload-vector gguf backend (str prefix "attn_norm.weight"))
-                   :qw (upload-matrix gguf backend (str prefix "attn_q.weight"))
-                   :kw (upload-matrix gguf backend (str prefix "attn_k.weight"))
-                   :vw (upload-matrix gguf backend (str prefix "attn_v.weight"))
-                   :ow (upload-matrix gguf backend (str prefix "attn_output.weight"))
+                   :qw (load-matrix gguf backend (str prefix "attn_q.weight"))
+                   :kw (load-matrix gguf backend (str prefix "attn_k.weight"))
+                   :vw (load-matrix gguf backend (str prefix "attn_v.weight"))
+                   :ow (load-matrix gguf backend (str prefix "attn_output.weight"))
                    :ffn-norm (upload-vector gguf backend (str prefix "ffn_norm.weight"))
-                   :gate (upload-matrix gguf backend (str prefix "ffn_gate.weight"))
-                   :up (upload-matrix gguf backend (str prefix "ffn_up.weight"))
-                   :down (upload-matrix gguf backend (str prefix "ffn_down.weight"))}))
+                   :gate (load-matrix gguf backend (str prefix "ffn_gate.weight"))
+                   :up (load-matrix gguf backend (str prefix "ffn_up.weight"))
+                   :down (load-matrix gguf backend (str prefix "ffn_down.weight"))}))
               (range block-count))
         final-norm (upload-vector gguf backend "output_norm.weight")
         output (if (contains? (:tensor-map gguf) "output.weight")
-                 (upload-matrix gguf backend "output.weight")
+                 (load-matrix gguf backend "output.weight")
                  ;; Tied embeddings need a transposed materialization for the
                  ;; engine's `[embed vocab]` LM-head layout.
                  (let [[vocab embed] (:shape embedding)

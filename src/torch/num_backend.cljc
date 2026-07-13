@@ -30,9 +30,15 @@
   learned-attention path is verified through Deno WebGPU on Apple Metal."
   (:require [num.array :as arr]
             [num.core :as nm]
+            [num.quantized :as quantized]
             [num.tensor :as t]
             [torch.model :as model]
             [torch.ports :as ports]))
+
+(defn- matmul-weight [input weight]
+  (if (quantized/matrix? weight)
+    (quantized/matmul input weight)
+    (nm/matmul input weight)))
 
 ;; --- deterministic weight generation (NOT torch/numpy-matching — see ns doc) --
 
@@ -123,8 +129,8 @@
   (let [t' (model/layer-type lyr) largs (model/layer-args lyr)]
     (case t'
       :linear (if (= :f32 (or (:dtype x) :f32))
-                (t/add (nm/matmul x (:w weights)) (:b weights))
-                (let [product (nm/matmul x (:w weights))
+                (t/add (matmul-weight x (:w weights)) (:b weights))
+                (let [product (matmul-weight x (:w weights))
                       rows (first (:shape product))
                       bias (:b weights)
                       expanded (arr/from-vec (:backend product)
@@ -171,7 +177,7 @@
                         (t/reshape array [batch sequence embed]) array))
             project (fn [source-layout wk bk]
                       (restore
-                       (t/add (nm/matmul (:flat source-layout) (get weights wk))
+                       (t/add (matmul-weight (:flat source-layout) (get weights wk))
                               (get weights bk))
                        source-layout))
             q0 (project query-layout :qw :qb)
@@ -187,7 +193,7 @@
                                         [(* (:batch query-layout)
                                             (:sequence query-layout)) embed])
                              attended)]
-        (restore (t/add (nm/matmul attended-flat (:ow weights)) (:ob weights))
+        (restore (t/add (matmul-weight attended-flat (:ow weights)) (:ob weights))
                  query-layout))
       :conv2d (let [[_in _out _k stride padding dilation groups] largs
                     weight (:w weights)
@@ -218,7 +224,7 @@
             restore (fn [a features]
                       (if (= rank 3) (t/reshape a [batch sequence features]) a))
             linear (fn [a w out]
-                     (restore (nm/matmul (flatten a) w) out))
+                     (restore (matmul-weight (flatten a) w) out))
             normalized (t/rms-norm-last x (:attn-norm weights) eps)
             q0 (linear normalized (:qw weights) embed)
             k0 (linear normalized (:kw weights) kv-embed)
@@ -241,10 +247,10 @@
             shape (:shape x) rank (count shape)]
         (if (= rank 3)
           (let [[batch sequence _] shape]
-            (t/reshape (nm/matmul (t/reshape x [(* batch sequence) (last shape)])
+            (t/reshape (matmul-weight (t/reshape x [(* batch sequence) (last shape)])
                                   (:w weights))
                        [batch sequence vocab]))
-          (nm/matmul x (:w weights))))
+          (matmul-weight x (:w weights))))
       (throw (ex-info (str "torch.num-backend: layer type not supported: " t')
                       {:layer lyr :supported #{:linear :relu :silu :sigmoid :tanh :gelu :softmax :flatten :conv2d :layernorm :rmsnorm :embedding :llama-block :lm-head
                                                :groupnorm :attention
@@ -279,7 +285,7 @@
            restore (fn [array]
                      (if (= rank 3) (t/reshape array [batch 1 embed]) array))
            project (fn [wk bk]
-                     (restore (t/add (nm/matmul (:flat layout) (get weights wk))
+                     (restore (t/add (matmul-weight (:flat layout) (get weights wk))
                                      (get weights bk))))
            query0 (project :qw :qb)
            key0 (project :kw :kb)
@@ -308,7 +314,7 @@
                        (if-let [old (:value cache)] (t/cat [old value] axis) value))
            attended (t/multi-head-attention query all-key all-value heads)
            attended-flat (if (= rank 3) (t/reshape attended [batch embed]) attended)
-           output (restore (t/add (nm/matmul attended-flat (:ow weights))
+           output (restore (t/add (matmul-weight attended-flat (:ow weights))
                                   (:ob weights)))]
        {:output output
         :cache (if fixed?
@@ -343,7 +349,7 @@
                    (= [1 embed] (:shape input)))
       (throw (ex-info "llama block step requires [1 embed] input"
                       {:shape (:shape input) :embed embed})))
-    (let [linear #(nm/matmul %1 (get weights %2))
+    (let [linear #(matmul-weight %1 (get weights %2))
           normalized (t/rms-norm-last input (:attn-norm weights) eps)
           q0 (linear normalized :qw) k0 (linear normalized :kw)
           value (linear normalized :vw)
