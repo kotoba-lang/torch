@@ -8,12 +8,12 @@ the model as data — a `{layer args}` map is the same shape as a JSONLogic rule
 so a network is generated, diffed, versioned, shipped, and stored (Datomic /
 kotoba) exactly like any other EDN value.
 
-- **Zero third-party runtime deps**, every namespace is portable `.cljc`
-  (JVM, ClojureScript, SCI).
-- **Describe, don't execute.** torch-clj propagates shapes and counts parameters
-  without running any tensor math. Real execution is a *host-injected*
-  `IBackend` port (e.g. a libpython-clj / real PyTorch binding) — the kernel
-  carries no engine bindings.
+- **Portable `.cljc` model kernel** for JVM and ClojureScript; numerical
+  execution and reference training use the sibling `num` library.
+- **Describe first, execute explicitly.** torch-clj propagates shapes and
+  counts parameters without tensor math. `torch.num-backend` performs a real
+  forward pass, and `torch.train` provides a deliberately small CPU reference
+  training path.
 - **Data-first.** The model is plain EDN; host-specific layer types arrive
   through `torch.ports/ILayer`, not by editing the kernel.
 
@@ -57,7 +57,12 @@ bare vector, read as an implicit sequential). Builders are threadable data:
 ```
 
 Built-in layer types: `:linear :conv2d :maxpool2d :avgpool2d :embedding
-:batchnorm :layernorm :dropout :flatten :relu :gelu :sigmoid :tanh :softmax`.
+:batchnorm :layernorm :dropout :flatten :relu :gelu :sigmoid :tanh :softmax
+:attention`.
+
+`:attention` currently means parameter-free, single-head self-attention over a
+single `[sequence embedding]` tensor. It has no batch axis, mask, learned QKV
+projections, or multi-head split; those remain explicit future work.
 
 ## Shape & parameter engine (`torch.shape`, `torch.core`)
 
@@ -124,6 +129,30 @@ layer without touching the kernel:
 A host that binds a real engine implements `IBackend`; `core/run` then performs
 an actual forward pass. With no backend, torch-clj is shape-only and `run`
 throws — by design.
+
+## Reference training (`torch.train`)
+
+The model EDN and the same weight vector accepted by `torch.num-backend` now
+drive reverse-mode autodiff and immutable SGD updates directly:
+
+```clojure
+(require '[num.array :as a] '[num.cpu :as cpu]
+         '[torch.num-backend :as nb] '[torch.train :as train])
+
+(def backend (cpu/cpu-backend))
+(def weights (nb/random-weights backend mlp 42))
+(def input  (a/from-vec backend (repeat 784 0.1) [1 784]))
+(def target (a/from-vec backend (cons 1.0 (repeat 9 0.0)) [1 10]))
+
+(def step (train/sgd-step mlp weights input target 0.01))
+(:loss step)    ; scalar MSE before this update
+(:weights step) ; new arrays; the original weights remain unchanged
+```
+
+This path intentionally supports only flat sequential
+`:linear/:relu/:softmax` models with MSE and positive-rate SGD. It is a tested
+integration seam, not yet a replacement for PyTorch optimizers, GPU autograd,
+convolution/attention backward passes, checkpoint loading, or mixed precision.
 
 ## Test
 

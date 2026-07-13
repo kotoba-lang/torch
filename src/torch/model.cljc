@@ -45,6 +45,7 @@
 (defn sigmoid    [] {:sigmoid {}})
 (defn tanh       [] {:tanh {}})
 (defn softmax    [] {:softmax {}})
+(defn attention  [] {:attention {}})
 
 ;; ---------------------------------------------------------------------------
 ;; model container
