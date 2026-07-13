@@ -1,10 +1,10 @@
 (ns torch.train
   "Small, explicit bridge from a torch.model sequential description to
   num.autograd.  This is CPU-oriented reference training, not a general
-  optimizer framework: it supports :linear, :relu, :softmax, :attention
-  (single-head only) and :conv2d (single-channel rank-2 [kh kw] kernel only
-  — num.autograd/conv2d*'s own scope) with MSE loss, and returns new
-  immutable weight maps after one SGD step.
+  optimizer framework: it supports :linear, :relu, :silu, :softmax,
+  :attention (single-head only) and :conv2d (single-channel rank-2 [kh kw]
+  kernel only — num.autograd/conv2d*'s own scope) with MSE loss, and returns
+  new immutable weight maps after one SGD step.
 
   :attention and :conv2d's SCOPE here is narrower than what
   torch.num-backend can already EXECUTE (multi-head attention,
@@ -25,7 +25,7 @@
             [num.autograd :as ag]
             [torch.model :as model]))
 
-(def supported-layers #{:linear :relu :softmax :attention :conv2d})
+(def supported-layers #{:linear :relu :silu :softmax :attention :conv2d})
 
 (defn- fail [message data]
   (throw (ex-info (str "torch.train: " message) data)))
@@ -89,6 +89,9 @@
 
     :relu
     (assoc state :value (ag/relu* (:value state)))
+
+    :silu
+    (assoc state :value (ag/silu* (:value state)))
 
     :softmax
     (assoc state :value (ag/softmax* (:value state)))

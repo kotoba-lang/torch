@@ -5,8 +5,10 @@
   throwing \"torch-clj is shape-only here\".
 
   SCOPE (deliberately not full PyTorch-layer coverage — see ADR-2607131500):
-  `:linear` `:relu` `:softmax` are fully supported at any batch size (they
-  map directly onto already-real, already-verified num ops). `:conv2d` is
+  `:linear` `:relu` `:silu` `:softmax` are fully supported at any batch size
+  (they map directly onto already-real, already-verified num ops — `:silu`
+  via `num.tensor/silu`, the activation real diffusion UNets actually use,
+  not `:relu`). `:conv2d` is
   batch=1 only (no batched conv) but now supports ANY channel count — the
   weight's own rank picks the path: a rank-2 `[kh kw]` kernel dispatches to
   `num.tensor/conv2d` (single-channel, the original restricted form, kept
@@ -90,6 +92,7 @@
     (case t'
       :linear (t/add (nm/matmul x (:w weights)) (:b weights))
       :relu   (nm/relu x)
+      :silu   (t/silu x)
       :softmax (t/softmax x)
       :attention (let [num-heads (if (and (vector? largs) (seq largs)) (first largs) 1)]
                    (when-not (= 2 (count (:shape x)))
@@ -119,8 +122,8 @@
                   (throw (ex-info "torch.num-backend: :conv2d weight must be rank-2 [kh kw] or rank-4 [C_out C_in kh kw]"
                                   {:kernel-shape kshape}))))
       (throw (ex-info (str "torch.num-backend: layer type not supported: " t')
-                      {:layer lyr :supported #{:linear :relu :softmax :conv2d
-                                               :attention}})))))
+                      {:layer lyr :supported #{:linear :relu :silu :softmax
+                                               :conv2d :attention}})))))
 
 (defn num-backend
   "An `IBackend` running `forward` through `backend` (a `num.protocol/IBackend`

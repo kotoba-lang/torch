@@ -45,6 +45,7 @@
 (defn sigmoid    [] {:sigmoid {}})
 (defn tanh       [] {:tanh {}})
 (defn softmax    [] {:softmax {}})
+(defn silu       [] {:silu {}})
 (defn attention
   "Parameter-free self-attention over `[sequence embedding]`. Zero-arg is
   single-head (unchanged `{:attention {}}` shape); `num-heads` selects
