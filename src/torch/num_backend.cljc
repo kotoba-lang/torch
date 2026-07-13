@@ -144,11 +144,11 @@
        (forward [_ model* input]
          (let [lyrs (model/layers model*)
                unsupported (when autocast-dtype
-                             (seq (remove #{:linear :relu :silu}
+                             (seq (remove #{:linear :relu :silu :conv2d :groupnorm}
                                           (map model/layer-type lyrs))))]
            (when unsupported
              (throw (ex-info
-                     "torch.num-backend: autocast currently supports linear/relu/silu only"
+                     "torch.num-backend: autocast supports linear/relu/silu/conv2d/groupnorm"
                      {:unsupported (vec unsupported) :dtype autocast-dtype})))
            (let [x0 (if (= backend (:backend input)) input
                       (arr/from-vec backend (arr/->vec input) (:shape input)))

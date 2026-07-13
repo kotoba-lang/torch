@@ -141,12 +141,14 @@ throws — by design.
 
 `torch.num-backend/num-backend` accepts `{:autocast-dtype :f16}` or `:bf16`.
 Inputs and parameters are materialized in num's physical two-byte storage, and
-linear, ReLU, and SiLU keep that dtype through typed GEMM and elementwise
-kernels. The CPU oracle supports both types; num's Deno→Metal backend currently
-supports packed f16 with f32 accumulation.
+linear, NCHW convolution, GroupNorm, ReLU, and SiLU keep that dtype through
+typed reference operations. The CPU oracle supports both types; num's
+Deno→Metal backend currently supports packed f16 GEMM and elementwise kernels
+with f32 accumulation.
 
-Autocast deliberately rejects convolution, GroupNorm, softmax, and attention
-until their typed kernels exist instead of silently returning f32. Training
+Autocast deliberately rejects softmax and attention until their typed kernels
+exist instead of silently returning f32. Typed convolution and GroupNorm are
+currently CPU-oracle operations; their Metal kernels remain pending. Training
 autograd still uses f32 master tensors: GradScaler's overflow control is ready,
 but autocast forward and backward are not yet connected into a complete
 mixed-precision trainer.
