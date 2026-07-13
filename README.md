@@ -156,13 +156,19 @@ drive reverse-mode autodiff and immutable SGD updates directly:
 (:weights step) ; new arrays; the original weights remain unchanged
 ```
 
+For stateful optimization, `torch.optim/adamw-step` consumes the aligned
+weights and gradients returned by `torch.train/loss-and-gradients`. It returns
+both new weights and immutable first/second-moment state; pass that state into
+the next step. Learning rate, betas, epsilon, and decoupled weight decay are
+configurable, with AdamW defaults when omitted.
+
 The reference path supports flat sequential models composed from
 `:linear/:conv2d/:groupnorm/:relu/:silu/:softmax/:attention`, with MSE and
-positive-rate SGD. NCHW grouped convolution, affine GroupNorm, SiLU, and
+positive-rate SGD plus immutable AdamW. NCHW grouped convolution, affine GroupNorm, SiLU, and
 multi-head self-attention all have real reverse-mode gradients; tests verify
 both finite-difference agreement in `num` and decreasing loss through the
 public torch model/weight representation. It remains a synchronous reference
-trainer, not yet a replacement for PyTorch's optimizer catalog, GPU autograd,
+trainer, not yet a replacement for PyTorch's broader optimizer catalog, GPU autograd,
 batched/masked learned-projection attention, checkpoint loading, or mixed
 precision.
 
