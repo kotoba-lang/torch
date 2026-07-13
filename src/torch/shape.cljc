@@ -131,6 +131,15 @@
       [:error (str "layernorm features " features " differs from input " (last in))]
       :else [:ok in])))
 
+(defmethod layer-shape :rmsnorm [_ args in]
+  (let [features (nth-arg args 0 nil)]
+    (cond
+      (not (pos-int? features)) [:error "rmsnorm expects a positive feature count"]
+      (empty? in) [:error "rmsnorm expects rank >= 1"]
+      (not= features (last in))
+      [:error (str "rmsnorm features " features " differs from input " (last in))]
+      :else [:ok in])))
+
 (defmethod layer-shape :groupnorm [_ args in]
   (let [groups (nth-arg args 0 nil)
         channels (nth-arg args 1 nil)]
@@ -220,13 +229,14 @@
 
 (defmethod layer-params :batchnorm [_ args] (* 2 (nth-arg args 0 0)))
 (defmethod layer-params :layernorm [_ args] (* 2 (nth-arg args 0 0)))
+(defmethod layer-params :rmsnorm [_ args] (nth-arg args 0 0))
 (defmethod layer-params :groupnorm [_ args] (* 2 (nth-arg args 1 0)))
 (defmethod layer-params :multihead-attention [_ args]
   (let [embed (nth-arg args 0 0)] (* 4 (+ (* embed embed) embed))))
 
 (def built-in-types
   "The set of layer types this namespace understands."
-  #{:linear :conv2d :maxpool2d :avgpool2d :embedding :batchnorm :layernorm
+  #{:linear :conv2d :maxpool2d :avgpool2d :embedding :batchnorm :layernorm :rmsnorm
     :groupnorm :dropout :flatten :relu :silu :gelu :sigmoid :tanh :softmax
     :attention :multihead-attention :identity})
 

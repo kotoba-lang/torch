@@ -38,6 +38,10 @@
 (defn embedding  [num-emb dim]       {:embedding [num-emb dim]})
 (defn batchnorm  [features]          {:batchnorm [features]})
 (defn layernorm  [features]          {:layernorm [features]})
+(defn rmsnorm
+  "Llama-style RMSNorm over the final `features` dimension."
+  ([features] {:rmsnorm [features]})
+  ([features eps] {:rmsnorm [features eps]}))
 (defn groupnorm
   "PyTorch-style GroupNorm(num-groups, num-channels, eps=1e-5)."
   ([num-groups num-channels] {:groupnorm [num-groups num-channels]})

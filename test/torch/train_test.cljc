@@ -78,7 +78,7 @@
     (is (< (:loss trained) (:loss first-pass)))))
 
 (deftest embedding-transformer-prefix-runs-and-trains
-  (let [model (m/sequential (m/embedding 5 4) (m/layernorm 4) (m/gelu)
+  (let [model (m/sequential (m/embedding 5 4) (m/rmsnorm 4) (m/gelu)
                             (m/linear 4 2))
         input (arr/from-vec backend [2 0 2 1] [4])
         target (arr/from-vec backend [0.1 -0.2, 0.3 0.0, -0.1 0.4, 0.2 0.1]
@@ -92,6 +92,7 @@
     (is (= [5 4] (:shape (:w (first initial)))))
     (is (= (arr/->vec inference) (arr/->vec (:prediction first-pass))))
     (is (= [5 4] (:shape (:w (first (:gradients first-pass))))))
+    (is (= [4] (:shape (:w (second (:gradients first-pass))))))
     (is (nil? (:input-gradient
                (train/prediction-and-gradients
                 model initial input

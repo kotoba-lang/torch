@@ -5,7 +5,7 @@
   throwing \"torch-clj is shape-only here\".
 
   SCOPE (deliberately not full PyTorch-layer coverage): `:linear`, `:relu`,
-  `:silu`, `:sigmoid`, `:tanh`, `:gelu`, `:softmax`, affine `:layernorm`/`:groupnorm`, and full NCHW `:conv2d` execute
+  `:silu`, `:sigmoid`, `:tanh`, `:gelu`, `:softmax`, `:rmsnorm`, affine `:layernorm`/`:groupnorm`, and full NCHW `:conv2d` execute
   through verified num ops. Convolution supports batches, groups/depthwise,
   bias, stride, padding, and dilation. Learned `:multihead-attention` supports
   batch-first inputs plus causal, key-padding, and separate context sequences
@@ -89,6 +89,8 @@
                 :embedding (let [[num-embeddings dim] a]
                              {:w (upload (next-vec! (* num-embeddings dim))
                                          [num-embeddings dim])})
+                :rmsnorm (let [[features] a]
+                           {:w (upload (repeat features 1.0) [features])})
                 :multihead-attention
                 (let [[embed _heads] a
                       matrix (fn [] (upload (next-vec! (* embed embed)) [embed embed]))
@@ -177,8 +179,10 @@
                                       (or eps 1.0e-5)))
       :layernorm (t/layer-norm-last x (:w weights) (:b weights) 1.0e-5)
       :embedding (t/embedding x (:w weights))
+      :rmsnorm (let [[_features eps] largs]
+                 (t/rms-norm-last x (:w weights) (or eps 1.0e-5)))
       (throw (ex-info (str "torch.num-backend: layer type not supported: " t')
-                      {:layer lyr :supported #{:linear :relu :silu :sigmoid :tanh :gelu :softmax :flatten :conv2d :layernorm :embedding
+                      {:layer lyr :supported #{:linear :relu :silu :sigmoid :tanh :gelu :softmax :flatten :conv2d :layernorm :rmsnorm :embedding
                                                :groupnorm :attention
                                                :multihead-attention}})))))
 
@@ -203,11 +207,11 @@
                layer-options (or (:layer-options options)
                                  (repeat (count lyrs) nil))
                unsupported (when autocast-dtype
-                             (seq (remove #{:linear :relu :silu :sigmoid :tanh :gelu :flatten :conv2d :groupnorm :layernorm :embedding}
+                             (seq (remove #{:linear :relu :silu :sigmoid :tanh :gelu :flatten :conv2d :groupnorm :layernorm :rmsnorm :embedding}
                                           (map model/layer-type lyrs))))]
            (when unsupported
              (throw (ex-info
-                     "torch.num-backend: autocast supports linear/relu/silu/sigmoid/tanh/gelu/flatten/conv2d/groupnorm/layernorm/embedding"
+                     "torch.num-backend: autocast supports linear/relu/silu/sigmoid/tanh/gelu/flatten/conv2d/groupnorm/layernorm/rmsnorm/embedding"
                      {:unsupported (vec unsupported) :dtype autocast-dtype})))
            (when-not (= (count lyrs) (count layer-options))
              (throw (ex-info "torch.num-backend: layer-options count mismatch"

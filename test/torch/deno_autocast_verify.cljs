@@ -17,7 +17,7 @@
                                  (model/groupnorm 2 4) (model/layernorm 4)
                                  (model/silu) (model/sigmoid) (model/tanh) (model/gelu))
         embedding-model (model/sequential (model/embedding 5 4)
-                                          (model/layernorm 4) (model/gelu))
+                                          (model/rmsnorm 4) (model/gelu))
         input-values (mapv #(- (* 0.03 %) 0.4) (range 32))
         token-values [2 0 2 1]
         cpu-backend (cpu/cpu-backend)
@@ -61,7 +61,7 @@
                                                         actual-embedding 0.01)]
                         (println (str "torch conv→GroupNorm→LayerNorm→activations f16: "
                                       (if ok? "passed" "failed")))
-                        (println (str "torch Embedding→LayerNorm→GELU f16: "
+                        (println (str "torch Embedding→RMSNorm→GELU f16: "
                                       (if embedding-ok? "passed" "failed")))
                         (when-not (and ok? embedding-ok?) (.exit js/Deno 1))))))))
         (.catch (fn [error]

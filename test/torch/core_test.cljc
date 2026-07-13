@@ -20,6 +20,7 @@
     (is (= {:linear [784 256]} (m/linear 784 256)))
     (is (= {:relu {}} (m/relu)))
     (is (= {:silu {}} (m/silu)))
+    (is (= {:rmsnorm [16]} (m/rmsnorm 16)))
     (is (= {:groupnorm [4 32]} (m/groupnorm 4 32)))
     (is (= {:attention {}} (m/attention)))
     (is (= {:multihead-attention [64 8]} (m/multihead-attention 64 8)))
