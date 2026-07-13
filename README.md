@@ -80,9 +80,9 @@ including a `[batch sequence]` `:key-padding-mask` whose non-zero keys are ignor
 When `:context` is present, Q is projected from the current model value while K/V
 are projected from the separate context sequence, enabling UNet-style cross-attention
 with different query/key lengths. VJP and MSE results expose the context gradient at
-`[:layer-input-gradients layer-index :context]`. The inference-only `torch.core/run`
-backend still lacks runtime layer arguments; cross-attention currently enters through
-the training/VJP API.
+`[:layer-input-gradients layer-index :context]`. The four-argument `torch.core/run`
+uses the same options through the optional runtime-backend port, so inference and
+training share the exact context/mask contract.
 `:conv2d` executes full NCHW batches and
 supports scalar/pair kernels, stride, padding, dilation, groups, depthwise
 convolution, and bias. `torch.num-backend/random-weights` produces a
@@ -272,7 +272,7 @@ backend. The fixture uses query length 3 and context length 2 with different pad
 masks per batch. It then performs eight
 public `sgd-step` iterations, checks the complete loss trajectory and all final
 weights against CPU, and confirms loss decreases from `0.09691` to `0.06289`
-(31/31 checks):
+while the independent `torch.core/run` inference result also matches (32/32 checks):
 
 ```sh
 clojure -M:deno-metal-attention-verify

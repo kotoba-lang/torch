@@ -3,6 +3,7 @@
   (:require [num.array :as arr]
             [num.cpu :as cpu]
             [num.deno-gpu :as gpu]
+            [torch.core :as core]
             [torch.model :as model]
             [torch.num-backend :as nb]
             [torch.train :as train]))
@@ -47,6 +48,12 @@
      (arr/from-vec backend upstream-values input-shape)
      (execution-options backend))))
 
+(defn- run-inference [backend model*]
+  (let [weights (nb/random-weights backend model* 29)]
+    (core/run (nb/num-backend backend weights) model*
+              (arr/from-vec backend input-values input-shape)
+              (execution-options backend))))
+
 (defn- run-mse [backend model*]
   (let [weights (nb/random-weights backend model* 29)]
     (train/loss-and-gradients
@@ -84,9 +91,11 @@
 (defn -main [& _]
   (let [model* (model/sequential (model/multihead-attention 4 2))
         cpu-backend (cpu/cpu-backend)
-        expected-vjp (into {}
+        expected-vjp (assoc (into {}
                             (map (fn [[label array]] [label (arr/->vec array)]))
                             (flatten-result (run-vjp cpu-backend model*)))
+                            :inference (arr/->vec
+                                        (run-inference cpu-backend model*)))
         cpu-mse (run-mse cpu-backend model*)
         cpu-training (run-training cpu-backend model* 8)
         expected-trained
@@ -106,7 +115,8 @@
         (.then
          (fn [device]
            (let [backend (gpu/backend device)
-                 actual-vjp (flatten-result (run-vjp backend model*))
+                 actual-vjp (assoc (flatten-result (run-vjp backend model*))
+                                   :inference (run-inference backend model*))
                  actual-mse-pass (run-mse backend model*)
                  actual-training (run-training backend model* 8)
                  actual-mse
@@ -162,7 +172,7 @@
                                     loss-check training-loss-check)))
                  (.then (fn [_]
                           (println (str "Metal learned MultiheadAttention training: "
-                                        @passed "/" (+ 7 (* 3 (count parameter-names)))
+                                        @passed "/" (+ 8 (* 3 (count parameter-names)))
                                         " passed"))))))))
         (.catch (fn [error]
                   (js/console.error (or (.-stack error) error))

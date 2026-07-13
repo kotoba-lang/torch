@@ -1,6 +1,7 @@
 (ns torch.train-test
   (:require [clojure.test :refer [deftest is testing]]
             [num.array :as arr] [num.cpu :as cpu]
+            [torch.core :as core]
             [torch.model :as m] [torch.num-backend :as nb]
             [torch.train :as train]))
 
@@ -149,10 +150,15 @@
         result (train/prediction-and-gradients
                 model weights input upstream
                 {:layer-options [{:context context}]})
+        inference (core/run (nb/num-backend backend weights) model input
+                            {:layer-options [{:context context}]})
         context-gradient (:context (first (:layer-input-gradients result)))]
     (is (= [2 4] (:shape (:prediction result))))
     (is (= [2 4] (:shape (:input-gradient result))))
     (is (= [3 4] (:shape context-gradient)))
+    (is (every? #(< (Math/abs %) 1.0e-8)
+                (map - (arr/->vec inference)
+                     (arr/->vec (:prediction result)))))
     (is (some #(not (zero? %)) (arr/->vec context-gradient)))
     (is (= #{:qw :qb :kw :kb :vw :vb :ow :ob}
            (set (keys (first (:gradients result))))))))
