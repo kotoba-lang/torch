@@ -279,6 +279,28 @@ clojure -M:deno-metal-attention-verify
 deno run --allow-all target/deno-metal-attention-verify.cjs
 ```
 
+## State dicts and safetensors
+
+`torch.state-dict/manifest` assigns stable PyTorch-style names such as
+`layers.0.weight` and `layers.1.q_proj.weight`. Dense internal matrices use
+`[in,out]` for `x @ W`; the checkpoint boundary automatically transposes them to
+PyTorch `[out,in]`. Conv and normalization tensors already use standard layouts.
+
+```clojure
+(require '[torch.safetensors :as safe]
+         '[torch.state-dict :as state])
+
+(def external (state/state-dict model weights))
+(def restored (state/load-state-dict model external))
+(def loaded (safe/load-weights "model.safetensors" backend model))
+```
+
+The JVM reader validates the header length, every tensor byte window, dtype,
+declared shape, missing names, and unexpected names before loading. Tensor payloads
+remain on disk until requested, so a checkpoint is not materialized wholesale.
+F32, F16, and BF16 checkpoints are decoded and uploaded as f32 by default for the
+current attention kernels; `:dtype` can request another num storage dtype.
+
 ## Test
 
 ```

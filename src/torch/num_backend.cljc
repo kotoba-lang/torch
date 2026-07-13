@@ -22,7 +22,8 @@
   layers), not something it invents or loads. `random-weights` below is a
   small, deterministic (not cryptographic, not torch/numpy-matching)
   generator for exercising a model end-to-end without hand-writing every
-  number — explicitly NOT a claim of matching any real trained checkpoint.
+  number. Real checkpoint weights are loaded through `torch.safetensors` and
+  `torch.state-dict`.
 
   BACKEND CHOICE: this wraps whatever `num.protocol/IBackend` the caller
   passes to `num-backend`. CPU is the reference oracle; the device-native

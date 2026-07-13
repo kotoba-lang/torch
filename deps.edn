@@ -3,7 +3,8 @@
  ;; A neural-network module IS data ({layer args} maps, JSONLogic-shaped) — the
  ;; library propagates shapes and counts parameters; it never runs tensor math
  ;; (real execution is a host-injected IBackend port).
- :deps {io.github.kotoba-lang/dsl-core
+ :deps {org.clojure/data.json {:mvn/version "2.5.1"}
+        io.github.kotoba-lang/dsl-core
         {:git/sha "9bedd2b9d05133a2d9b0656a55135f142ab11a36"}
         ;; Includes differentiable NCHW convolution, GroupNorm, SiLU,
         ;; multi-head attention, typed Metal tensors, UNet autograd, and a
