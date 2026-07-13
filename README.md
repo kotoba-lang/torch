@@ -169,8 +169,20 @@ Host-side static batching is available through `generate-text-batch`. A single
 step callback receives one token per request and shared per-layer caches; rows
 that reach EOS early are padded so unfinished rows continue without changing the
 fixed GPU batch layout. Prompts currently need equal encoded lengths. Ragged
-prefill, continuous admission/eviction, and Ollama-style paged/block cache
-allocation remain future work.
+prefill and device-executed continuous batching remain future work.
+
+`torch.kv-cache` provides the ownership layer for that next serving mode. It
+maintains a bounded physical-block free list, per-sequence block tables and
+refcounts, lazily reserves prompt/decode positions, shares forked prefix blocks,
+and emits explicit copy-on-write commands when two forks would write the same
+partial block. Its FIFO scheduler admits work up to a configured running batch,
+leaves an oversized head request queued transactionally when memory is exhausted,
+and immediately admits waiting work after a completed sequence releases blocks.
+Allocator invariants are executable through `valid?` and covered on JVM and by
+CLJS compilation. This is currently the portable ownership/scheduling contract;
+the K/V payload still uses the contiguous Metal cache above. Device-side block
+tables, paged-attention kernels, and request cancellation/timeouts remain to be
+connected before claiming Ollama-equivalent continuous serving.
 
 A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
 blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding
