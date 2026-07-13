@@ -143,12 +143,23 @@ throws — by design.
 Inputs and parameters are materialized in num's physical two-byte storage, and
 linear, NCHW convolution, GroupNorm, ReLU, and SiLU keep that dtype through
 typed reference operations. The CPU oracle supports both types; num's
-Deno→Metal backend currently supports packed f16 GEMM and elementwise kernels
-with f32 accumulation.
+Deno→Metal backend supports packed f16 GEMM, elementwise, convolution, and
+GroupNorm kernels with f32 accumulation.
+
+For an asynchronous GPU backend, generate or load weights directly in target
+storage with `(random-weights backend model seed {:dtype :f16})`. This avoids a
+device→host→device cast; existing typed weights are reused without copying.
+
+The full torch model dispatch is verified on Apple M4 Metal:
+
+```sh
+clojure -M:deno-autocast-verify
+deno run --allow-all target/deno-autocast-verify.cjs
+# torch conv→GroupNorm→SiLU f16: passed
+```
 
 Autocast deliberately rejects softmax and attention until their typed kernels
-exist instead of silently returning f32. Typed convolution and GroupNorm are
-currently CPU-oracle operations; their Metal kernels remain pending. Training
+exist instead of silently returning f32. Training
 autograd still uses f32 master tensors: GradScaler's overflow control is ready,
 but autocast forward and backward are not yet connected into a complete
 mixed-precision trainer.

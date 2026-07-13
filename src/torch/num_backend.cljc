@@ -57,29 +57,30 @@
   `{:w [channels] :b [channels]}`; `:attention` has no weights
   (parameter-free) regardless of num-heads, so it's `nil` here like any other
   parameterless layer."
-  [backend model* seed]
+  ([backend model* seed] (random-weights backend model* seed {}))
+  ([backend model* seed {:keys [dtype] :or {dtype :f32}}]
   (let [lyrs (model/layers model*)
         seed* (atom (long seed))
-        next-vec! (fn [n] (let [xs (lcg-seq @seed* n)] (swap! seed* + n) xs))]
+        next-vec! (fn [n] (let [xs (lcg-seq @seed* n)] (swap! seed* + n) xs))
+        upload (fn [xs shape] (arr/from-vec backend xs shape dtype))]
     (mapv (fn [lyr]
             (let [t' (model/layer-type lyr) a (model/layer-args lyr)]
               (case t'
                 :linear (let [[in out] a]
-                          {:w (arr/from-vec backend (next-vec! (* in out)) [in out])
-                           :b (arr/from-vec backend (next-vec! out) [out])})
+                          {:w (upload (next-vec! (* in out)) [in out])
+                           :b (upload (next-vec! out) [out])})
                 :conv2d (let [[in-ch out-ch k _stride _padding _dilation groups] a
                               groups (or groups 1)
                               in-per-group (quot in-ch groups)
                               [kh kw] (if (sequential? k) k [k k])]
-                          {:w (arr/from-vec backend
-                                            (next-vec! (* out-ch in-per-group kh kw))
-                                            [out-ch in-per-group kh kw])
-                           :b (arr/from-vec backend (next-vec! out-ch) [out-ch])})
+                          {:w (upload (next-vec! (* out-ch in-per-group kh kw))
+                                      [out-ch in-per-group kh kw])
+                           :b (upload (next-vec! out-ch) [out-ch])})
                 :groupnorm (let [[_groups channels] a]
-                             {:w (arr/from-vec backend (repeat channels 1.0) [channels])
-                              :b (arr/from-vec backend (repeat channels 0.0) [channels])})
+                             {:w (upload (repeat channels 1.0) [channels])
+                              :b (upload (repeat channels 0.0) [channels])})
                 nil)))
-          lyrs)))
+          lyrs))))
 
 ;; --- forward pass --------------------------------------------------------------
 

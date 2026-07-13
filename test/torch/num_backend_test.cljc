@@ -157,6 +157,13 @@
                     (map #(Math/abs (- %1 %2))
                          (arr/->vec f32-output) (arr/->vec output))))))))
 
+(deftest random-weights-can-upload-directly-to-autocast-storage
+  (let [model (m/sequential (m/linear 2 3) (m/silu))
+        weights (nb/random-weights backend model 12 {:dtype :f16})]
+    (is (= :f16 (:dtype (:w (first weights)))))
+    (is (= :f16 (:dtype (:b (first weights)))))
+    (is (nil? (second weights)))))
+
 (deftest physical-autocast-runs-conv-groupnorm-silu
   (let [model (m/sequential (m/conv2d 2 4 3 1 1)
                             (m/groupnorm 2 4)

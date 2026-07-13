@@ -16,6 +16,12 @@
                       {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
          :main-opts ["-m" "cognitect.test-runner"]
          :exec-fn cognitect.test-runner.api/test}
+       :deno-autocast-verify
+       {:extra-paths ["test"]
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-autocast-verify :output-to \"target/deno-autocast-verify.cjs\"}"
+                    "-c" "torch.deno-autocast-verify"]}
        ;; clj-kondo as a Clojars lib (no Homebrew/system install needed).
        :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
          :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"
