@@ -62,6 +62,13 @@
         :main-opts ["-m" "cljs.main"
                     "-co" "{:optimizations :simple :target :nodejs :main torch.deno-paged-llama-verify :output-to \"target/deno-paged-llama-verify.cjs\"}"
                     "-c" "torch.deno-paged-llama-verify"]}
+       :deno-continuous-verify
+       {:extra-paths ["test"]
+        :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-continuous-verify :output-to \"target/deno-continuous-verify.cjs\"}"
+                    "-c" "torch.deno-continuous-verify"]}
        :deno-quantized-llama-benchmark
        {:extra-paths ["test"]
         :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}

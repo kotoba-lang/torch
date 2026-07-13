@@ -205,6 +205,26 @@ That verifier temporarily overrides the pinned `num` dependency with the sibling
 `../num` checkout. Normal consumers still use the published SHA; the override can
 be removed after the paged Metal revision is merged and pinned.
 
+`torch.continuous` adds request turnover on top of the shared layer pools. It
+supports different prompt lengths, FIFO admission under both batch and block
+limits, synchronous CPU and Promise-based WebGPU stepping, per-request sampling,
+pause-on-block-exhaustion, EOS/length eviction, and immediate admission after
+blocks are released. The live fixture fills every block with two ragged requests,
+finishes one, reuses its block to prefill a waiting third request, and completes
+all three through the same two physical Metal layer pools:
+
+```sh
+clojure -M:deno-continuous-verify
+deno run --allow-all target/deno-continuous-verify.cjs
+# Apple M4: ragged continuous request turnover: passed
+#           paged blocks fully reusable: passed
+#           shared physical pools release: passed
+```
+
+This is real continuous paged execution but still serializes request steps within
+each scheduling tick. A fused multi-request paged-attention dispatch, cancellation,
+timeouts, backpressure, metrics, and an HTTP compatibility surface remain.
+
 A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
 blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding
 Q4_K-packed, tied LM head, causal prefill, and fixed-capacity KV-cache decode.
