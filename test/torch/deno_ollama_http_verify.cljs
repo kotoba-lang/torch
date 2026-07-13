@@ -11,13 +11,51 @@
                 (ollama/token-chunk "tiny" created "lo")
                 (ollama/done-chunk "tiny" created [1 2 3]
                                    {:eval-count 2 :done-reason "stop"})]
+        stream-source
+        (fn []
+          (let [timers (atom [])]
+            (js/ReadableStream.
+             #js {:start (fn [controller]
+                           (.enqueue controller (first chunks))
+                           (reset! timers
+                                   [(js/setTimeout
+                                     #(.enqueue controller (second chunks)) 60)
+                                    (js/setTimeout
+                                     #(do (.enqueue controller (last chunks))
+                                          (.close controller)) 120)]))
+                  :cancel (fn [_]
+                            (doseq [timer @timers] (js/clearTimeout timer)))})))
+        live-cancellations (atom [])
         service {:version "0.12.0"
                  :models [{:name "tiny:latest" :model "tiny:latest"
                            :size 1234 :digest "sha256:test"}]
-                 :generate! (fn [_ _] (js/Promise.resolve chunks))}
+                 :generate! (fn [_ _] (js/Promise.resolve chunks))
+                 :generate-stream! (fn [_ _]
+                                     (js/Promise.resolve (stream-source)))
+                 :cancel! (fn [request-id reason]
+                            (swap! live-cancellations conj [request-id reason]))}
         handler (http/handler service)
         server (http/serve! service {:hostname "127.0.0.1" :port 0})
-        live-url (str "http://127.0.0.1:" (.-port (.-addr server)) "/api/version")
+        base-url (str "http://127.0.0.1:" (.-port (.-addr server)))
+        live-url (str base-url "/api/version")
+        first-byte-start (.now js/performance)
+        live-first-byte
+        (-> (js/fetch
+             (str base-url "/api/generate")
+             #js {:method "POST"
+                  :headers #js {"content-type" "application/json"}
+                  :body (js/JSON.stringify
+                         #js {:model "tiny" :prompt "hi" :stream true})})
+            (.then
+             (fn [response]
+               (let [reader (.getReader (.-body response))]
+                 (-> (.read reader)
+                     (.then (fn [result]
+                              (.cancel reader)
+                              #js {:status (.-status response)
+                                   :elapsed (- (.now js/performance)
+                                               first-byte-start)
+                                   :bytes (.-byteLength (.-value result))})))))))
         cancellations (atom [])
         abort-controller (js/AbortController.)
         abort-handler
@@ -59,7 +97,8 @@
     (-> (js/Promise.all
          #js [(handler version-request) (handler tags-request)
               (handler stream-request) (handler one-request)
-              (handler bad-request) (js/fetch live-url) aborted-response])
+              (handler bad-request) (js/fetch live-url) aborted-response
+              live-first-byte])
         (.then
          (fn [responses]
            (let [version (aget responses 0)
@@ -67,7 +106,8 @@
                  stream (aget responses 2)
                  one (aget responses 3)
                  bad (aget responses 4)
-                 live (aget responses 5)]
+                 live (aget responses 5)
+                 first-byte (aget responses 7)]
              (-> (js/Promise.all
                   #js [(body-json version) (body-json tags) (.text stream)
                        (body-json one) (body-json bad)])
@@ -89,6 +129,10 @@
                                    (= 400 (.-status bad))
                                    (string? (.-error bad-body))
                                    (= 200 (.-status live))
+                                   (= 200 (.-status first-byte))
+                                   (< (.-elapsed first-byte) 100)
+                                   (pos? (.-bytes first-byte))
+                                   (= 1 (count @live-cancellations))
                                    (= [["abort-me" :client-disconnect]]
                                       @cancellations))]
                       (println "Ollama version/tags endpoints:"
@@ -101,6 +145,11 @@
                       (println "Deno TCP listener and client abort:"
                                (if (and (= 200 (.-status live))
                                         (= 1 (count @cancellations)))
+                                 "passed" "failed"))
+                      (println "incremental first NDJSON byte before completion:"
+                               (if (and (< (.-elapsed first-byte) 100)
+                                        (pos? (.-bytes first-byte))
+                                        (= 1 (count @live-cancellations)))
                                  "passed" "failed"))
                       (.shutdown server)
                       (when-not ok? (.exit js/Deno 1)))))))))

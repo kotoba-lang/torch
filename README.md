@@ -268,9 +268,16 @@ graceful `.shutdown()` lifecycle. Every generate request receives a stable reque
 ID and AbortSignal context; a client disconnect invokes the injected `cancel!`
 callback exactly once and response completion removes the listener. The verifier
 also starts an ephemeral TCP port, reaches it with `fetch`, aborts a separate
-in-flight request, and shuts the server down. The HTTP layer still receives an
-injected `generate!` service callback; model load/unload, authentication, true
-incremental stream delivery, and production observability remain.
+in-flight request, and shuts the server down.
+
+When the service provides `generate-stream!`, each generated chunk is encoded and
+enqueued as one NDJSON record through a byte `ReadableStream`; the handler does not
+wait for generation completion. Stream close/error/reader-cancel each run cleanup
+once, while TCP reader cancellation propagates to `Request.signal` and `cancel!`.
+The live test emits chunks at 0/60/120 ms, proves the first bytes arrive before
+100 ms, cancels the reader, and confirms producer timers and generation are
+cancelled. The HTTP layer still receives injected generation callbacks; model
+load/unload, authentication, and production observability remain.
 
 A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
 blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding
