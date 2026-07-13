@@ -5,7 +5,7 @@
   throwing \"torch-clj is shape-only here\".
 
   SCOPE (deliberately not full PyTorch-layer coverage): `:linear`, `:relu`,
-  `:silu`, `:sigmoid`, `:tanh`, `:softmax`, affine `:groupnorm`, and full NCHW `:conv2d` execute
+  `:silu`, `:sigmoid`, `:tanh`, `:gelu`, `:softmax`, affine `:groupnorm`, and full NCHW `:conv2d` execute
   through verified num ops. Convolution supports batches, groups/depthwise,
   bias, stride, padding, and dilation. Learned `:multihead-attention` supports
   batch-first inputs plus causal, key-padding, and separate context sequences
@@ -113,6 +113,7 @@
       :silu   (t/silu x)
       :sigmoid (nm/sigmoid x)
       :tanh (nm/tanh x)
+      :gelu (nm/gelu x)
       :softmax (t/softmax x)
       :flatten (t/reshape x (flatten-batch-shape (:shape x)))
       :attention (let [num-heads (if (and (vector? largs) (seq largs)) (first largs) 1)]
@@ -168,7 +169,7 @@
                    (t/group-norm-nchw x groups (:w weights) (:b weights)
                                       (or eps 1.0e-5)))
       (throw (ex-info (str "torch.num-backend: layer type not supported: " t')
-                      {:layer lyr :supported #{:linear :relu :silu :sigmoid :tanh :softmax :flatten :conv2d
+                      {:layer lyr :supported #{:linear :relu :silu :sigmoid :tanh :gelu :softmax :flatten :conv2d
                                                :groupnorm :attention
                                                :multihead-attention}})))))
 
@@ -193,11 +194,11 @@
                layer-options (or (:layer-options options)
                                  (repeat (count lyrs) nil))
                unsupported (when autocast-dtype
-                             (seq (remove #{:linear :relu :silu :sigmoid :tanh :flatten :conv2d :groupnorm}
+                             (seq (remove #{:linear :relu :silu :sigmoid :tanh :gelu :flatten :conv2d :groupnorm}
                                           (map model/layer-type lyrs))))]
            (when unsupported
              (throw (ex-info
-                     "torch.num-backend: autocast supports linear/relu/silu/sigmoid/tanh/flatten/conv2d/groupnorm"
+                     "torch.num-backend: autocast supports linear/relu/silu/sigmoid/tanh/gelu/flatten/conv2d/groupnorm"
                      {:unsupported (vec unsupported) :dtype autocast-dtype})))
            (when-not (= (count lyrs) (count layer-options))
              (throw (ex-info "torch.num-backend: layer-options count mismatch"

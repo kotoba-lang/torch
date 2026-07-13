@@ -176,7 +176,7 @@
 (deftest unsupported-layer-throws-clearly
   (testing "a layer type outside this backend's documented scope throws,
             not silently produces wrong numbers"
-    (let [model (m/sequential (m/layer :gelu))]
+    (let [model (m/sequential (m/maxpool2d 2))]
       (is (thrown? #?(:clj Exception :cljs js/Error)
                    (core/run (nb/num-backend backend [nil]) model
                              (arr/from-vec backend [1 2] [1 2])))))))

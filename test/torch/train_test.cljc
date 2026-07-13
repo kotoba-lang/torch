@@ -41,8 +41,8 @@
     (is (= 3 (count (:gradients first-pass))))
     (is (< (:loss trained) (:loss first-pass)))))
 
-(deftest sigmoid-and-tanh-model-description-runs-and-trains
-  (let [model (m/sequential (m/linear 2 3) (m/sigmoid) (m/tanh)
+(deftest smooth-activation-model-description-runs-and-trains
+  (let [model (m/sequential (m/linear 2 3) (m/sigmoid) (m/tanh) (m/gelu)
                             (m/linear 3 1))
         input (arr/from-vec backend [1.0 0.0, 0.0 1.0, 0.5 -0.5] [3 2])
         target (arr/from-vec backend [0.4 -0.2 0.1] [3 1])
@@ -55,12 +55,13 @@
     (is (= (arr/->vec inference) (arr/->vec (:prediction first-pass))))
     (is (nil? (nth (:gradients first-pass) 1)))
     (is (nil? (nth (:gradients first-pass) 2)))
+    (is (nil? (nth (:gradients first-pass) 3)))
     (is (< (:loss trained) (:loss first-pass)))))
 
 (deftest training-contract-rejects-ambiguous-input
   (let [x (arr/from-vec backend [1 2] [1 2])]
     (is (thrown? #?(:clj Exception :cljs js/Error)
-                 (train/loss-and-gradients (m/sequential (m/gelu)) [nil] x x)))
+                 (train/loss-and-gradients (m/sequential (m/maxpool2d 2)) [nil] x x)))
     (is (thrown? #?(:clj Exception :cljs js/Error)
                  (train/loss-and-gradients (m/sequential (m/linear 2 2)) [] x x)))
     (let [model (m/sequential (m/linear 2 2))
