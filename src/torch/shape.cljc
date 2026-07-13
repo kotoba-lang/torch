@@ -38,7 +38,7 @@
 
 ;; --- elementwise / activation (shape-preserving) ---------------------------
 
-(doseq [t [:relu :gelu :sigmoid :tanh :softmax :dropout :identity]]
+(doseq [t [:relu :gelu :sigmoid :tanh :softmax :silu :dropout :identity]]
   (defmethod layer-shape t [_ _ in] [:ok in]))
 
 ;; --- parameter-free, self-attention over [sequence embedding] --------------
@@ -169,7 +169,8 @@
 (def built-in-types
   "The set of layer types this namespace understands."
   #{:linear :conv2d :maxpool2d :avgpool2d :embedding :batchnorm :layernorm
-    :dropout :flatten :relu :gelu :sigmoid :tanh :softmax :attention :identity})
+    :dropout :flatten :relu :gelu :sigmoid :tanh :softmax :silu :attention
+    :identity})
 
 (defn known?
   "True if `t` is a built-in layer type."

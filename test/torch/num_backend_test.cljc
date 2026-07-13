@@ -41,6 +41,17 @@
           e (Math/exp -2.0) s (+ 1.0 e)]
       (is (contract-approx-vec? [(/ 1.0 s) (/ e s)] out)))))
 
+(deftest silu-layer-matches-hand-computed
+  (testing "silu(x) = x * sigmoid(x), independently computed per element
+            (NOT by calling t/silu's own implementation) — the activation
+            real diffusion UNets use in place of relu"
+    (let [model (m/sequential (m/silu))
+          x (arr/from-vec backend [0 1 -1 2] [1 4])
+          out (arr/->vec (core/run (nb/num-backend backend [nil]) model x))
+          sigmoid (fn [v] (/ 1.0 (+ 1.0 (Math/exp (- v)))))
+          expect (mapv (fn [v] (* v (sigmoid v))) [0.0 1.0 -1.0 2.0])]
+      (is (contract-approx-vec? expect out)))))
+
 (deftest conv2d-single-channel-batch1-matches-hand-computed
   (testing "the [1 1 k] restricted conv2d path — same 3x3/all-ones-kernel
             example num.tensor-test already hand-verifies, run here through

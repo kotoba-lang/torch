@@ -55,6 +55,23 @@
       (is (some? (second (:gradients first-result))))   ; linear: has one
       (is (< (:loss trained) (:loss first-result))))))
 
+(deftest silu-and-linear-model-trains
+  (testing "silu(x)*linear(x)*softmax trains end to end — the activation
+            real diffusion UNets use in place of relu, exercised through
+            the same trainable-linear-layer pattern the attention test above
+            uses"
+    (let [model (m/sequential (m/linear 2 2) (m/silu) (m/linear 2 2) (m/softmax))
+          input (arr/from-vec backend [0.2 -0.1 0.3 0.4] [2 2])
+          target (arr/from-vec backend [1 0 0 1] [2 2])
+          initial (nb/random-weights backend model 11)
+          steps (take 21 (iterate (fn [{:keys [weights]}]
+                                    (train/sgd-step model weights input target 0.5))
+                                  {:weights initial}))
+          trained (last steps)
+          first-result (train/loss-and-gradients model initial input target)]
+      (is (nil? (second (:gradients first-result))))    ; silu: no gradient slot
+      (is (< (:loss trained) (:loss first-result))))))
+
 (deftest multi-head-attention-not-yet-trainable
   (testing "num-heads > 1 is a clear, specific rejection — not a silent
             single-head degenerate run"
