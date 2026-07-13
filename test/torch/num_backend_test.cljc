@@ -243,3 +243,27 @@
          #?(:clj Exception :cljs js/Error) #"autocast supports"
          (core/run (nb/num-backend backend weights {:autocast-dtype :f16})
                    model input)))))
+
+(deftest incremental-kv-cache-matches-full-causal-attention
+  (let [layer (m/multihead-attention
+               4 2 {:causal? true :rope? true :position-offset 3})
+        model (m/sequential layer)
+        weights (nb/random-weights backend model 61)
+        tokens [[0.2 -0.1 0.3 0.4]
+                [-0.2 0.1 0.5 -0.3]
+                [0.6 0.2 -0.4 0.1]
+                [-0.1 0.4 0.2 -0.5]]
+        input (arr/from-vec backend (vec (mapcat identity tokens)) [4 4])
+        full (core/run (nb/num-backend backend weights) model input)
+        decoded
+        (reduce (fn [{:keys [cache outputs]} token]
+                  (let [step (nb/multihead-attention-step
+                              layer (first weights)
+                              (arr/from-vec backend token [1 4]) cache)]
+                    {:cache (:cache step)
+                     :outputs (into outputs (arr/->vec (:output step)))}))
+                {:cache nil :outputs []} tokens)]
+    (is (= 4 (get-in decoded [:cache :length])))
+    (is (= [4 4] (:shape (get-in decoded [:cache :key]))))
+    (is (every? #(< (Math/abs %) 1.0e-6)
+                (map - (arr/->vec full) (:outputs decoded))))))

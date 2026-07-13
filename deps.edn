@@ -41,6 +41,12 @@
         :main-opts ["-m" "cljs.main"
                     "-co" "{:optimizations :simple :target :nodejs :main torch.deno-metal-attention-verify :output-to \"target/deno-metal-attention-verify.cjs\"}"
                     "-c" "torch.deno-metal-attention-verify"]}
+       :deno-kv-cache-verify
+       {:extra-paths ["test"]
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-kv-cache-verify :output-to \"target/deno-kv-cache-verify.cjs\"}"
+                    "-c" "torch.deno-kv-cache-verify"]}
        ;; clj-kondo as a Clojars lib (no Homebrew/system install needed).
        :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
          :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"

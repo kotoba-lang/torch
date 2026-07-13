@@ -86,6 +86,23 @@ including a `[batch sequence]` `:key-padding-mask` whose non-zero keys are ignor
                     :key-padding-mask padding-mask}]})
 ```
 
+Incremental autoregressive inference reuses projected, RoPE-rotated keys and
+values without a host readback:
+
+```clojure
+(let [{:keys [output cache]}
+      (nb/multihead-attention-step layer layer-weights one-token previous-cache)]
+  ;; release a superseded cache once its queued GPU work is complete
+  (nb/release-kv-cache! previous-cache)
+  {:logits output :cache cache})
+```
+
+The step accepts `[1 embed]` or `[batch 1 embed]`; its output matches the same
+layer's full causal pass token-for-token, verified on Apple Metal. The current
+cache is immutable and concatenates into a new GPU buffer each step, so it has
+correct KV reuse but not yet Ollama's fixed-capacity/paged-cache allocation
+strategy.
+
 When `:context` is present, Q is projected from the current model value while K/V
 are projected from the separate context sequence, enabling UNet-style cross-attention
 with different query/key lengths. VJP and MSE results expose the context gradient at

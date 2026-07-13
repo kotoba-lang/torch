@@ -197,6 +197,61 @@
                                                :groupnorm :attention
                                                :multihead-attention}})))))
 
+(defn multihead-attention-step
+  "Incrementally execute one learned MultiheadAttention layer for exactly one
+  new token per batch. Returns `{:output array :cache {:key :value :length}}`.
+  Cached K is already RoPE-rotated and both K/V remain on the input backend;
+  callers may release the previous cache after the returned work is complete.
+
+  `input` is `[1 embed]` or `[batch 1 embed]`. `cache` is nil for the first
+  token. Layer options are merged with model options and support RoPE."
+  ([layer weights input cache]
+   (multihead-attention-step layer weights input cache {}))
+  ([layer weights input cache runtime-options]
+   (let [layer-type (model/layer-type layer)
+         [embed heads opts] (model/layer-args layer)
+         shape (:shape input) rank (count shape)
+         [batch sequence] (if (= rank 3) (take 2 shape) [1 (first shape)])]
+     (when-not (and (= layer-type :multihead-attention)
+                    (#{2 3} rank) (= sequence 1) (= embed (last shape)))
+       (throw (ex-info "incremental attention requires one-token rank-2/3 input"
+                       {:layer layer :shape shape})))
+     (let [merged (merge opts runtime-options)
+           old-length (long (or (:length cache) 0))
+           base-offset (long (or (:position-offset merged) 0))
+           rope-options {:theta (or (:rope-theta merged) 10000.0)
+                         :position-offset (+ base-offset old-length)}
+           layout {:rank rank :batch batch :sequence 1
+                   :flat (if (= rank 3) (t/reshape input [batch embed]) input)}
+           restore (fn [array]
+                     (if (= rank 3) (t/reshape array [batch 1 embed]) array))
+           project (fn [wk bk]
+                     (restore (t/add (nm/matmul (:flat layout) (get weights wk))
+                                     (get weights bk))))
+           query0 (project :qw :qb)
+           key0 (project :kw :kb)
+           value (project :vw :vb)
+           query (if (:rope? merged)
+                   (t/rotary-embedding query0 heads rope-options) query0)
+           key (if (:rope? merged)
+                 (t/rotary-embedding key0 heads rope-options) key0)
+           axis (if (= rank 3) 1 0)
+           all-key (if-let [old (:key cache)] (t/cat [old key] axis) key)
+           all-value (if-let [old (:value cache)] (t/cat [old value] axis) value)
+           attended (t/multi-head-attention query all-key all-value heads)
+           attended-flat (if (= rank 3) (t/reshape attended [batch embed]) attended)
+           output (restore (t/add (nm/matmul attended-flat (:ow weights))
+                                  (:ob weights)))]
+       {:output output
+        :cache {:key all-key :value all-value :length (inc old-length)}}))))
+
+(defn release-kv-cache!
+  "Explicitly release the two device arrays in a superseded KV cache."
+  [cache]
+  (doseq [array [(:key cache) (:value cache)] :when array]
+    (arr/release! array))
+  nil)
+
 (defn num-backend
   "An `IBackend` running `forward` through `backend` (a `num.protocol/IBackend`
   — typically `(num.cpu/cpu-backend)` or a synchronous WgslBackend), using
