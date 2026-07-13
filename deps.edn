@@ -9,7 +9,7 @@
         ;; multi-head attention, typed Metal tensors, UNet autograd, and a
         ;; real-Metal async twin of multi-head attention (num.tensor-async).
         io.github.kotoba-lang/num
-        {:git/sha "d68d98a9744a220f9bbb476fb7c2cec6db440637"}}
+        {:git/sha "c7b86eef7f666ba57dbe2580c1bcf50c323f099b"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
@@ -22,6 +22,24 @@
         :main-opts ["-m" "cljs.main"
                     "-co" "{:optimizations :simple :target :nodejs :main torch.deno-autocast-verify :output-to \"target/deno-autocast-verify.cjs\"}"
                     "-c" "torch.deno-autocast-verify"]}
+       :deno-metal-train-verify
+       {:extra-paths ["test"]
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-metal-train-verify :output-to \"target/deno-metal-train-verify.cjs\"}"
+                    "-c" "torch.deno-metal-train-verify"]}
+       :cljs-learned-attention-verify
+       {:extra-paths ["test"]
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.learned-attention-verify :output-to \"target/learned-attention-verify.cjs\"}"
+                    "-c" "torch.learned-attention-verify"]}
+       :deno-metal-attention-verify
+       {:extra-paths ["test"]
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-metal-attention-verify :output-to \"target/deno-metal-attention-verify.cjs\"}"
+                    "-c" "torch.deno-metal-attention-verify"]}
        ;; clj-kondo as a Clojars lib (no Homebrew/system install needed).
        :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
          :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"

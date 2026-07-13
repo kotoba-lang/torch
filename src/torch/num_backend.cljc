@@ -79,6 +79,12 @@
                 :groupnorm (let [[_groups channels] a]
                              {:w (upload (repeat channels 1.0) [channels])
                               :b (upload (repeat channels 0.0) [channels])})
+                :multihead-attention
+                (let [[embed _heads] a
+                      matrix (fn [] (upload (next-vec! (* embed embed)) [embed embed]))
+                      bias (fn [] (upload (next-vec! embed) [embed]))]
+                  {:qw (matrix) :qb (bias) :kw (matrix) :kb (bias)
+                   :vw (matrix) :vb (bias) :ow (matrix) :ob (bias)})
                 nil)))
           lyrs))))
 
@@ -108,6 +114,13 @@
                      (throw (ex-info "torch.num-backend: :attention expects [sequence embedding]"
                                      {:shape (:shape x)})))
                    (t/multi-head-attention x x x num-heads))
+      :multihead-attention
+      (let [[_embed num-heads] largs
+            project (fn [wk bk] (t/add (nm/matmul x (get weights wk))
+                                       (get weights bk)))
+            q (project :qw :qb) k (project :kw :kb) v (project :vw :vb)
+            attended (t/multi-head-attention q k v num-heads)]
+        (t/add (nm/matmul attended (:ow weights)) (:ob weights)))
       :conv2d (let [[_in _out _k stride padding dilation groups] largs
                     weight (:w weights)
                     weight (if (= 2 (count (:shape weight)))
@@ -123,7 +136,8 @@
                                       (or eps 1.0e-5)))
       (throw (ex-info (str "torch.num-backend: layer type not supported: " t')
                       {:layer lyr :supported #{:linear :relu :silu :softmax :conv2d
-                                               :groupnorm :attention}})))))
+                                               :groupnorm :attention
+                                               :multihead-attention}})))))
 
 (defn num-backend
   "An `IBackend` running `forward` through `backend` (a `num.protocol/IBackend`

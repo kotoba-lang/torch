@@ -69,6 +69,21 @@
 
       :else [:ok in])))
 
+(defmethod layer-shape :multihead-attention [_ args in]
+  (let [[embed-dim num-heads] args]
+    (cond
+      (not= 2 (count in))
+      [:error (str "multihead-attention expects [sequence embedding], got " in)]
+      (not (and (pos-int? embed-dim) (pos-int? num-heads)))
+      [:error "multihead-attention expects positive embed-dim and num-heads"]
+      (not= embed-dim (last in))
+      [:error (str "multihead-attention embed-dim " embed-dim
+                   " differs from input " (last in))]
+      (not (zero? (mod embed-dim num-heads)))
+      [:error (str "multihead-attention num-heads " num-heads
+                   " must divide embed-dim " embed-dim)]
+      :else [:ok in])))
+
 ;; --- linear ----------------------------------------------------------------
 
 (defmethod layer-shape :linear [_ args in]
@@ -197,12 +212,14 @@
 (defmethod layer-params :batchnorm [_ args] (* 2 (nth-arg args 0 0)))
 (defmethod layer-params :layernorm [_ args] (* 2 (nth-arg args 0 0)))
 (defmethod layer-params :groupnorm [_ args] (* 2 (nth-arg args 1 0)))
+(defmethod layer-params :multihead-attention [_ args]
+  (let [embed (nth-arg args 0 0)] (* 4 (+ (* embed embed) embed))))
 
 (def built-in-types
   "The set of layer types this namespace understands."
   #{:linear :conv2d :maxpool2d :avgpool2d :embedding :batchnorm :layernorm
     :groupnorm :dropout :flatten :relu :silu :gelu :sigmoid :tanh :softmax
-    :attention :identity})
+    :attention :multihead-attention :identity})
 
 (defn known?
   "True if `t` is a built-in layer type."

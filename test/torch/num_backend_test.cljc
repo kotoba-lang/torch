@@ -133,6 +133,21 @@
     (let [model (m/sequential (m/attention 3))]
       (is (some? (:torch/error (core/summary model [4 4])))))))
 
+(deftest learned-multihead-attention-identity-projections-match-attention
+  (let [model (m/sequential (m/multihead-attention 4 2))
+        identity (arr/from-vec backend
+                               [1 0 0 0, 0 1 0 0, 0 0 1 0, 0 0 0 1] [4 4])
+        zero (arr/zeros backend [4])
+        weights [{:qw identity :qb zero :kw identity :kb zero
+                  :vw identity :vb zero :ow identity :ob zero}]
+        input (arr/from-vec backend
+                            [0.2 -0.1 0.3 0.4, -0.2 0.1 0.5 -0.3] [2 4])
+        learned (core/run (nb/num-backend backend weights) model input)
+        plain (core/run (nb/num-backend backend [nil])
+                        (m/sequential (m/attention 2)) input)]
+    (is (= [2 4] (:shape learned)))
+    (is (contract-approx-vec? (arr/->vec plain) (arr/->vec learned)))))
+
 (deftest conv2d-multichannel-matches-hand-computed
   (testing "2 input channels, 1 output channel — the SAME fixture
             num.tensor-test's conv2d-mc test hand-verifies, run here through

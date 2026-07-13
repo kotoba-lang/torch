@@ -57,6 +57,10 @@
   `torch.shape/layer-shape`, not here — this constructor is pure data)."
   ([] {:attention {}})
   ([num-heads] {:attention [num-heads]}))
+(defn multihead-attention
+  "Learned self-attention with independent Q/K/V and output projections."
+  [embed-dim num-heads]
+  {:multihead-attention [embed-dim num-heads]})
 
 ;; ---------------------------------------------------------------------------
 ;; model container

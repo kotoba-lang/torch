@@ -68,3 +68,34 @@
       (is (< (:loss trained) (:loss first-result)))
       (is (not= (arr/->vec (:w (nth initial 2)))
                 (arr/->vec (:w (nth (:weights trained) 2))))))))
+
+(deftest learned-multihead-attention-trains-all-projections
+  (let [model (m/sequential (m/multihead-attention 4 2))
+        initial (nb/random-weights backend model 29)
+        input (arr/from-vec backend
+                            [0.2 -0.1 0.3 0.4, -0.2 0.1 0.5 -0.3,
+                             0.6 0.2 -0.4 0.1] [3 4])
+        target (arr/from-vec backend
+                             [0.1 0.0 0.2 -0.1, 0.0 0.2 0.1 0.3,
+                              -0.2 0.1 0.0 0.2] [3 4])
+        first-pass (train/loss-and-gradients model initial input target)
+        epsilon 1.0e-5
+        loss-with-q0
+        (fn [delta]
+          (let [q (:qw (first initial)) values (vec (arr/->vec q))
+                q* (arr/from-vec backend (assoc values 0 (+ (first values) delta))
+                                 (:shape q))]
+            (:loss (train/loss-and-gradients
+                    model [(assoc (first initial) :qw q*)] input target))))
+        numeric-q0 (/ (- (loss-with-q0 epsilon) (loss-with-q0 (- epsilon)))
+                      (* 2.0 epsilon))
+        trained (last (take 31 (iterate
+                                (fn [{:keys [weights]}]
+                                  (train/sgd-step model weights input target 0.05))
+                                {:weights initial})))
+        gradient (first (:gradients first-pass))]
+    (is (= #{:qw :qb :kw :kb :vw :vb :ow :ob} (set (keys gradient))))
+    (is (every? some? (vals gradient)))
+    (is (< (Math/abs (- numeric-q0 (first (arr/->vec (:qw gradient))))) 1.0e-5))
+    (is (= [3 4] (:shape (:prediction first-pass))))
+    (is (< (:loss trained) (:loss first-pass)))))

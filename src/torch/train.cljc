@@ -3,15 +3,17 @@
   Supports dense and UNet/transformer reference training on synchronous num
   arrays, returning new immutable weight maps after one SGD step."
   (:require [num.array :as arr]
-            [num.autograd :as ag]
+            [num.autograd :as ag :include-macros true]
             [torch.model :as model]
             [torch.optim :as optim]))
 
 (def supported-layers
-  #{:linear :conv2d :groupnorm :relu :silu :softmax :attention})
+  #{:linear :conv2d :groupnorm :relu :silu :softmax :attention
+    :multihead-attention})
 
 (def parameter-keys
-  {:linear #{:w :b} :conv2d #{:w :b} :groupnorm #{:w :b}})
+  {:linear #{:w :b} :conv2d #{:w :b} :groupnorm #{:w :b}
+   :multihead-attention #{:qw :qb :kw :kb :vw :vb :ow :ob}})
 
 (defn- fail [message data]
   (throw (ex-info (str "torch.train: " message) data)))
@@ -67,7 +69,20 @@
       (track state
              (ag/multi-head-attention* (:value state) (:value state)
                                        (:value state) heads)
-             nil))))
+             nil))
+
+    :multihead-attention
+    (let [[_embed heads] (model/layer-args layer)
+          parameters (into {} (map (fn [[key array]] [key (ag/value array)]) weight))
+          project (fn [weight-key bias-key]
+                    (ag/add-bias*
+                     (ag/matmul* (:value state) (get parameters weight-key))
+                     (get parameters bias-key)))
+          query (project :qw :qb) key (project :kw :kb) value (project :vw :vb)
+          attended (ag/multi-head-attention* query key value heads)
+          output (ag/add-bias* (ag/matmul* attended (:ow parameters))
+                               (:ob parameters))]
+      (track state output parameters))))
 
 (defn loss-and-gradients
   "Run a supported sequential model with MSE and return prediction/gradients.
