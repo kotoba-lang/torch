@@ -38,6 +38,7 @@
 (defn embedding  [num-emb dim]       {:embedding [num-emb dim]})
 (defn batchnorm  [features]          {:batchnorm [features]})
 (defn layernorm  [features]          {:layernorm [features]})
+(defn groupnorm  [num-groups channels] {:groupnorm [num-groups channels]})
 (defn dropout    ([] {:dropout [0.5]}) ([p] {:dropout [p]}))
 (defn flatten    [] {:flatten {}})
 (defn relu       [] {:relu {}})

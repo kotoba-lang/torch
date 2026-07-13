@@ -19,8 +19,11 @@
   over one `[sequence embedding]` input (no batch, mask, or learned Q/K/V
   projections) — `num-heads` (layer arg 0, default 1) selects multi-head via
   `num.tensor/multi-head-attention`, which is EXACTLY `num.tensor/attention`
-  at num-heads=1 (verified in num's own test suite). Every other layer type
-  throws.
+  at num-heads=1 (verified in num's own test suite). `:groupnorm` maps onto
+  `num.tensor/group-norm-nchw` — unlike `:conv2d` this is already a real
+  `[N C H W]` op with no batch restriction or reshape dance needed; `weights`
+  is `nil` (no affine, gamma=1/beta=0 implicit) or `{:w gamma :b beta}`
+  (both `[channels]`). Every other layer type throws.
 
   WEIGHTS: torch-clj's model EDN is shape-and-parameter-COUNT only — it
   never carries actual weight values (by design, see torch.model). This
@@ -62,9 +65,10 @@
   parameterless layers) on `backend`, seeded from `seed` for reproducibility.
   `:linear [in out]` -> `{:w [in out] :b [out]}`; `:conv2d [in-ch out-ch k]`
   -> `{:w [out-ch in-ch k k] :b nil}` (rank-4 — any channel count, dispatched
-  by `layer-forward` to `num.tensor/conv2d-mc`); `:attention` has no weights
-  (parameter-free) regardless of num-heads, so it's `nil` here like any other
-  parameterless layer."
+  by `layer-forward` to `num.tensor/conv2d-mc`); `:groupnorm [num-groups
+  channels]` -> `{:w [channels] :b [channels]}` (affine gamma/beta);
+  `:attention` has no weights (parameter-free) regardless of num-heads, so
+  it's `nil` here like any other parameterless layer."
   [backend model* seed]
   (let [lyrs (model/layers model*)
         seed* (atom (long seed))
@@ -79,6 +83,9 @@
                           {:w (arr/from-vec backend (next-vec! (* out-ch in-ch k k))
                                             [out-ch in-ch k k])
                            :b nil})
+                :groupnorm (let [[_num-groups channels] a]
+                             {:w (arr/from-vec backend (next-vec! channels) [channels])
+                              :b (arr/from-vec backend (next-vec! channels) [channels])})
                 nil)))
           lyrs)))
 
@@ -121,9 +128,15 @@
                       (t/reshape out [1 cout oh ow]))
                   (throw (ex-info "torch.num-backend: :conv2d weight must be rank-2 [kh kw] or rank-4 [C_out C_in kh kw]"
                                   {:kernel-shape kshape}))))
+      ;; num.tensor/group-norm-nchw is a real [N C H W] op (unlike the old
+      ;; single-channel conv2d) — no batch=1 restriction or reshape needed;
+      ;; x is passed straight through. weights is nil (no affine, gamma=1/
+      ;; beta=0 implicitly) or {:w gamma :b beta}, both [C]-shaped.
+      :groupnorm (let [num-groups (first largs)]
+                   (t/group-norm-nchw x num-groups (:w weights) (:b weights) 1.0e-5))
       (throw (ex-info (str "torch.num-backend: layer type not supported: " t')
                       {:layer lyr :supported #{:linear :relu :silu :softmax
-                                               :conv2d :attention}})))))
+                                               :conv2d :attention :groupnorm}})))))
 
 (defn num-backend
   "An `IBackend` running `forward` through `backend` (a `num.protocol/IBackend`
