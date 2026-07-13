@@ -65,8 +65,25 @@ Built-in layer types: `:linear :conv2d :maxpool2d :avgpool2d :embedding
 `(m/attention num-heads)` splits `embedding` evenly across heads (an error if
 it doesn't divide). It has no batch axis, mask, or learned QKV projections;
 `(m/multihead-attention embed-dim num-heads)` adds independent learned Q/K/V
-and output weight/bias projections in the same data-first model form. Batched
-and masked attention remain future work. `:conv2d` executes full NCHW batches and
+and output weight/bias projections in the same data-first model form. Learned
+attention accepts `[sequence embedding]` or batch-first
+`[batch sequence embedding]`; `(m/multihead-attention d h {:causal? true})`
+enables causal masking. Training/VJP calls accept one runtime options map per layer,
+including a `[batch sequence]` `:key-padding-mask` whose non-zero keys are ignored:
+
+```clojure
+(train/loss-and-gradients model weights input target
+  {:layer-options [{:context encoder-hidden-states
+                    :key-padding-mask padding-mask}]})
+```
+
+When `:context` is present, Q is projected from the current model value while K/V
+are projected from the separate context sequence, enabling UNet-style cross-attention
+with different query/key lengths. VJP and MSE results expose the context gradient at
+`[:layer-input-gradients layer-index :context]`. The four-argument `torch.core/run`
+uses the same options through the optional runtime-backend port, so inference and
+training share the exact context/mask contract.
+`:conv2d` executes full NCHW batches and
 supports scalar/pair kernels, stride, padding, dilation, groups, depthwise
 convolution, and bias. `torch.num-backend/random-weights` produces a
 `[out-ch in-ch/groups kh kw]` kernel; hand-supplied rank-2 `[kh kw]` kernels
@@ -216,6 +233,25 @@ trainer, not yet a replacement for PyTorch's broader optimizer catalog, GPU auto
 batched/masked attention, checkpoint loading, or mixed
 precision coverage for every layer.
 
+For an explicit vector-Jacobian product, `prediction-and-gradients` accepts an
+upstream tensor with the prediction's shape. This is equivalent to PyTorch's
+`prediction.backward(gradient)` and avoids imposing or synchronously reading a
+scalar loss:
+
+```clojure
+(train/prediction-and-gradients model weights input upstream-gradient)
+;; => {:prediction ... :input-gradient ... :gradients [...]}
+```
+
+On an f32 WebGPU backend, learned attention uses device-native projection GEMMs,
+matrix transposes, bias row reductions, fused attention forward/backward, and
+gradient accumulation. MSE forward and its VJP are also device-native; on an async
+backend `loss-and-gradients` returns `:loss` as a Promise for the final scalar
+readback while prediction and gradients are immediately usable GPU arrays. The
+immutable `sgd-step` update is composed from device elementwise multiply/subtract,
+so parameter and gradient buffers are never downloaded. AdamW and mixed-precision
+optimizer state updates remain host-side reference paths.
+
 Learned MultiheadAttention is verified on both JVM and compiled ClojureScript:
 all eight projection tensors receive gradients, a Q-weight gradient matches a
 central finite difference, identity projections match parameter-free attention,
@@ -226,15 +262,44 @@ clojure -M:cljs-learned-attention-verify
 node target/learned-attention-verify.cjs
 ```
 
-Its complete forward path is also device-native on WebGPU/Metal: four GEMMs,
-last-axis bias broadcasts, and fused multi-head attention stay in GPU buffers
-until final verification readback. The Apple Metal check compares deterministic
-learned projections against the CPU backend:
+Its forward and explicit-VJP paths are device-native on WebGPU/Metal: projection
+GEMMs, last-axis bias broadcasts, fused multi-head attention, transposes, bias
+reductions, MSE loss/VJP, and all eight parameter gradients stay in GPU buffers
+until final verification readback. The Apple M4 check covers explicit VJP plus
+ordinary MSE training, comparing prediction, input gradient, loss, and every
+projection weight/bias gradient plus the separate context gradient against the CPU
+backend. The fixture uses query length 3 and context length 2 with different padding
+masks per batch. It then performs eight
+public `sgd-step` iterations, checks the complete loss trajectory and all final
+weights against CPU, and confirms loss decreases from `0.09691` to `0.06289`
+while the independent `torch.core/run` inference result also matches (32/32 checks):
 
 ```sh
 clojure -M:deno-metal-attention-verify
 deno run --allow-all target/deno-metal-attention-verify.cjs
 ```
+
+## State dicts and safetensors
+
+`torch.state-dict/manifest` assigns stable PyTorch-style names such as
+`layers.0.weight` and `layers.1.q_proj.weight`. Dense internal matrices use
+`[in,out]` for `x @ W`; the checkpoint boundary automatically transposes them to
+PyTorch `[out,in]`. Conv and normalization tensors already use standard layouts.
+
+```clojure
+(require '[torch.safetensors :as safe]
+         '[torch.state-dict :as state])
+
+(def external (state/state-dict model weights))
+(def restored (state/load-state-dict model external))
+(def loaded (safe/load-weights "model.safetensors" backend model))
+```
+
+The JVM reader validates the header length, every tensor byte window, dtype,
+declared shape, missing names, and unexpected names before loading. Tensor payloads
+remain on disk until requested, so a checkpoint is not materialized wholesale.
+F32, F16, and BF16 checkpoints are decoded and uploaded as f32 by default for the
+current attention kernels; `:dtype` can request another num storage dtype.
 
 ## Test
 

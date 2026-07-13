@@ -26,6 +26,11 @@
   (forward [this model input]
     "Run a real forward pass. `input` is host tensor data; returns host data."))
 
+(defprotocol IRuntimeBackend
+  "Optional extension for forward calls carrying per-layer runtime tensors."
+  (forward-with-options [this model input options]
+    "Run forward with aligned `:layer-options`, such as attention context/masks."))
+
 (def default-ports
   "Built-in layer vocabulary only (delegates to `torch.shape`); no backend."
   (reify ILayer

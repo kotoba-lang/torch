@@ -7,9 +7,10 @@
   SCOPE (deliberately not full PyTorch-layer coverage): `:linear`, `:relu`,
   `:silu`, `:softmax`, affine `:groupnorm`, and full NCHW `:conv2d` execute
   through verified num ops. Convolution supports batches, groups/depthwise,
-  bias, stride, padding, and dilation. `:attention` is parameter-free self-attention
-  over one `[sequence embedding]` input (no batch, mask, or learned Q/K/V
-  projections) — `num-heads` (layer arg 0, default 1) selects multi-head via
+  bias, stride, padding, and dilation. Learned `:multihead-attention` supports
+  batch-first inputs plus causal, key-padding, and separate context sequences
+  through runtime layer options. Parameter-free `:attention` remains the original
+  rank-2 form. `num-heads` selects multi-head via
   `num.tensor/multi-head-attention`, which is EXACTLY `num.tensor/attention`
   at num-heads=1 (verified in num's own test suite). Every other layer type
   throws.
@@ -21,15 +22,12 @@
   layers), not something it invents or loads. `random-weights` below is a
   small, deterministic (not cryptographic, not torch/numpy-matching)
   generator for exercising a model end-to-end without hand-writing every
-  number — explicitly NOT a claim of matching any real trained checkpoint.
+  number. Real checkpoint weights are loaded through `torch.safetensors` and
+  `torch.state-dict`.
 
   BACKEND CHOICE: this wraps whatever `num.protocol/IBackend` the caller
-  passes to `num-backend` (CPU oracle, or WgslBackend/WgslBackendAsync for
-  Metal) — EXCEPT `num.tensor`'s ops (which `:softmax`/`:conv2d` need) are
-  synchronous-host-round-trip only (see num.tensor's own docstring on the
-  Deno-async gap found in this same pass), so in practice only the
-  synchronous backends (num.cpu, num.wgsl-backend) work through this
-  namespace today; a `num.deno-gpu` backend would throw."
+  passes to `num-backend`. CPU is the reference oracle; the device-native
+  learned-attention path is verified through Deno WebGPU on Apple Metal."
   (:require [num.array :as arr]
             [num.core :as nm]
             [num.tensor :as t]
@@ -93,7 +91,7 @@
 (defn- layer-forward
   "Apply one layer to `x` (an NDArray, batch-first), given its weights entry
   (or nil). Throws on any layer type not in this backend's documented scope."
-  [lyr weights x]
+  [lyr weights x runtime-options]
   (let [t' (model/layer-type lyr) largs (model/layer-args lyr)]
     (case t'
       :linear (if (= :f32 (or (:dtype x) :f32))
@@ -115,12 +113,39 @@
                                      {:shape (:shape x)})))
                    (t/multi-head-attention x x x num-heads))
       :multihead-attention
-      (let [[_embed num-heads] largs
-            project (fn [wk bk] (t/add (nm/matmul x (get weights wk))
-                                       (get weights bk)))
-            q (project :qw :qb) k (project :kw :kb) v (project :vw :vb)
-            attended (t/multi-head-attention q k v num-heads)]
-        (t/add (nm/matmul attended (:ow weights)) (:ob weights)))
+      (let [[embed num-heads opts] largs
+            context (or (:context runtime-options) x)
+            attention-options (merge opts (dissoc runtime-options :context))
+            layout (fn [source]
+                     (let [shape (:shape source) rank (count shape)
+                           [batch sequence] (if (= rank 3) (take 2 shape)
+                                                [1 (first shape)])]
+                       {:rank rank :batch batch :sequence sequence
+                        :flat (if (= rank 3)
+                                (t/reshape source [(* batch sequence) embed])
+                                source)}))
+            query-layout (layout x) context-layout (layout context)
+            restore (fn [array {:keys [rank batch sequence]}]
+                      (if (= rank 3)
+                        (t/reshape array [batch sequence embed]) array))
+            project (fn [source-layout wk bk]
+                      (restore
+                       (t/add (nm/matmul (:flat source-layout) (get weights wk))
+                              (get weights bk))
+                       source-layout))
+            q (project query-layout :qw :qb)
+            k (project context-layout :kw :kb)
+            v (project context-layout :vw :vb)
+            attended (if (seq attention-options)
+                       (t/multi-head-attention q k v num-heads attention-options)
+                       (t/multi-head-attention q k v num-heads))
+            attended-flat (if (= 3 (:rank query-layout))
+                             (t/reshape attended
+                                        [(* (:batch query-layout)
+                                            (:sequence query-layout)) embed])
+                             attended)]
+        (restore (t/add (nm/matmul attended-flat (:ow weights)) (:ob weights))
+                 query-layout))
       :conv2d (let [[_in _out _k stride padding dilation groups] largs
                     weight (:w weights)
                     weight (if (= 2 (count (:shape weight)))
@@ -154,10 +179,11 @@
                        (when weight
                          (into {} (map (fn [[key value]]
                                          [key (arr/cast value autocast-dtype)])) weight)))
-         autocast-weights (if autocast-dtype (mapv cast-weight weights) weights)]
-     (reify ports/IBackend
-       (forward [_ model* input]
+         autocast-weights (if autocast-dtype (mapv cast-weight weights) weights)
+         run* (fn [model* input options]
          (let [lyrs (model/layers model*)
+               layer-options (or (:layer-options options)
+                                 (repeat (count lyrs) nil))
                unsupported (when autocast-dtype
                              (seq (remove #{:linear :relu :silu :conv2d :groupnorm}
                                           (map model/layer-type lyrs))))]
@@ -165,9 +191,20 @@
              (throw (ex-info
                      "torch.num-backend: autocast supports linear/relu/silu/conv2d/groupnorm"
                      {:unsupported (vec unsupported) :dtype autocast-dtype})))
+           (when-not (= (count lyrs) (count layer-options))
+             (throw (ex-info "torch.num-backend: layer-options count mismatch"
+                             {:layers (count lyrs)
+                              :layer-options (count layer-options)})))
            (let [x0 (if (= backend (:backend input)) input
                       (arr/from-vec backend (arr/->vec input) (:shape input)))
                  x0 (if autocast-dtype (arr/cast x0 autocast-dtype) x0)]
-             (reduce (fn [x [lyr w]] (layer-forward lyr w x))
+             (reduce (fn [x [lyr w runtime-options]]
+                       (layer-forward lyr w x runtime-options))
                      x0
-                     (map vector lyrs autocast-weights)))))))))
+                     (map vector lyrs autocast-weights layer-options)))))]
+     (reify
+       ports/IBackend
+       (forward [_ model* input] (run* model* input {}))
+       ports/IRuntimeBackend
+       (forward-with-options [_ model* input options]
+         (run* model* input options))))))

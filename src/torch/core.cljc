@@ -79,9 +79,17 @@
 
 (defn run
   "Execute a real forward pass through a host `IBackend`. Requires `ports*` to
-  satisfy `IBackend`; otherwise throws (pure shape engines do not run tensors)."
-  [ports* model* input]
-  (if (satisfies? ports/IBackend ports*)
-    (ports/forward ports* (model/normalize model*) input)
-    (throw (ex-info "no IBackend bound — torch-clj is shape-only here"
-                    {:torch/model (model/normalize model*)}))))
+  satisfy `IBackend`; otherwise throws (pure shape engines do not run tensors).
+  The four-argument form requires `IRuntimeBackend` and carries aligned runtime
+  inputs such as cross-attention context and key-padding masks."
+  ([ports* model* input]
+   (if (satisfies? ports/IBackend ports*)
+     (ports/forward ports* (model/normalize model*) input)
+     (throw (ex-info "no IBackend bound — torch-clj is shape-only here"
+                     {:torch/model (model/normalize model*)}))))
+  ([ports* model* input options]
+   (if (satisfies? ports/IRuntimeBackend ports*)
+     (ports/forward-with-options ports* (model/normalize model*) input options)
+     (throw (ex-info "backend does not support runtime layer options"
+                     {:torch/model (model/normalize model*)
+                      :options options})))))

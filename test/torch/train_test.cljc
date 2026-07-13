@@ -1,6 +1,7 @@
 (ns torch.train-test
   (:require [clojure.test :refer [deftest is testing]]
             [num.array :as arr] [num.cpu :as cpu]
+            [torch.core :as core]
             [torch.model :as m] [torch.num-backend :as nb]
             [torch.train :as train]))
 
@@ -26,7 +27,12 @@
     (is (thrown? #?(:clj Exception :cljs js/Error)
                  (train/loss-and-gradients (m/sequential (m/gelu)) [nil] x x)))
     (is (thrown? #?(:clj Exception :cljs js/Error)
-                 (train/loss-and-gradients (m/sequential (m/linear 2 2)) [] x x)))))
+                 (train/loss-and-gradients (m/sequential (m/linear 2 2)) [] x x)))
+    (let [model (m/sequential (m/linear 2 2))
+          weights (nb/random-weights backend model 3)]
+      (is (thrown? #?(:clj Exception :cljs js/Error)
+                   (train/prediction-and-gradients
+                    model weights x x {:layer-options []}))))))
 
 (deftest nchw-conv-groupnorm-silu-model-trains
   (testing "UNet layers update convolution and affine GroupNorm parameters"
@@ -99,3 +105,60 @@
     (is (< (Math/abs (- numeric-q0 (first (arr/->vec (:qw gradient))))) 1.0e-5))
     (is (= [3 4] (:shape (:prediction first-pass))))
     (is (< (:loss trained) (:loss first-pass)))))
+
+(deftest explicit-vjp-matches-mse-attention-gradients
+  (let [model (m/sequential (m/multihead-attention 4 2))
+        weights (nb/random-weights backend model 31)
+        input (arr/from-vec backend
+                            [0.2 -0.1 0.3 0.4, -0.2 0.1 0.5 -0.3,
+                             0.6 0.2 -0.4 0.1] [3 4])
+        target (arr/from-vec backend
+                             [0.1 0.0 0.2 -0.1, 0.0 0.2 0.1 0.3,
+                              -0.2 0.1 0.0 0.2] [3 4])
+        mse (train/loss-and-gradients model weights input target)
+        prediction-values (arr/->vec (:prediction mse))
+        target-values (arr/->vec target)
+        n (count prediction-values)
+        upstream (arr/from-vec backend
+                               (mapv #(/ (* 2.0 (- %1 %2)) n)
+                                     prediction-values target-values)
+                               [3 4])
+        vjp (train/prediction-and-gradients model weights input upstream)
+        mse-gradient (first (:gradients mse))
+        vjp-gradient (first (:gradients vjp))]
+    (is (= (:shape (:prediction mse)) (:shape (:prediction vjp))))
+    (is (= (:shape input) (:shape (:input-gradient vjp))))
+    (doseq [parameter [:qw :qb :kw :kb :vw :vb :ow :ob]]
+      (is (every? #(< (Math/abs %) 1.0e-6)
+                  (map - (arr/->vec (get mse-gradient parameter))
+                       (arr/->vec (get vjp-gradient parameter))))
+          (str parameter " VJP differs from MSE backward")))
+    (is (thrown? #?(:clj Exception :cljs js/Error)
+                 (train/prediction-and-gradients
+                  model weights input (arr/from-vec backend [1.0] [1]))))))
+
+(deftest runtime-context-produces-cross-attention-gradient
+  (let [model (m/sequential (m/multihead-attention 4 2))
+        weights (nb/random-weights backend model 37)
+        input (arr/from-vec backend
+                            [0.2 -0.1 0.3 0.4, -0.2 0.1 0.5 -0.3] [2 4])
+        context (arr/from-vec backend
+                              [0.1 0.3 -0.2 0.4, 0.5 -0.1 0.2 0.0,
+                               -0.3 0.2 0.1 0.6] [3 4])
+        upstream (arr/from-vec backend
+                               [0.3 -0.2 0.5 0.1, -0.4 0.6 -0.1 0.2] [2 4])
+        result (train/prediction-and-gradients
+                model weights input upstream
+                {:layer-options [{:context context}]})
+        inference (core/run (nb/num-backend backend weights) model input
+                            {:layer-options [{:context context}]})
+        context-gradient (:context (first (:layer-input-gradients result)))]
+    (is (= [2 4] (:shape (:prediction result))))
+    (is (= [2 4] (:shape (:input-gradient result))))
+    (is (= [3 4] (:shape context-gradient)))
+    (is (every? #(< (Math/abs %) 1.0e-8)
+                (map - (arr/->vec inference)
+                     (arr/->vec (:prediction result)))))
+    (is (some #(not (zero? %)) (arr/->vec context-gradient)))
+    (is (= #{:qw :qb :kw :kb :vw :vb :ow :ob}
+           (set (keys (first (:gradients result))))))))
