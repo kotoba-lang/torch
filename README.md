@@ -206,7 +206,10 @@ For stateful optimization, `torch.optim/adamw-step` consumes the aligned
 weights and gradients returned by `torch.train/loss-and-gradients`. It returns
 both new weights and immutable first/second-moment state; pass that state into
 the next step. Learning rate, betas, epsilon, and decoupled weight decay are
-configurable, with AdamW defaults when omitted.
+configurable, with AdamW defaults when omitted. On an f32 `ITensorBackend`, each
+parameter update is a fused device dispatch that produces new weight, first-moment,
+and variance buffers; first-step zero slots are allocated on-device. No parameter,
+gradient, or optimizer slot is downloaded.
 
 `torch.optim/grad-scaler` and `scaled-adamw-step` provide dynamic loss scaling:
 call `loss-and-gradients` with the scaler's `:scale`, then pass the scaled
@@ -281,8 +284,11 @@ gradient accumulation. MSE forward and its VJP are also device-native; on an asy
 backend `loss-and-gradients` returns `:loss` as a Promise for the final scalar
 readback while prediction and gradients are immediately usable GPU arrays. The
 immutable `sgd-step` update is composed from device elementwise multiply/subtract,
-so parameter and gradient buffers are never downloaded. AdamW and mixed-precision
-optimizer state updates remain host-side reference paths.
+so parameter and gradient buffers are never downloaded. AdamW now follows the same
+GPU-resident path: four learned-attention steps on Apple M4 verify every final
+weight, first moment, variance, and the decreasing loss trajectory against CPU.
+Mixed-precision gradient unscaling/overflow detection remains a host-side reference
+path.
 
 Learned MultiheadAttention is verified on both JVM and compiled ClojureScript:
 all eight projection tensors receive gradients, a Q-weight gradient matches a

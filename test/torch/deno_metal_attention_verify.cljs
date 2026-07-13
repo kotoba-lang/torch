@@ -6,6 +6,7 @@
             [torch.core :as core]
             [torch.model :as model]
             [torch.num-backend :as nb]
+            [torch.optim :as optim]
             [torch.train :as train]))
 
 (def input-values
@@ -74,6 +75,36 @@
                                      (execution-options backend))]
           (recur (inc step) (:weights result) (conj losses (:loss result))))))))
 
+(def adamw-options
+  {:learning-rate 0.01 :beta1 0.9 :beta2 0.999
+   :eps 1.0e-8 :weight-decay 0.001})
+
+(defn- run-adamw-training [backend model* steps]
+  (let [input (arr/from-vec backend input-values input-shape)
+        target (arr/from-vec backend target-values input-shape)]
+    (loop [step 0 weights (nb/random-weights backend model* 29)
+           state nil losses []]
+      (if (= step steps)
+        {:weights weights :state state :losses losses}
+        (let [{:keys [loss gradients]}
+              (train/loss-and-gradients model* weights input target
+                                        (execution-options backend))
+              update (optim/adamw-step weights gradients state adamw-options)]
+          (recur (inc step) (:weights update) (:state update)
+                 (conj losses loss)))))))
+
+(defn- adamw-arrays [training]
+  (let [weights (first (:weights training))
+        slots (first (get-in training [:state :slots]))]
+    (into {}
+          (mapcat (fn [key]
+                    [[(keyword (str "adamw-weight-" (name key))) (get weights key)]
+                     [(keyword (str "adamw-moment-" (name key)))
+                      (get-in slots [key :moment])]
+                     [(keyword (str "adamw-variance-" (name key)))
+                      (get-in slots [key :variance])]])
+                  parameter-names))))
+
 (defn- flatten-result [result]
   (merge {:prediction (:prediction result)
           :input-gradient (:input-gradient result)
@@ -98,6 +129,10 @@
                                         (run-inference cpu-backend model*)))
         cpu-mse (run-mse cpu-backend model*)
         cpu-training (run-training cpu-backend model* 8)
+        cpu-adamw (run-adamw-training cpu-backend model* 4)
+        expected-adamw (into {} (map (fn [[label array]]
+                                       [label (arr/->vec array)]))
+                             (adamw-arrays cpu-adamw))
         expected-trained
         (prefix-keys "trained-"
                      (into {}
@@ -119,6 +154,7 @@
                                    :inference (run-inference backend model*))
                  actual-mse-pass (run-mse backend model*)
                  actual-training (run-training backend model* 8)
+                 actual-adamw (run-adamw-training backend model* 4)
                  actual-mse
                  (prefix-keys "mse-"
                               (into {:prediction (:prediction actual-mse-pass)
@@ -132,9 +168,12 @@
                    (.then
                     (arr/->vec array)
                     (fn [values]
-                      (when-not (approx-vec? (get expected label) values 2.0e-4)
+                      (let [tolerance (if (.startsWith (name label) "adamw-weight-")
+                                        1.0e-3 2.0e-4)]
+                        (when-not (approx-vec? (get expected label) values tolerance)
                         (throw (js/Error.
-                                (str "Metal " (name label) " diverged from CPU"))))
+                                (str "Metal " (name label) " diverged from CPU: "
+                                     (get expected label) " vs " values)))))
                       (swap! passed inc)
                       (println "✓" (name label)))))
                  array-checks
@@ -147,7 +186,10 @@
                          (map (fn [[label array]]
                                 (check-array expected-trained label array))
                               (prefix-keys "trained-"
-                                           (first (:weights actual-training)))))
+                                           (first (:weights actual-training))))
+                         (map (fn [[label array]]
+                                (check-array expected-adamw label array))
+                              (adamw-arrays actual-adamw)))
                  loss-check
                  (.then (->promise (:loss actual-mse-pass))
                         (fn [loss]
@@ -165,15 +207,25 @@
                                      (< (last actual-losses) (first actual-losses)))
                         (throw (js/Error. "Metal SGD loss trajectory diverged")))
                       (swap! passed inc)
-                      (println "✓ trained-losses" actual-losses))))]
+                      (println "✓ trained-losses" actual-losses))))
+                 adamw-loss-check
+                 (.then
+                  (js/Promise.all (into-array (map ->promise (:losses actual-adamw))))
+                  (fn [loss-array]
+                    (let [actual-losses (vec (js/Array.from loss-array))]
+                      (when-not (and (approx-vec? (:losses cpu-adamw)
+                                                  actual-losses 2.0e-4)
+                                     (< (last actual-losses) (first actual-losses)))
+                        (throw (js/Error. "Metal AdamW loss trajectory diverged")))
+                      (swap! passed inc)
+                      (println "✓ adamw-losses" actual-losses))))]
              (println "adapter:" (gpu/adapter-description device))
              (-> (js/Promise.all
                   (into-array (conj (vec array-checks)
-                                    loss-check training-loss-check)))
+                                    loss-check training-loss-check adamw-loss-check)))
                  (.then (fn [_]
                           (println (str "Metal learned MultiheadAttention training: "
-                                        @passed "/" (+ 8 (* 3 (count parameter-names)))
-                                        " passed"))))))))
+                                        @passed " passed"))))))))
         (.catch (fn [error]
                   (js/console.error (or (.-stack error) error))
                   (.exit js/Deno 1))))))
