@@ -22,6 +22,7 @@
     (is (= {:silu {}} (m/silu)))
     (is (= {:groupnorm [4 32]} (m/groupnorm 4 32)))
     (is (= {:attention {}} (m/attention)))
+    (is (= {:multihead-attention [64 8]} (m/multihead-attention 64 8)))
     (is (= {:conv2d [3 16 3 2 1]} (m/conv2d 3 16 3 2 1))))
   (testing "layer-type / layer-args read a literal; model? distinguishes modules"
     (is (= :linear (m/layer-type {:linear [10 20]})))
@@ -59,6 +60,14 @@
 (deftest shape-attention
   (is (= [:ok [8 64]] (shape/layer-shape :attention {} [8 64])))
   (is (= :error (first (shape/layer-shape :attention {} [2 8 64])))))
+
+(deftest shape-learned-multihead-attention
+  (is (= [:ok [8 64]]
+         (shape/layer-shape :multihead-attention [64 8] [8 64])))
+  (is (= :error (first (shape/layer-shape
+                        :multihead-attention [64 7] [8 64]))))
+  (is (= (* 4 (+ (* 64 64) 64))
+         (shape/layer-params :multihead-attention [64 8]))))
 
 (deftest shape-groupnorm
   (is (= [:ok [32 16 16]]

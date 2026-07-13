@@ -58,13 +58,15 @@ bare vector, read as an implicit sequential). Builders are threadable data:
 
 Built-in layer types: `:linear :conv2d :maxpool2d :avgpool2d :embedding
 :batchnorm :layernorm :groupnorm :dropout :flatten :relu :silu :gelu
-:sigmoid :tanh :softmax :attention`.
+:sigmoid :tanh :softmax :attention :multihead-attention`.
 
 `:attention` means parameter-free self-attention over a single
 `[sequence embedding]` tensor — `(m/attention)` is single-head,
 `(m/attention num-heads)` splits `embedding` evenly across heads (an error if
 it doesn't divide). It has no batch axis, mask, or learned QKV projections;
-those remain explicit future work. `:conv2d` executes full NCHW batches and
+`(m/multihead-attention embed-dim num-heads)` adds independent learned Q/K/V
+and output weight/bias projections in the same data-first model form. Batched
+and masked attention remain future work. `:conv2d` executes full NCHW batches and
 supports scalar/pair kernels, stride, padding, dilation, groups, depthwise
 convolution, and bias. `torch.num-backend/random-weights` produces a
 `[out-ch in-ch/groups kh kw]` kernel; hand-supplied rank-2 `[kh kw]` kernels
@@ -205,14 +207,24 @@ tested. Backward is still a synchronous host reference implementation, so this
 is real mixed-precision numerical behavior but not GPU-resident autograd.
 
 The reference path supports flat sequential models composed from
-`:linear/:conv2d/:groupnorm/:relu/:silu/:softmax/:attention`, with MSE and
+`:linear/:conv2d/:groupnorm/:relu/:silu/:softmax/:attention/:multihead-attention`, with MSE and
 positive-rate SGD plus immutable AdamW. NCHW grouped convolution, affine GroupNorm, SiLU, and
 multi-head self-attention all have real reverse-mode gradients; tests verify
 both finite-difference agreement in `num` and decreasing loss through the
 public torch model/weight representation. It remains a synchronous reference
 trainer, not yet a replacement for PyTorch's broader optimizer catalog, GPU autograd,
-batched/masked learned-projection attention, checkpoint loading, or mixed
+batched/masked attention, checkpoint loading, or mixed
 precision coverage for every layer.
+
+Learned MultiheadAttention is verified on both JVM and compiled ClojureScript:
+all eight projection tensors receive gradients, a Q-weight gradient matches a
+central finite difference, identity projections match parameter-free attention,
+and SGD lowers the deterministic fixture loss. Run the portable verifier with:
+
+```sh
+clojure -M:cljs-learned-attention-verify
+node target/learned-attention-verify.cjs
+```
 
 ## Test
 

@@ -27,6 +27,12 @@
         :main-opts ["-m" "cljs.main"
                     "-co" "{:optimizations :simple :target :nodejs :main torch.deno-metal-train-verify :output-to \"target/deno-metal-train-verify.cjs\"}"
                     "-c" "torch.deno-metal-train-verify"]}
+       :cljs-learned-attention-verify
+       {:extra-paths ["test"]
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.learned-attention-verify :output-to \"target/learned-attention-verify.cjs\"}"
+                    "-c" "torch.learned-attention-verify"]}
        ;; clj-kondo as a Clojars lib (no Homebrew/system install needed).
        :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
          :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"
