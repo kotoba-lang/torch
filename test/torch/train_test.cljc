@@ -26,7 +26,12 @@
     (is (thrown? #?(:clj Exception :cljs js/Error)
                  (train/loss-and-gradients (m/sequential (m/gelu)) [nil] x x)))
     (is (thrown? #?(:clj Exception :cljs js/Error)
-                 (train/loss-and-gradients (m/sequential (m/linear 2 2)) [] x x)))))
+                 (train/loss-and-gradients (m/sequential (m/linear 2 2)) [] x x)))
+    (let [model (m/sequential (m/linear 2 2))
+          weights (nb/random-weights backend model 3)]
+      (is (thrown? #?(:clj Exception :cljs js/Error)
+                   (train/prediction-and-gradients
+                    model weights x x {:layer-options []}))))))
 
 (deftest nchw-conv-groupnorm-silu-model-trains
   (testing "UNet layers update convolution and affine GroupNorm parameters"

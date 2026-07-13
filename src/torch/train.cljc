@@ -39,7 +39,7 @@
 (defn- track [state value parameters]
   (-> state (assoc :value value) (update :parameters conj parameters)))
 
-(defn- forward-layer [state [layer weight]]
+(defn- forward-layer [state [layer weight runtime-options]]
   (case (model/layer-type layer)
     :linear
     (let [w (ag/value (:w weight)) b (ag/value (:b weight))]
@@ -74,6 +74,7 @@
 
     :multihead-attention
     (let [[embed heads opts] (model/layer-args layer)
+          attention-options (merge opts runtime-options)
           input-value (:value state)
           input-shape (:shape (:data input-value))
           rank (count input-shape)
@@ -92,8 +93,9 @@
                       (ag/matmul* flat-input (get parameters weight-key))
                       (get parameters bias-key))))
           query (project :qw :qb) key (project :kw :kb) value (project :vw :vb)
-          attended (if (seq opts)
-                     (ag/multi-head-attention* query key value heads opts)
+          attended (if (seq attention-options)
+                     (ag/multi-head-attention* query key value heads
+                                               attention-options)
                      (ag/multi-head-attention* query key value heads))
           attended-flat (if (= rank 3)
                           (ag/reshape* attended [(* batch sequence) embed])
@@ -103,11 +105,11 @@
                                 (:ob parameters)))]
       (track state output parameters))))
 
-(defn- forward-graph [layers weights input]
+(defn- forward-graph [layers weights input layer-options]
   (let [input-value (ag/value input)
         state (reduce forward-layer
                       {:value input-value :parameters []}
-                      (map vector layers weights))]
+                      (map vector layers weights layer-options))]
     {:input input-value
      :prediction (:value state)
      :parameters (:parameters state)}))
@@ -134,15 +136,23 @@
   not impose a loss function or synchronously read a scalar, so async GPU
   backends can keep forward activations and the complete backward pass on the
   device. Returns prediction, input gradient, and one parameter-gradient entry
-  per normalized layer."
-  [model* weights input upstream-gradient]
-  (let [layers (model/layers model*)]
+  per normalized layer. Optional `:layer-options` is aligned with normalized
+  layers and carries runtime inputs such as attention key-padding masks."
+  ([model* weights input upstream-gradient]
+   (prediction-and-gradients model* weights input upstream-gradient {}))
+  ([model* weights input upstream-gradient {:keys [layer-options]}]
+  (let [layers (model/layers model*)
+        layer-options (or layer-options (repeat (count layers) nil))]
     (validate-weights! layers weights)
+    (when-not (= (count layers) (count layer-options))
+      (fail "layer-options must contain one entry per normalized layer"
+            {:layers (count layers) :layer-options (count layer-options)}))
     (when-not (= (:backend input) (:backend upstream-gradient))
       (fail "upstream gradient must use the input backend"
             {:input-backend (:backend input)
              :gradient-backend (:backend upstream-gradient)}))
-    (let [[graph tape] (ag/with-tape (forward-graph layers weights input))]
+    (let [[graph tape]
+          (ag/with-tape (forward-graph layers weights input layer-options))]
       (when-not (= (:shape (:data (:prediction graph)))
                    (:shape upstream-gradient))
         (fail "upstream gradient shape must match prediction"
@@ -151,16 +161,18 @@
       (ag/backward! (:prediction graph) upstream-gradient tape)
       {:prediction (:data (:prediction graph))
        :input-gradient @(:grad (:input graph))
-       :gradients (parameter-gradients (:parameters graph))})))
+       :gradients (parameter-gradients (:parameters graph))}))))
 
 (defn loss-and-gradients
   "Run a supported sequential model with MSE and return prediction/gradients.
 
   Optional `:loss-scale` multiplies the backward seed while keeping the
-  reported loss unchanged. This is the reference seam used by GradScaler."
+  reported loss unchanged. `:layer-options` carries aligned runtime layer
+  inputs such as key-padding masks. This is the reference seam used by
+  GradScaler."
   ([model* weights input target]
    (loss-and-gradients model* weights input target {}))
-  ([model* weights input target {:keys [loss-scale autocast-dtype]
+  ([model* weights input target {:keys [loss-scale autocast-dtype layer-options]
                                  :or {loss-scale 1.0}}]
   (when-not (and (number? loss-scale) (pos? loss-scale))
     (fail "loss-scale must be a positive number" {:loss-scale loss-scale}))
@@ -179,11 +191,15 @@
                         weights)
                   weights)
         input (cast-array input)
-        target (cast-array target)]
+        target (cast-array target)
+        layer-options (or layer-options (repeat (count layers) nil))]
     (validate-weights! layers weights)
+    (when-not (= (count layers) (count layer-options))
+      (fail "layer-options must contain one entry per normalized layer"
+            {:layers (count layers) :layer-options (count layer-options)}))
     (let [[result tape]
           (ag/with-tape
-            (let [graph (forward-graph layers weights input)
+            (let [graph (forward-graph layers weights input layer-options)
                   loss (ag/mse-loss* (:prediction graph) target)]
               (assoc graph :loss loss)))]
       (ag/backward! (:loss result) (arr/from-vec (:backend input) [loss-scale] []) tape)
@@ -214,11 +230,14 @@
                                    shape)]
     (nm/sub parameter (nm/mul scalar-field gradient))))
 
-(defn sgd-step [model* weights input target learning-rate]
+(defn sgd-step
+  ([model* weights input target learning-rate]
+   (sgd-step model* weights input target learning-rate {}))
+  ([model* weights input target learning-rate options]
   (when-not (and (number? learning-rate) (pos? learning-rate))
     (fail "learning-rate must be a positive number" {:learning-rate learning-rate}))
   (let [{:keys [gradients] :as result}
-        (loss-and-gradients model* weights input target)
+        (loss-and-gradients model* weights input target options)
         updated (mapv (fn [weight gradient]
                         (when weight
                           (into {} (map (fn [[key parameter]]
@@ -226,4 +245,4 @@
                                                        (get gradient key))]))
                                 weight)))
                       weights gradients)]
-    (assoc result :weights updated)))
+    (assoc result :weights updated))))

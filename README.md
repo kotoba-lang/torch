@@ -68,8 +68,16 @@ it doesn't divide). It has no batch axis, mask, or learned QKV projections;
 and output weight/bias projections in the same data-first model form. Learned
 attention accepts `[sequence embedding]` or batch-first
 `[batch sequence embedding]`; `(m/multihead-attention d h {:causal? true})`
-enables causal masking. Cross-attention and runtime padding-mask plumbing through
-the sequential model API remain future work. `:conv2d` executes full NCHW batches and
+enables causal masking. Training/VJP calls accept one runtime options map per layer,
+including a `[batch sequence]` `:key-padding-mask` whose non-zero keys are ignored:
+
+```clojure
+(train/loss-and-gradients model weights input target
+  {:layer-options [{:key-padding-mask padding-mask}]})
+```
+
+Cross-attention plumbing through the sequential model API remains future work.
+`:conv2d` executes full NCHW batches and
 supports scalar/pair kernels, stride, padding, dilation, groups, depthwise
 convolution, and bias. `torch.num-backend/random-weights` produces a
 `[out-ch in-ch/groups kh kw]` kernel; hand-supplied rank-2 `[kh kw]` kernels
@@ -256,7 +264,7 @@ ordinary MSE training, comparing prediction, input gradient, loss, and every
 projection weight/bias gradient against the CPU backend. It then performs eight
 public `sgd-step` iterations, checks the complete loss trajectory and all final
 weights against CPU, and confirms a two-batch causal model decreases loss from
-`0.11980` to `0.08037`
+`0.11440` to `0.07745` while applying a different padding mask to each batch
 (29/29 checks):
 
 ```sh

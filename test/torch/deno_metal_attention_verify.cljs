@@ -23,6 +23,10 @@
 
 (def parameter-names [:qw :qb :kw :kb :vw :vb :ow :ob])
 
+(defn- execution-options [backend]
+  {:layer-options
+   [{:key-padding-mask (arr/from-vec backend [0 1 0, 0 0 1] [2 3])}]})
+
 (defn- approx-vec? [expected actual tolerance]
   (and (= (count expected) (count actual))
        (every? true? (map #(< (Math/abs (- %1 %2)) tolerance)
@@ -33,14 +37,16 @@
     (train/prediction-and-gradients
      model* weights
      (arr/from-vec backend input-values input-shape)
-     (arr/from-vec backend upstream-values input-shape))))
+     (arr/from-vec backend upstream-values input-shape)
+     (execution-options backend))))
 
 (defn- run-mse [backend model*]
   (let [weights (nb/random-weights backend model* 29)]
     (train/loss-and-gradients
      model* weights
      (arr/from-vec backend input-values input-shape)
-     (arr/from-vec backend target-values input-shape))))
+     (arr/from-vec backend target-values input-shape)
+     (execution-options backend))))
 
 (defn- run-training [backend model* steps]
   (let [input (arr/from-vec backend input-values input-shape)
@@ -50,7 +56,8 @@
            losses []]
       (if (= step steps)
         {:weights weights :losses losses}
-        (let [result (train/sgd-step model* weights input target 0.05)]
+        (let [result (train/sgd-step model* weights input target 0.05
+                                     (execution-options backend))]
           (recur (inc step) (:weights result) (conj losses (:loss result))))))))
 
 (defn- flatten-result [result]
