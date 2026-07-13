@@ -161,6 +161,23 @@ grouped-query attention is supported when
 `head_count_kv` evenly divides `head_count`, including training and fixed-capacity
 KV-cache decoding on Metal; K/V projections and caches use the reduced KV width.
 
+A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
+blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding
+Q4_K-packed, tied LM head, causal prefill, and fixed-capacity KV-cache decode.
+
+```sh
+clojure -Sdeps '{:deps {io.github.kotoba-lang/num {:local/root "../num"}}}' \
+  -M:deno-quantized-llama-benchmark && \
+deno run --allow-all target/deno-quantized-llama-benchmark.cjs
+# Apple M4, 16 tokens:
+# packed 479,232 bytes vs dense equivalent 3,407,872 bytes (7.11x)
+# full cold 42.806 ms; full warm prefill 23.815 ms
+# cached decode 8.852 ms/token; full/cached parity passed
+```
+
+This deterministic synthetic model verifies orchestration, storage, and kernel
+integration. It is not a quality or real-checkpoint tokens/sec claim.
+
 When `:context` is present, Q is projected from the current model value while K/V
 are projected from the separate context sequence, enabling UNet-style cross-attention
 with different query/key lengths. VJP and MSE results expose the context gradient at
