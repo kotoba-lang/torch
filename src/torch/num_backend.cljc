@@ -89,7 +89,16 @@
   [lyr weights x]
   (let [t' (model/layer-type lyr) largs (model/layer-args lyr)]
     (case t'
-      :linear (t/add (nm/matmul x (:w weights)) (:b weights))
+      :linear (if (= :f32 (or (:dtype x) :f32))
+                (t/add (nm/matmul x (:w weights)) (:b weights))
+                (let [product (nm/matmul x (:w weights))
+                      rows (first (:shape product))
+                      bias (:b weights)
+                      expanded (arr/from-vec (:backend product)
+                                             (vec (mapcat identity
+                                                          (repeat rows (arr/->vec bias))))
+                                             (:shape product) (:dtype product))]
+                  (nm/add product expanded)))
       :relu   (nm/relu x)
       :silu   (t/silu x)
       :softmax (t/softmax x)
@@ -121,12 +130,29 @@
   `weights` (see `random-weights`, or hand-supply your own in the same shape)
   for the model it's about to run. One `num-backend` is good for one
   model+weights pairing (weights are matched to the model by layer index)."
-  [backend weights]
-  (reify ports/IBackend
-    (forward [_ model* input]
-      (let [lyrs (model/layers model*)
-            x0 (if (= backend (:backend input)) input
-                 (arr/from-vec backend (arr/->vec input) (:shape input)))]
-        (reduce (fn [x [lyr w]] (layer-forward lyr w x))
-                x0
-                (map vector lyrs weights))))))
+  ([backend weights] (num-backend backend weights {}))
+  ([backend weights {:keys [autocast-dtype]}]
+   (when (and autocast-dtype (not (contains? #{:f16 :bf16} autocast-dtype)))
+     (throw (ex-info "torch.num-backend: autocast dtype must be :f16 or :bf16"
+                     {:dtype autocast-dtype})))
+   (let [cast-weight (fn [weight]
+                       (when weight
+                         (into {} (map (fn [[key value]]
+                                         [key (arr/cast value autocast-dtype)])) weight)))
+         autocast-weights (if autocast-dtype (mapv cast-weight weights) weights)]
+     (reify ports/IBackend
+       (forward [_ model* input]
+         (let [lyrs (model/layers model*)
+               unsupported (when autocast-dtype
+                             (seq (remove #{:linear :relu :silu}
+                                          (map model/layer-type lyrs))))]
+           (when unsupported
+             (throw (ex-info
+                     "torch.num-backend: autocast currently supports linear/relu/silu only"
+                     {:unsupported (vec unsupported) :dtype autocast-dtype})))
+           (let [x0 (if (= backend (:backend input)) input
+                      (arr/from-vec backend (arr/->vec input) (:shape input)))
+                 x0 (if autocast-dtype (arr/cast x0 autocast-dtype) x0)]
+             (reduce (fn [x [lyr w]] (layer-forward lyr w x))
+                     x0
+                     (map vector lyrs autocast-weights)))))))))

@@ -142,3 +142,26 @@
         ;; softmax output: non-negative, sums to ~1
         (is (every? #(>= % 0.0) out))
         (is (contract-approx? 1.0 (reduce + out)))))))
+
+(deftest physical-autocast-runs-linear-silu-in-sixteen-bit-storage
+  (let [model (m/sequential (m/linear 2 3) (m/silu) (m/linear 3 2))
+        weights (nb/random-weights backend model 91)
+        input (arr/from-vec backend [0.25 -0.75 1.0 0.5] [2 2])
+        f32-output (core/run (nb/num-backend backend weights) model input)]
+    (doseq [[dtype* tolerance] [[:f16 0.001] [:bf16 0.01]]]
+      (let [output (core/run (nb/num-backend backend weights
+                                              {:autocast-dtype dtype*})
+                             model input)]
+        (is (= dtype* (:dtype output)))
+        (is (every? #(< % tolerance)
+                    (map #(Math/abs (- %1 %2))
+                         (arr/->vec f32-output) (arr/->vec output))))))))
+
+(deftest autocast-rejects-unimplemented-layer-kernels
+  (let [model (m/sequential (m/conv2d 1 1 2))
+        weights (nb/random-weights backend model 3)
+        input (arr/from-vec backend (range 9) [1 1 3 3])]
+    (is (thrown-with-msg?
+         #?(:clj Exception :cljs js/Error) #"linear/relu/silu"
+         (core/run (nb/num-backend backend weights {:autocast-dtype :f16})
+                   model input)))))
