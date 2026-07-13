@@ -263,9 +263,14 @@ deno run --allow-all target/deno-ollama-http-verify.cjs
 # version/tags, stream/non-stream generate, invalid request: passed
 ```
 
-The HTTP handler currently receives an injected `generate!` service callback;
-wiring cancellation to client disconnects, an actual listening-process lifecycle,
-model load/unload, authentication, and production observability remain.
+`serve!` starts a real Deno listener (default `127.0.0.1:11434`) and exposes its
+graceful `.shutdown()` lifecycle. Every generate request receives a stable request
+ID and AbortSignal context; a client disconnect invokes the injected `cancel!`
+callback exactly once and response completion removes the listener. The verifier
+also starts an ephemeral TCP port, reaches it with `fetch`, aborts a separate
+in-flight request, and shuts the server down. The HTTP layer still receives an
+injected `generate!` service callback; model load/unload, authentication, true
+incremental stream delivery, and production observability remain.
 
 A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
 blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding

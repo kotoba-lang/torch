@@ -14,8 +14,20 @@
         service {:version "0.12.0"
                  :models [{:name "tiny:latest" :model "tiny:latest"
                            :size 1234 :digest "sha256:test"}]
-                 :generate! (fn [_] (js/Promise.resolve chunks))}
+                 :generate! (fn [_ _] (js/Promise.resolve chunks))}
         handler (http/handler service)
+        server (http/serve! service {:hostname "127.0.0.1" :port 0})
+        live-url (str "http://127.0.0.1:" (.-port (.-addr server)) "/api/version")
+        cancellations (atom [])
+        abort-controller (js/AbortController.)
+        abort-handler
+        (http/handler
+         {:request-id-fn (constantly "abort-me")
+          :cancel! (fn [request-id reason]
+                     (swap! cancellations conj [request-id reason]))
+          :generate! (fn [_ _]
+                       (js/Promise. (fn [resolve _]
+                                      (js/setTimeout #(resolve chunks) 10))))})
         version-request (js/Request. "http://localhost/api/version")
         tags-request (js/Request. "http://localhost/api/tags")
         stream-request
@@ -34,18 +46,28 @@
         (js/Request. "http://localhost/api/generate"
                      #js {:method "POST"
                           :headers #js {"content-type" "application/json"}
-                          :body (js/JSON.stringify #js {:model "" :prompt 1})})]
+                          :body (js/JSON.stringify #js {:model "" :prompt 1})})
+        abort-request
+        (js/Request. "http://localhost/api/generate"
+                     #js {:method "POST"
+                          :signal (.-signal abort-controller)
+                          :headers #js {"content-type" "application/json"}
+                          :body (js/JSON.stringify
+                                 #js {:model "tiny" :prompt "hi"})})
+        aborted-response (abort-handler abort-request)
+        _ (.abort abort-controller)]
     (-> (js/Promise.all
          #js [(handler version-request) (handler tags-request)
               (handler stream-request) (handler one-request)
-              (handler bad-request)])
+              (handler bad-request) (js/fetch live-url) aborted-response])
         (.then
          (fn [responses]
            (let [version (aget responses 0)
                  tags (aget responses 1)
                  stream (aget responses 2)
                  one (aget responses 3)
-                 bad (aget responses 4)]
+                 bad (aget responses 4)
+                 live (aget responses 5)]
              (-> (js/Promise.all
                   #js [(body-json version) (body-json tags) (.text stream)
                        (body-json one) (body-json bad)])
@@ -65,7 +87,10 @@
                                    (= "hello" (.-response one-body))
                                    (true? (.-done one-body))
                                    (= 400 (.-status bad))
-                                   (string? (.-error bad-body)))]
+                                   (string? (.-error bad-body))
+                                   (= 200 (.-status live))
+                                   (= [["abort-me" :client-disconnect]]
+                                      @cancellations))]
                       (println "Ollama version/tags endpoints:"
                                (if (and (= 200 (.-status version))
                                         (= 200 (.-status tags))) "passed" "failed"))
@@ -73,6 +98,11 @@
                                (if ok? "passed" "failed"))
                       (println "Ollama invalid request status:"
                                (if (= 400 (.-status bad)) "passed" "failed"))
+                      (println "Deno TCP listener and client abort:"
+                               (if (and (= 200 (.-status live))
+                                        (= 1 (count @cancellations)))
+                                 "passed" "failed"))
+                      (.shutdown server)
                       (when-not ok? (.exit js/Deno 1)))))))))
         (.catch (fn [error] (js/console.error error) (.exit js/Deno 1))))))
 
