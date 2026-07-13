@@ -1,6 +1,7 @@
 (ns torch.generate-test
   (:require [clojure.test :refer [deftest is testing]]
-            [torch.generate :as generate]))
+            [torch.generate :as generate]
+            [torch.tokenizer :as tokenizer]))
 
 (deftest sampling-policies-are-bounded-and-deterministic
   (testing "greedy and truncation policies choose from their permitted sets"
@@ -18,3 +19,20 @@
                  (generate/sample-token [1.0 2.0] {:top-p 0.0})))
     (is (thrown? #?(:clj Exception :cljs js/Error)
                  (generate/sample-token [1.0 2.0] {:random-value 1.0})))))
+
+(deftest text-generation-prefills-samples-and-stops-at-eos
+  (let [t (tokenizer/tokenizer
+           {:tokens ["<unk>" "<bos>" "<eos>" "a" "b"] :merges []
+            :unk-id 0 :bos-id 1 :eos-id 2 :add-bos? true})
+        step (fn [token caches]
+               {:logits (case token
+                          3 [0.0 0.0 0.1 0.2 3.0]
+                          4 [0.0 0.0 3.0 0.2 0.1]
+                          [3.0 0.0 0.0 0.0 0.0])
+                :caches (conj (vec caches) token)})
+        result (generate/generate-text
+                t step [] "a" {:temperature 0.0 :eos-id 2 :max-new-tokens 4})]
+    (is (= [1 3 4 2] (:ids result)))
+    (is (= [4 2] (:generated-ids result)))
+    (is (= "ab" (:text result)))
+    (is (= [1 3 4] (:caches result)))))

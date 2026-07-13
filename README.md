@@ -134,6 +134,14 @@ temperature, top-k, nucleus/top-p, and repetition-penalty policies. Randomness i
 passed explicitly as `:random-value`, keeping sampling reproducible and allowing a
 server to own the RNG stream.
 
+`torch.tokenizer/tokenizer` builds a portable BPE tokenizer from ID-ordered
+tokens and merge pairs. It supports BOS/EOS, SentencePiece-style space prefixes,
+Unicode codepoints, and GGUF-style `<0xHH>` UTF-8 byte fallback. The same `.cljc`
+implementation is verified on JVM and Node. `torch.generate/generate-text` joins
+tokenization, prompt prefill, cached token steps, sampling, EOS termination, and
+decoding for synchronous runtimes; GPU callers use the same sampling policy after
+their asynchronous logits readback.
+
 When `:context` is present, Q is projected from the current model value while K/V
 are projected from the separate context sequence, enabling UNet-style cross-attention
 with different query/key lengths. VJP and MSE results expose the context gradient at

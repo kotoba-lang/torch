@@ -35,6 +35,12 @@
         :main-opts ["-m" "cljs.main"
                     "-co" "{:optimizations :simple :target :nodejs :main torch.learned-attention-verify :output-to \"target/learned-attention-verify.cjs\"}"
                     "-c" "torch.learned-attention-verify"]}
+       :cljs-tokenizer-verify
+       {:extra-paths ["test"]
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.tokenizer-verify :output-to \"target/tokenizer-verify.cjs\"}"
+                    "-c" "torch.tokenizer-verify"]}
        :deno-metal-attention-verify
        {:extra-paths ["test"]
         :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
