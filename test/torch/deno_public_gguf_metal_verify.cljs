@@ -1,10 +1,10 @@
 (ns torch.deno-public-gguf-metal-verify
   "Run an exported real GGUF checkpoint through the complete Llama graph on Metal."
-  (:require [cljs.reader :as reader]
-            [num.array :as arr]
+  (:require [num.array :as arr]
             [num.deno-gpu :as gpu]
             [num.quantized :as quantized]
             [torch.generate :as generate]
+            [torch.metal-bundle :as bundle]
             [torch.model :as model]
             [torch.num-backend :as nb]))
 
@@ -59,9 +59,9 @@
 (defn -main [& [bundle-path]]
   (when-not bundle-path
     (throw (js/Error. "usage: deno ... bundle.edn")))
-  (let [bundle (reader/read-string (js/Deno.readTextFileSync bundle-path))]
-    (when-not (= :torch/gguf-metal-bundle-v1 (:format bundle))
-      (throw (js/Error. "unsupported GGUF Metal bundle")))
+  (let [bundle-start (.now js/performance)
+        bundle (bundle/load-bundle bundle-path)
+        bundle-load-ms (- (.now js/performance) bundle-start)]
     (-> (gpu/request-device)
         (.then
          (fn [request]
@@ -72,6 +72,7 @@
                  caches (nb/init-llama-caches backend model* 32)
                  started (.now js/performance)]
              (println "Public GGUF full Llama on" (gpu/adapter-description request))
+             (println "compact bundle read/decode ms:" (.toFixed bundle-load-ms 3))
              (-> (prefill backend model* weights caches (:prompt-ids bundle))
                  (.then #(generate-greedy backend model* weights % 4))
                  (.then

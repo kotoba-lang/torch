@@ -1,12 +1,12 @@
 (ns torch.deno-public-gguf-continuous-verify
   "Real GGUF weights through ragged paged continuous Metal microbatches."
-  (:require [cljs.reader :as reader]
-            [num.array :as arr]
+  (:require [num.array :as arr]
             [num.deno-gpu :as gpu]
             [num.tensor :as tensor]
             [torch.continuous :as continuous]
             [torch.deno-public-gguf-metal-verify :as metal]
             [torch.kv-cache :as kv]
+            [torch.metal-bundle :as bundle]
             [torch.num-backend :as nb]
             [torch.paged-runtime :as paged]))
 
@@ -48,7 +48,7 @@
           (- (:destroyed-bytes after) (:destroyed-bytes before)))))
 
 (defn -main [& [bundle-path]]
-  (let [bundle (reader/read-string (js/Deno.readTextFileSync bundle-path))]
+  (let [bundle (bundle/load-bundle bundle-path)]
     (-> (gpu/request-device)
         (.then
          (fn [request]

@@ -1,9 +1,9 @@
 (ns torch.deno-public-gguf-ollama-verify
   "Serve the real public GGUF Metal model through an actual Ollama HTTP socket."
-  (:require [cljs.reader :as reader]
-            [num.deno-gpu :as gpu]
+  (:require [num.deno-gpu :as gpu]
             [torch.deno-public-gguf-metal-verify :as metal]
             [torch.generate :as generate]
+            [torch.metal-bundle :as bundle]
             [torch.num-backend :as nb]
             [torch.ollama :as ollama]
             [torch.ollama-http :as http]
@@ -100,7 +100,7 @@
       (pump [] nil))))
 
 (defn -main [& [bundle-path]]
-  (let [bundle (reader/read-string (js/Deno.readTextFileSync bundle-path))]
+  (let [bundle (bundle/load-bundle bundle-path)]
     (-> (gpu/request-device)
         (.then
          (fn [request]

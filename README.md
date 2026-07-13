@@ -330,20 +330,23 @@ proves the same real checkpoint through the full Llama graph:
 
 ```sh
 clojure -M:gguf-bundle-export /tmp/tiny-random-llama.Q4_K_M.gguf \
-  target/tiny-random-llama-metal.edn
+  target/tiny-random-llama-metal.tgb
 clojure -M:deno-public-gguf-metal-verify && \
   deno run --allow-all target/deno-public-gguf-metal-verify.cjs \
-  target/tiny-random-llama-metal.edn
+  target/tiny-random-llama-metal.tgb
 # Apple M4: CPU expected = Metal generated = [30821 25334 12729 26193]
 # full Embedding → 2 Llama blocks → RMSNorm → 32k LM head: 1.01 s
 # released: 25 weight/cache buffers, 2,415,376 bytes
 # remaining transient GPU buffers: 0
 ```
 
-The bundle is an opt-in verification interchange, not yet a production binary
-container or direct JVM↔Deno IPC protocol. It retains packed Q5_0 bytes and
-dense fallback tensors exactly enough to establish checkpoint-level numeric and
-resource-lifecycle parity on Metal.
+`TGBNDL1` is a bounded manifest + binary-payload container: packed tensors stay
+raw U8, dense fallback tensors use little-endian F32, and tokenizer/config/test
+metadata remains readable EDN. The public fixture shrinks from 12,656,318-byte
+text EDN to 2,993,475 bytes (76.3% smaller). The Deno reader validates magic,
+manifest/payload bounds, F32 alignment, and dense shape size before GPU upload.
+Apple M4 reads and decodes this fixture in 192 ms. It is an inference
+interchange, not yet direct JVM↔Deno IPC.
 
 The same real bundle is also exercised through the actual `Deno.serve` Ollama
 surface rather than a fake generation callback. Both streamed NDJSON and
@@ -354,7 +357,7 @@ weights return GPU live storage to baseline:
 ```sh
 clojure -M:deno-public-gguf-ollama-verify && \
   deno run --allow-all target/deno-public-gguf-ollama-verify.cjs \
-  target/tiny-random-llama-metal.edn
+  target/tiny-random-llama-metal.tgb
 # Apple M4 warm run: first NDJSON byte 373 ms; complete four-token stream 1090 ms
 # stream/non-stream parity, incremental delivery, disconnect cancel: passed
 # GPU baseline restored: passed
@@ -363,7 +366,7 @@ clojure -M:deno-public-gguf-ollama-verify && \
 This concrete server adapter currently gives each request a fixed KV cache. The
 portable paged continuous scheduler is verified separately; connecting this
 real async Metal adapter to its ragged microbatch loop remains the next serving
-step, along with production admission control and a binary bundle format.
+step, along with production admission control.
 
 The real checkpoint now also runs through that paged scheduler itself. Three
 different public-tokenizer prompts are admitted two at a time, prefilled at
@@ -374,7 +377,7 @@ and all physical pools, weights, and transient tensors return to GPU baseline:
 ```sh
 clojure -M:deno-public-gguf-continuous-verify && \
   deno run --allow-all target/deno-public-gguf-continuous-verify.cjs \
-  target/tiny-random-llama-metal.edn
+  target/tiny-random-llama-metal.tgb
 # Apple M4: CPU/continuous Metal token parity: passed
 # ragged real prompts in fused microbatch: passed
 # 4 ticks; 15 prefill single calls; 2 fused batch calls
@@ -398,7 +401,7 @@ request after its first chunk:
 ```sh
 clojure -M:deno-public-gguf-continuous-http-verify && \
   deno run --allow-all target/deno-public-gguf-continuous-http-verify.cjs \
-  target/tiny-random-llama-metal.edn
+  target/tiny-random-llama-metal.tgb
 # Apple M4: concurrent stream/non-stream CPU parity: passed
 # HTTP requests shared fused microbatch: passed
 # completed reasons: length, length, cancelled
@@ -406,8 +409,8 @@ clojure -M:deno-public-gguf-continuous-http-verify && \
 ```
 
 This is now an actual shared paged Metal Ollama path, not parallel isolated
-fixed caches. Production gaps still include a compact binary model bundle,
-multi-model routing through the registry, long-context load testing, and a
+fixed caches. Production gaps still include multi-model routing through the
+registry, long-context load testing, and a
 network-facing operational configuration rather than an integration listener.
 
 A whole-graph Metal benchmark covers more than an isolated kernel: two Llama

@@ -1,13 +1,13 @@
 (ns torch.deno-public-gguf-continuous-http-verify
   "Concurrent Ollama HTTP requests sharing one real GGUF paged Metal engine."
-  (:require [cljs.reader :as reader]
-            [num.array :as arr]
+  (:require [num.array :as arr]
             [num.deno-gpu :as gpu]
             [torch.continuous :as continuous]
             [torch.continuous-ollama :as continuous-http]
             [torch.deno-public-gguf-continuous-verify :as fixture]
             [torch.deno-public-gguf-metal-verify :as metal]
             [torch.kv-cache :as kv]
+            [torch.metal-bundle :as bundle]
             [torch.num-backend :as nb]
             [torch.ollama-http :as http]
             [torch.paged-runtime :as paged]
@@ -33,7 +33,7 @@
                                    (js/setTimeout #(resolve result) 100))))))))))))
 
 (defn -main [& [bundle-path]]
-  (let [bundle (reader/read-string (js/Deno.readTextFileSync bundle-path))]
+  (let [bundle (bundle/load-bundle bundle-path)]
     (-> (gpu/request-device)
         (.then
          (fn [request]
