@@ -75,6 +75,20 @@
     (dotimes [_ 128] (.write out 0x21))
     (.toByteArray out)))
 
+(defn- q5-0-fixture []
+  (let [out (ByteArrayOutputStream.)]
+    (write! out (.getBytes "GGUF" StandardCharsets/US_ASCII))
+    (u32! out 3) (u64! out 1) (u64! out 1)
+    (string! out "general.alignment") (u32! out 4) (u32! out 32)
+    ;; Two logical rows of 16 deliberately share one legacy 32-value block.
+    (string! out "q5.weight") (u32! out 2) (u64! out 16) (u64! out 2)
+    (u32! out 6) (u64! out 0)
+    (pad-to! out 32)
+    (f16! out 0.5)
+    (write! out (le-bytes 4 #(.putInt % (unchecked-int 0x80000001))))
+    (dotimes [_ 16] (.write out 0xf0))
+    (.toByteArray out)))
+
 (defn- q6-k-fixture []
   (let [out (ByteArrayOutputStream.)]
     (write! out (.getBytes "GGUF" StandardCharsets/US_ASCII))
@@ -171,6 +185,17 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo
                           #"row width must be divisible"
                           (gguf/read-tensor malformed "q4-k.weight")))))
+
+(deftest decodes-q5-zero-across-narrow-logical-rows
+  (let [{:keys [shape type values]}
+        (gguf/read-tensor (gguf/parse-bytes (q5-0-fixture)) "q5.weight")]
+    (is (= [2 16] shape))
+    (is (= :q5-0 type))
+    (is (= 32 (count values)))
+    (is (= 0.0 (first values)))
+    (is (= -8.0 (second values)))
+    (is (= -0.5 (nth values 16)))
+    (is (= 7.5 (last values)))))
 
 (deftest decodes-q6-k-low-high-bits-and-signed-scales
   (let [tensor (gguf/read-tensor (gguf/parse-bytes (q6-k-fixture))

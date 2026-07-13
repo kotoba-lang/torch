@@ -306,7 +306,26 @@ descriptor uses the real byte size, then `load-file`, `llama-model`,
 `engine-fn` builds its continuous serving engine, and unload calls
 `release-weights!`, which deduplicates tied/aliased dense and packed handles.
 Factory composition and cleanup are tested; a public full GGUF checkpoint is not
-downloaded as part of the default test suite.
+downloaded as part of the default test suite. An opt-in verifier now exercises a
+real public checkpoint without mocks: it parses GGUF v3, decodes legacy Q5_0
+blocks (including tensors whose 32-value blocks span narrow logical rows), builds
+the Llama graph and SentencePiece tokenizer, runs cached greedy decode, validates
+finite logits/token bounds, and releases the KV cache and all weights.
+
+```sh
+curl -L --fail -o /tmp/tiny-random-llama.Q4_K_M.gguf \
+  https://huggingface.co/ybelkada/tiny-random-llama-Q4_K_M-GGUF/resolve/main/tiny-random-llama.Q4_K_M.gguf
+shasum -a 256 /tmp/tiny-random-llama.Q4_K_M.gguf
+# f06746ef9696d552d3746516558d5e9f338e581fd969158a90824e24f244169c
+clojure -M:public-gguf-verify /tmp/tiny-random-llama.Q4_K_M.gguf
+# Apple M4 JVM reference run: 1,627,808 bytes, 21 tensors, load 8.66 s,
+# four cached decode tokens 0.80 s; status :passed.
+```
+
+This checkpoint has random weights and proves compatibility/lifecycle, not text
+quality. The verifier is CPU-hosted because the current GGUF parser is JVM-only;
+the Deno/Metal packed whole-graph verifier below remains a separate execution
+path. Joining file loading and Metal serving in one host is still outstanding.
 
 A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
 blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding

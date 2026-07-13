@@ -21,18 +21,62 @@
 
 (def byte-token-pattern #"^<0x([0-9A-Fa-f]{2})>$")
 
+(declare codepoints)
+
 (defn tokenizer
   "Build a tokenizer from `:tokens` (ID order) and ordered `:merges` pairs.
   Optional keys: `:unk-id`, `:bos-id`, `:eos-id`, `:add-bos?`, `:add-eos?`,
   and `:space-prefix` (for example `\"▁\"` for SentencePiece-style spaces)."
-  [{:keys [tokens merges] :as options}]
+  [{:keys [tokens merges scores model] :as options}]
   (when-not (and (vector? tokens) (every? string? tokens))
     (throw (ex-info "tokenizer :tokens must be a vector of strings" {})))
   (let [token->id (reduce-kv (fn [m id token]
                                (if (contains? m token) m (assoc m token id)))
                              {} tokens)
-        merge-ranks (into {} (map-indexed (fn [rank pair] [(vec pair) rank]) merges))]
-    (assoc options :tokens tokens :token->id token->id :merge-ranks merge-ranks)))
+        merge-ranks (into {} (map-indexed (fn [rank pair] [(vec pair) rank]) merges))
+        piece-index
+        (when (= model :sentencepiece)
+          (reduce-kv
+           (fn [index id token]
+             (if (or (empty? token) (re-matches byte-token-pattern token)
+                     (str/starts-with? token "<"))
+               index
+               (update index (first (codepoints token)) (fnil conj [])
+                       {:id id :piece (codepoints token)
+                        :score (double (or (nth scores id nil) 0.0))})))
+           {} tokens))]
+    (assoc options :tokens tokens :token->id token->id :merge-ranks merge-ranks
+           :piece-index piece-index)))
+
+(defn- sentencepiece-encode
+  [{:keys [piece-index token->id unk-id]} text]
+  (let [input (codepoints (str "▁" (str/replace text " " "▁")))
+        n (count input)
+        best (object-array (inc n))]
+    (aset best 0 {:score 0.0 :ids []})
+    (dotimes [position n]
+      (when-let [{base-score :score ids :ids} (aget best position)]
+        (let [candidates (filter
+                          (fn [{:keys [piece]}]
+                            (and (<= (+ position (count piece)) n)
+                                 (= piece (subvec input position (+ position (count piece))))))
+                          (get piece-index (nth input position)))
+              candidates
+              (if (seq candidates)
+                candidates
+                (let [bytes (mapv byte-token (utf8-bytes (nth input position)))
+                      byte-ids (mapv token->id bytes)]
+                  [{:id (if (every? some? byte-ids) byte-ids [unk-id])
+                    :piece [(nth input position)] :score -100.0}]))]
+          (doseq [{:keys [id piece score]} candidates]
+            (let [end (+ position (count piece))
+                  candidate {:score (+ base-score score)
+                             :ids (into ids (if (sequential? id) id [id]))}
+                  previous (aget best end)]
+              (when (or (nil? previous) (> (:score candidate) (:score previous)))
+                (aset best end candidate)))))))
+    (or (:ids (aget best n))
+        (throw (ex-info "SentencePiece input could not be encoded" {:text text})))))
 
 (defn- codepoints [text]
   #?(:clj (mapv (fn [cp] (String. (Character/toChars cp)))
@@ -69,17 +113,20 @@
   [tokenizer text]
   (let [{:keys [token->id merge-ranks space-prefix bos-id eos-id add-bos? add-eos?
                 unk-id]} tokenizer
-        text (if space-prefix
+        sentencepiece? (= :sentencepiece (:model tokenizer))
+        text (if (and space-prefix (not sentencepiece?))
                (str/replace text " " space-prefix) text)
-        initial (vec (initial-symbols tokenizer text))
+        initial (when-not sentencepiece? (vec (initial-symbols tokenizer text)))
         symbols (loop [symbols initial]
                   (if-let [[_rank index _pair] (best-merge symbols merge-ranks)]
                     (recur (merge-at symbols index)) symbols))
-        encoded (mapv (fn [symbol]
+        encoded (if sentencepiece?
+                  (sentencepiece-encode tokenizer text)
+                  (mapv (fn [symbol]
                         (or (get token->id symbol) unk-id
                             (throw (ex-info "tokenizer vocabulary lacks encoded symbol"
                                             {:symbol symbol}))))
-                      symbols)
+                      symbols))
         ids (if add-bos? (into [bos-id] encoded) encoded)]
     (if add-eos? (conj ids eos-id) ids)))
 
