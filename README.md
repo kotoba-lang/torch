@@ -226,6 +226,16 @@ clojure -M:cljs-learned-attention-verify
 node target/learned-attention-verify.cjs
 ```
 
+Its complete forward path is also device-native on WebGPU/Metal: four GEMMs,
+last-axis bias broadcasts, and fused multi-head attention stay in GPU buffers
+until final verification readback. The Apple Metal check compares deterministic
+learned projections against the CPU backend:
+
+```sh
+clojure -M:deno-metal-attention-verify
+deno run --allow-all target/deno-metal-attention-verify.cjs
+```
+
 ## Test
 
 ```
