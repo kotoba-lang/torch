@@ -103,6 +103,13 @@
         :main-opts ["-m" "cljs.main"
                     "-co" "{:optimizations :simple :target :nodejs :main torch.deno-public-gguf-metal-verify :output-to \"target/deno-public-gguf-metal-verify.cjs\"}"
                     "-c" "torch.deno-public-gguf-metal-verify"]}
+       :deno-public-gguf-ollama-verify
+       {:extra-paths ["test"]
+        :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-public-gguf-ollama-verify :output-to \"target/deno-public-gguf-ollama-verify.cjs\"}"
+                    "-c" "torch.deno-public-gguf-ollama-verify"]}
        ;; clj-kondo as a Clojars lib (no Homebrew/system install needed).
        :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
          :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"

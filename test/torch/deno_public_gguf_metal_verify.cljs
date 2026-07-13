@@ -8,7 +8,7 @@
             [torch.model :as model]
             [torch.num-backend :as nb]))
 
-(defn- build-model [{:keys [vocab embed-dim hidden-dim head-count kv-head-count
+(defn build-model [{:keys [vocab embed-dim hidden-dim head-count kv-head-count
                             block-count rope-theta]}]
   (apply model/sequential
          (concat [(model/embedding vocab embed-dim)]
@@ -24,13 +24,13 @@
     :quantized-table (quantized/table backend bytes shape quant-type)
     :dense (arr/from-vec backend values shape)))
 
-(defn- upload-weights [backend weights]
+(defn upload-weights [backend weights]
   (mapv (fn [entry]
           (into {} (map (fn [[key weight]] [key (upload-weight backend weight)]))
                 entry))
         weights))
 
-(defn- step-read [backend model* weights token-id caches]
+(defn step-read [backend model* weights token-id caches]
   (let [token (arr/from-vec backend [token-id] [1])
         step (nb/llama-lm-step model* weights token caches)]
     (-> (arr/->vec (:logits step))
@@ -39,7 +39,7 @@
                  (arr/release! (:logits step))
                  {:logits logits :caches (:caches step)})))))
 
-(defn- prefill [backend model* weights caches prompt-ids]
+(defn prefill [backend model* weights caches prompt-ids]
   (reduce (fn [pending token-id]
             (.then pending
                    (fn [{:keys [caches]}]
@@ -88,7 +88,14 @@
                                             (:live-bytes after-release))
                           release? (and (pos? released-buffers)
                                         (pos? released-bytes)
-                                        (= baseline after-release))]
+                                        (= (:live-buffers baseline)
+                                           (:live-buffers after-release))
+                                        (= (:live-bytes baseline)
+                                           (:live-bytes after-release))
+                                        (= (- (:created-buffers after-release)
+                                              (:created-buffers baseline))
+                                           (- (:destroyed-buffers after-release)
+                                              (:destroyed-buffers baseline))))]
                       (println "prompt ids:" (:prompt-ids bundle))
                       (println "CPU expected:" (:generated-ids bundle))
                       (println "Metal generated:" generated)

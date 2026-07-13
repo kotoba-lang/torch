@@ -345,6 +345,26 @@ container or direct JVM↔Deno IPC protocol. It retains packed Q5_0 bytes and
 dense fallback tensors exactly enough to establish checkpoint-level numeric and
 resource-lifecycle parity on Metal.
 
+The same real bundle is also exercised through the actual `Deno.serve` Ollama
+surface rather than a fake generation callback. Both streamed NDJSON and
+non-stream `/api/generate` contexts match the CPU reference IDs, cancellation is
+delivered after a live client disconnect, and all request caches plus resident
+weights return GPU live storage to baseline:
+
+```sh
+clojure -M:deno-public-gguf-ollama-verify && \
+  deno run --allow-all target/deno-public-gguf-ollama-verify.cjs \
+  target/tiny-random-llama-metal.edn
+# Apple M4 warm run: first NDJSON byte 373 ms; complete four-token stream 1090 ms
+# stream/non-stream parity, incremental delivery, disconnect cancel: passed
+# GPU baseline restored: passed
+```
+
+This concrete server adapter currently gives each request a fixed KV cache. The
+portable paged continuous scheduler is verified separately; connecting this
+real async Metal adapter to its ragged microbatch loop remains the next serving
+step, along with production admission control and a binary bundle format.
+
 A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
 blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding
 Q4_K-packed, tied LM head, causal prefill, and fixed-capacity KV-cache decode.

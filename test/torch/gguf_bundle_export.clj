@@ -57,6 +57,10 @@
             generated-ids (greedy-generate backend loaded prompt-ids 4)
             bundle {:format :torch/gguf-metal-bundle-v1
                     :config (assoc config :vocab vocab)
+                    :tokenizer (select-keys
+                                (:tokenizer loaded)
+                                [:tokens :merges :scores :model :space-prefix
+                                 :unk-id :bos-id :eos-id :add-bos? :add-eos?])
                     :prompt-ids prompt-ids :generated-ids generated-ids
                     :weights (mapv (fn [entry]
                                      (into {} (map (fn [[key weight]]
