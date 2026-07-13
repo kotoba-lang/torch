@@ -41,6 +41,11 @@
 (defn dropout    ([] {:dropout [0.5]}) ([p] {:dropout [p]}))
 (defn flatten    [] {:flatten {}})
 (defn relu       [] {:relu {}})
+(defn silu       [] {:silu {}})
+(defn groupnorm
+  "PyTorch-style GroupNorm(num-groups, num-channels, eps=1e-5)."
+  ([num-groups num-channels] {:groupnorm [num-groups num-channels]})
+  ([num-groups num-channels eps] {:groupnorm [num-groups num-channels eps]}))
 (defn gelu       [] {:gelu {}})
 (defn sigmoid    [] {:sigmoid {}})
 (defn tanh       [] {:tanh {}})
