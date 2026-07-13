@@ -171,7 +171,7 @@
   ([model* weights input upstream-gradient]
    (prediction-and-gradients model* weights input upstream-gradient {}))
   ([model* weights input upstream-gradient {:keys [layer-options]}]
-  (let [layers (model/layers model*)
+  (let [layers (model/execution-layers model*)
         layer-options (or layer-options (repeat (count layers) nil))]
     (validate-weights! layers weights)
     (when-not (= (count layers) (count layer-options))
@@ -208,7 +208,7 @@
                                  :or {loss-scale 1.0}}]
   (when-not (and (number? loss-scale) (pos? loss-scale))
     (fail "loss-scale must be a positive number" {:loss-scale loss-scale}))
-  (let [layers (model/layers model*)
+  (let [layers (model/execution-layers model*)
         _ (when (and autocast-dtype
                      (seq (remove #{:conv2d :groupnorm :silu :relu}
                                   (map model/layer-type layers))))

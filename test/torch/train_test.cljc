@@ -22,6 +22,25 @@
     (is (= [2 3] (:shape (:w (first (:gradients first-result))))))
     (is (nil? (second (:gradients first-result))))))
 
+(deftest nested-model-description-runs-and-trains-in-leaf-order
+  (let [model (m/sequential
+               (m/linear 2 3)
+               (m/sequential (m/relu) (m/linear 3 2)))
+        input (arr/from-vec backend [1.0 0.0, 0.0 1.0] [2 2])
+        target (arr/from-vec backend [0.5 -0.5, -0.25 0.75] [2 2])
+        initial (nb/random-weights backend model 23)
+        inference (core/run (nb/num-backend backend initial) model input)
+        first-pass (train/loss-and-gradients model initial input target)
+        trained (last (take 21 (iterate (fn [{:keys [weights]}]
+                                          (train/sgd-step
+                                           model weights input target 0.1))
+                                        {:weights initial})))]
+    (is (= 3 (count initial)))
+    (is (nil? (second initial)))
+    (is (= (arr/->vec inference) (arr/->vec (:prediction first-pass))))
+    (is (= 3 (count (:gradients first-pass))))
+    (is (< (:loss trained) (:loss first-pass)))))
+
 (deftest training-contract-rejects-ambiguous-input
   (let [x (arr/from-vec backend [1 2] [1 2])]
     (is (thrown? #?(:clj Exception :cljs js/Error)

@@ -46,7 +46,7 @@
   ([model*] (summary ports/default-ports model* nil))
   ([model* in-shape] (summary ports/default-ports model* in-shape))
   ([ports* model* in-shape]
-   (let [lyrs (model/layers model*)]
+   (let [lyrs (model/execution-layers model*)]
      (loop [cur in-shape, acc [], total 0, err nil, [l & more] lyrs]
        (if (nil? l)
          {:torch/in-shape     in-shape

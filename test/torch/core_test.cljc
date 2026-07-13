@@ -105,6 +105,16 @@
     (is (= 4 (count (:torch/layers s))))
     (is (= [256] (:torch/out-shape (first (:torch/layers s)))))))
 
+(deftest nested-sequentials-have-canonical-leaf-order-and-paths
+  (let [nested (m/sequential
+                (m/linear 2 3)
+                (m/sequential (m/relu) (m/sequential (m/linear 3 1))))]
+    (is (= [:linear :relu :linear]
+           (mapv m/layer-type (m/execution-layers nested))))
+    (is (= [[0] [1 0] [1 1 0]]
+           (mapv :path (m/layer-entries nested))))
+    (is (= [1] (core/infer-shape nested [2])))))
+
 (def cnn
   [{:conv2d [1 8 3 1 1]} {:relu {}} {:maxpool2d [2]}
    {:flatten {}} {:linear [(* 8 14 14) 10]}])

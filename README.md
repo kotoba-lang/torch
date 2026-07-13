@@ -56,6 +56,11 @@ bare vector, read as an implicit sequential). Builders are threadable data:
 (m/sequential (m/linear 32 64) block (m/linear 64 10))
 ```
 
+Nested Sequentials execute in recursive leaf order across inference, autograd,
+optimizers, summaries, and checkpoints. `torch.model/layer-entries` exposes each
+leaf plus its stable index path; checkpoint names retain module structure (for
+example `layers.1.layers.0.weight`) instead of flattening names ambiguously.
+
 Built-in layer types: `:linear :conv2d :maxpool2d :avgpool2d :embedding
 :batchnorm :layernorm :groupnorm :dropout :flatten :relu :silu :gelu
 :sigmoid :tanh :softmax :attention :multihead-attention`.
@@ -264,7 +269,7 @@ back off the scaler; both successful updates and forced-overflow skips are
 tested. Backward is still a synchronous host reference implementation, so this
 is real mixed-precision numerical behavior but not GPU-resident autograd.
 
-The reference path supports flat sequential models composed from
+The reference path supports recursively nested sequential models composed from
 `:linear/:conv2d/:groupnorm/:relu/:silu/:softmax/:attention/:multihead-attention`, with MSE and
 positive-rate SGD plus immutable AdamW. NCHW grouped convolution, affine GroupNorm, SiLU, and
 multi-head self-attention all have real reverse-mode gradients; tests verify
@@ -272,6 +277,11 @@ both finite-difference agreement in `num` and decreasing loss through the
 public torch model/weight representation. It is not yet a replacement for
 PyTorch's broader optimizer catalog, general GPU autograd, or mixed-precision
 coverage for every layer.
+
+The standalone two-linear-layer Metal trainer follows num's current MSE VJP
+contract, including an explicit device-resident upstream scalar seed. Its full
+backward/update result matches CPU on Apple M4 and lowers loss from `0.75249` to
+`0.16486`; the verifier guards shader binding count as well as numeric parity.
 
 For an explicit vector-Jacobian product, `prediction-and-gradients` accepts an
 upstream tensor with the prediction's shape. This is equivalent to PyTorch's

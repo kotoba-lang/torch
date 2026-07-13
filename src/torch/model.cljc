@@ -123,6 +123,24 @@
   [model]
   (:torch/layers (normalize model)))
 
+(defn layer-entries
+  "Leaf layers in recursive Sequential execution order. Each entry contains
+  `:layer` and its stable nested `:path` of layer indexes."
+  [model]
+  (letfn [(walk [module path]
+            (mapcat (fn [[index child]]
+                      (let [child-path (conj path index)]
+                        (if (model? child)
+                          (walk child child-path)
+                          [{:layer child :path child-path}])))
+                    (map-indexed vector (:torch/layers module))))]
+    (vec (walk (normalize model) []))))
+
+(defn execution-layers
+  "Leaf layers flattened from nested Sequentials in canonical forward order."
+  [model]
+  (mapv :layer (layer-entries model)))
+
 (defn describe
   "A short human string for a layer, e.g. \"linear(784, 256)\"."
   [lyr]

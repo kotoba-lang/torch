@@ -84,7 +84,7 @@
   flat host vectors. Returns a Promise with prediction, loss, and new weights."
   [device-result model* weights input target
    {:keys [batch-size learning-rate] :or {learning-rate 0.01}}]
-  (let [layers (model/layers model*) types (mapv model/layer-type layers)]
+  (let [layers (model/execution-layers model*) types (mapv model/layer-type layers)]
     (when-not (= [:linear :relu :linear] types)
       (fail "expected exactly linear/relu/linear" {:layers types}))
     (let [[[in hidden] _ [hidden2 out]] (mapv model/layer-args layers)
@@ -114,7 +114,8 @@
             _ (dispatch! device bias-add [prediction b2 (uniform-u32 device [batch out 0 0])]
                          [(Math/ceil (/ (* batch out) 64)) 1 1])
             dy (empty-buffer device (* batch out))
-            _ (dispatch! device mse-grad [prediction target-buffer dy
+            mse-upstream (buffer device [1.0])
+            _ (dispatch! device mse-grad [prediction target-buffer mse-upstream dy
                                           (uniform-u32 device [(* batch out) 0 0 0])]
                          [(Math/ceil (/ (* batch out) 64)) 1 1])
             at (transpose! device transpose activation batch hidden)

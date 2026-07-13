@@ -5,6 +5,7 @@
   PyTorch checkpoints store Linear weights as `[out,in]`. This namespace owns
   that boundary and transposes only matrix weights, never biases/Conv/Norm."
   (:require [clojure.set :as set]
+            [clojure.string :as str]
             [num.tensor :as t]
             [torch.model :as model]))
 
@@ -16,9 +17,8 @@
   {:name (str prefix ".bias") :key key
    :external-shape [width] :internal-shape [width] :transpose? false})
 
-(defn- layer-specs [index layer]
-  (let [prefix (str "layers." index)
-        type (model/layer-type layer)
+(defn- layer-specs [prefix layer]
+  (let [type (model/layer-type layer)
         args (model/layer-args layer)]
     (case type
       :linear
@@ -55,10 +55,12 @@
   name, layer index, internal key, external/internal shape, and transpose flag."
   [model*]
   (vec
-   (mapcat (fn [[index layer]]
-             (map #(assoc % :layer-index index :layer-type (model/layer-type layer))
-                  (layer-specs index layer)))
-           (map-indexed vector (model/layers model*)))))
+   (mapcat (fn [[flat-index {:keys [layer path]}]]
+             (let [prefix (str "layers." (str/join ".layers." path))]
+               (map #(assoc % :layer-index flat-index :layer-path path
+                            :layer-type (model/layer-type layer))
+                    (layer-specs prefix layer))))
+           (map-indexed vector (model/layer-entries model*)))))
 
 (defn- ensure-shape! [label expected array]
   (when-not (= (mapv long expected) (mapv long (:shape array)))
@@ -69,7 +71,7 @@
 (defn state-dict
   "Export aligned internal `weights` as a name→NDArray map in PyTorch layout."
   [model* weights]
-  (let [layers (model/layers model*)]
+  (let [layers (model/execution-layers model*)]
     (when-not (= (count layers) (count weights))
       (throw (ex-info "torch.state-dict: weights count mismatch"
                       {:layers (count layers) :weights (count weights)})))
@@ -90,7 +92,7 @@
   tensors are transposed from PyTorch `[out,in]` into internal `[in,out]`."
   ([model* tensors] (load-state-dict model* tensors {}))
   ([model* tensors {:keys [strict?] :or {strict? true}}]
-   (let [layers (model/layers model*)
+   (let [layers (model/execution-layers model*)
          specs (manifest model*)
          required (set (map :name specs))
          provided (set (keys tensors))

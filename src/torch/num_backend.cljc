@@ -57,7 +57,7 @@
   parameterless layer."
   ([backend model* seed] (random-weights backend model* seed {}))
   ([backend model* seed {:keys [dtype] :or {dtype :f32}}]
-  (let [lyrs (model/layers model*)
+  (let [lyrs (model/execution-layers model*)
         seed* (atom (long seed))
         next-vec! (fn [n] (let [xs (lcg-seq @seed* n)] (swap! seed* + n) xs))
         upload (fn [xs shape] (arr/from-vec backend xs shape dtype))]
@@ -181,7 +181,7 @@
                                          [key (arr/cast value autocast-dtype)])) weight)))
          autocast-weights (if autocast-dtype (mapv cast-weight weights) weights)
          run* (fn [model* input options]
-         (let [lyrs (model/layers model*)
+         (let [lyrs (model/execution-layers model*)
                layer-options (or (:layer-options options)
                                  (repeat (count lyrs) nil))
                unsupported (when autocast-dtype

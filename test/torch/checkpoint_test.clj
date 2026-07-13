@@ -72,6 +72,21 @@
                          (safe/load-weights path backend model*)))
       (finally (Files/deleteIfExists path)))))
 
+(deftest nested-module-checkpoint-preserves-structural-tensor-names
+  (let [model* (model/sequential
+                (model/linear 2 3)
+                (model/sequential (model/relu) (model/linear 3 1)))
+        weights (nb/random-weights backend model* 12)
+        path (temp-checkpoint)]
+    (try
+      (safe/save-weights! path model* weights)
+      (with-open [file (safe/open-file path)]
+        (is (= ["layers.0.bias" "layers.0.weight"
+                "layers.1.layers.1.bias" "layers.1.layers.1.weight"]
+               (safe/tensor-names file))))
+      (is (close-arrays? weights (safe/load-weights path backend model*)))
+      (finally (Files/deleteIfExists path)))))
+
 (deftest resumed-adamw-gradscaler-trajectory-equals-continuous-training
   (let [model* (model/sequential (model/linear 2 4)
                                  (model/silu)
