@@ -55,6 +55,12 @@
             vocab (count (get-in loaded [:tokenizer :tokens]))
             prompt-ids (tokenizer/encode (:tokenizer loaded) "Hello")
             generated-ids (greedy-generate backend loaded prompt-ids 4)
+            continuous-fixtures
+            (mapv (fn [[id prompt]]
+                    (let [ids (tokenizer/encode (:tokenizer loaded) prompt)]
+                      {:id id :prompt prompt :prompt-ids ids
+                       :generated-ids (greedy-generate backend loaded ids 2)}))
+                  [[:a "Hello"] [:b "Hi there"] [:c "Hello world"]])
             bundle {:format :torch/gguf-metal-bundle-v1
                     :config (assoc config :vocab vocab)
                     :tokenizer (select-keys
@@ -62,6 +68,7 @@
                                 [:tokens :merges :scores :model :space-prefix
                                  :unk-id :bos-id :eos-id :add-bos? :add-eos?])
                     :prompt-ids prompt-ids :generated-ids generated-ids
+                    :continuous-fixtures continuous-fixtures
                     :weights (mapv (fn [entry]
                                      (into {} (map (fn [[key weight]]
                                                      [key (portable-weight weight)]))

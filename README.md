@@ -365,6 +365,28 @@ portable paged continuous scheduler is verified separately; connecting this
 real async Metal adapter to its ragged microbatch loop remains the next serving
 step, along with production admission control and a binary bundle format.
 
+The real checkpoint now also runs through that paged scheduler itself. Three
+different public-tokenizer prompts are admitted two at a time, prefilled at
+their independent lengths, decoded through fused ragged Metal microbatches, and
+compared with CPU greedy reference IDs. All logical blocks return to the pool,
+and all physical pools, weights, and transient tensors return to GPU baseline:
+
+```sh
+clojure -M:deno-public-gguf-continuous-verify && \
+  deno run --allow-all target/deno-public-gguf-continuous-verify.cjs \
+  target/tiny-random-llama-metal.edn
+# Apple M4: CPU/continuous Metal token parity: passed
+# ragged real prompts in fused microbatch: passed
+# 4 ticks; 15 prefill single calls; 2 fused batch calls
+# paged blocks reusable / GPU baseline restored: passed
+```
+
+Both single-request and batched paged Llama blocks now release projection,
+RoPE, attention, residual, and SwiGLU intermediates at their ownership boundary;
+the verifier's created/destroyed byte and buffer deltas must balance exactly.
+The remaining integration boundary is routing the live Ollama stream callbacks
+through this shared engine rather than their current per-request fixed caches.
+
 A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
 blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding
 Q4_K-packed, tied LM head, causal prefill, and fixed-capacity KV-cache decode.

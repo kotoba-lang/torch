@@ -461,11 +461,18 @@
           appended (paged/append-kv! runtime* sequence-id key value)
           runtime* (:runtime appended)
           attended (paged/attention runtime* sequence-id query)
-          residual (t/add input (linear attended :ow))
+          attention-output (linear attended :ow)
+          residual (t/add input attention-output)
           ffn-input (t/rms-norm-last residual (:ffn-norm weights) eps)
-          gate (t/silu (linear ffn-input :gate))
+          gate-projection (linear ffn-input :gate)
+          gate (t/silu gate-projection)
           up (linear ffn-input :up)
-          output (t/add residual (linear (nm/mul gate up) :down))]
+          gated (nm/mul gate up)
+          down (linear gated :down)
+          output (t/add residual down)
+          _ (arr/release-all!
+             [normalized q0 k0 value query key attended attention-output
+              ffn-input gate-projection gate up gated down residual])]
       {:output output :runtime runtime* :placement (:placement appended)})))
 
 (defn llama-block-paged-batch-step
@@ -496,16 +503,19 @@
           ;; the expensive attention itself remains one fused dispatch.
           rotate-rows
           (fn [array head-count]
-            (let [rows (mapv (fn [index]
-                               (let [row (t/slice-axis array 0 index (inc index))]
-                                 (t/rotary-embedding
-                                  row head-count
-                                  {:theta (or (:rope-theta opts) 10000.0)
-                                   :position-offset
-                                   (+ (or (:position-offset opts) 0)
-                                      (nth lengths index))})))
-                             (range batch))]
-              (t/cat rows 0)))
+            (let [source-rows (mapv #(t/slice-axis array 0 % (inc %))
+                                    (range batch))
+                  rotated (mapv (fn [index row]
+                                  (t/rotary-embedding
+                                   row head-count
+                                   {:theta (or (:rope-theta opts) 10000.0)
+                                    :position-offset
+                                    (+ (or (:position-offset opts) 0)
+                                       (nth lengths index))}))
+                                (range batch) source-rows)
+                  output (t/cat rotated 0)]
+              (arr/release-all! (concat source-rows rotated))
+              output))
           query (rotate-rows q0 heads)
           key (rotate-rows k0 kv-heads)
           key-rows (mapv #(t/slice-axis key 0 % (inc %)) (range batch))
@@ -515,11 +525,18 @@
           _ (arr/release-all! (concat key-rows value-rows))
           runtime* (:runtime appended)
           attended (paged/attention-many runtime* sequence-ids query)
-          residual (t/add input (linear attended :ow))
+          attention-output (linear attended :ow)
+          residual (t/add input attention-output)
           ffn-input (t/rms-norm-last residual (:ffn-norm weights) eps)
-          gate (t/silu (linear ffn-input :gate))
+          gate-projection (linear ffn-input :gate)
+          gate (t/silu gate-projection)
           up (linear ffn-input :up)
-          output (t/add residual (linear (nm/mul gate up) :down))]
+          gated (nm/mul gate up)
+          down (linear gated :down)
+          output (t/add residual down)
+          _ (arr/release-all!
+             [normalized q0 k0 value query key attended attention-output
+              ffn-input gate-projection gate up gated down residual])]
       {:output output :runtime runtime* :placements (:placements appended)})))
 
 (defn llama-lm-paged-step
@@ -530,7 +547,7 @@
     (when-not (= (count layers) (count weights))
       (throw (ex-info "Llama LM layers and weights must align" {})))
     (loop [remaining (seq (map vector layers weights))
-           value token runtime-index 0 updated [] placements []]
+           value token value-owned? false runtime-index 0 updated [] placements []]
       (if-let [[layer weight] (first remaining)]
         (if (= :llama-block (model/layer-type layer))
           (let [runtime* (nth runtimes runtime-index nil)
@@ -538,12 +555,14 @@
                     (throw (ex-info "missing per-block paged runtime"
                                     {:runtime-index runtime-index})))
                 step (llama-block-paged-step layer weight value runtime*
-                                              sequence-id)]
-            (recur (next remaining) (:output step) (inc runtime-index)
+                                              sequence-id)
+                _ (when value-owned? (arr/release! value))]
+            (recur (next remaining) (:output step) true (inc runtime-index)
                    (conj updated (:runtime step))
                    (conj placements (:placement step))))
-          (recur (next remaining) (layer-forward layer weight value nil)
-                 runtime-index updated placements))
+          (let [output (layer-forward layer weight value nil)
+                _ (when value-owned? (arr/release! value))]
+            (recur (next remaining) output true runtime-index updated placements)))
         (do
           (when-not (= runtime-index (count runtimes))
             (throw (ex-info "unused paged Llama runtimes"
@@ -559,7 +578,7 @@
                    (= (first (:shape token)) (count sequence-ids)))
       (throw (ex-info "batched paged Llama inputs do not align" {})))
     (loop [remaining (seq (map vector layers weights))
-           value token runtime-index 0 updated [] placements []]
+           value token value-owned? false runtime-index 0 updated [] placements []]
       (if-let [[layer weight] (first remaining)]
         (if (= :llama-block (model/layer-type layer))
           (let [runtime* (nth runtimes runtime-index nil)
@@ -567,12 +586,14 @@
                     (throw (ex-info "missing per-block paged runtime"
                                     {:runtime-index runtime-index})))
                 step (llama-block-paged-batch-step
-                      layer weight value runtime* sequence-ids)]
-            (recur (next remaining) (:output step) (inc runtime-index)
+                      layer weight value runtime* sequence-ids)
+                _ (when value-owned? (arr/release! value))]
+            (recur (next remaining) (:output step) true (inc runtime-index)
                    (conj updated (:runtime step))
                    (conj placements (:placements step))))
-          (recur (next remaining) (layer-forward layer weight value nil)
-                 runtime-index updated placements))
+          (let [output (layer-forward layer weight value nil)
+                _ (when value-owned? (arr/release! value))]
+            (recur (next remaining) output true runtime-index updated placements)))
         (do
           (when-not (= runtime-index (count runtimes))
             (throw (ex-info "unused paged Llama runtimes"
