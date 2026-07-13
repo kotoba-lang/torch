@@ -262,8 +262,23 @@
                               (arr/from-vec backend token [1 4]) cache)]
                     {:cache (:cache step)
                      :outputs (into outputs (arr/->vec (:output step)))}))
-                {:cache nil :outputs []} tokens)]
+                {:cache nil :outputs []} tokens)
+        fixed-initial (nb/init-kv-cache backend 8 4)
+        fixed-key-handle (:handle (:key fixed-initial))
+        fixed-decoded
+        (reduce (fn [{:keys [cache outputs]} token]
+                  (let [step (nb/multihead-attention-step
+                              layer (first weights)
+                              (arr/from-vec backend token [1 4]) cache)]
+                    {:cache (:cache step)
+                     :outputs (into outputs (arr/->vec (:output step)))}))
+                {:cache fixed-initial :outputs []} tokens)]
     (is (= 4 (get-in decoded [:cache :length])))
     (is (= [4 4] (:shape (get-in decoded [:cache :key]))))
     (is (every? #(< (Math/abs %) 1.0e-6)
-                (map - (arr/->vec full) (:outputs decoded))))))
+                (map - (arr/->vec full) (:outputs decoded))))
+    (is (identical? fixed-key-handle
+                    (:handle (get-in fixed-decoded [:cache :key]))))
+    (is (= 8 (get-in fixed-decoded [:cache :capacity])))
+    (is (every? #(< (Math/abs %) 1.0e-6)
+                (map - (arr/->vec full) (:outputs fixed-decoded))))))

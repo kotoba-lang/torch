@@ -17,14 +17,14 @@
   (and (= (count expected) (count actual))
        (every? #(< (Math/abs %) 1.0e-5) (map - expected actual))))
 
-(defn- decode [backend layer weights]
+(defn- decode [backend layer weights initial-cache]
   (reduce (fn [{:keys [cache outputs stale]} token]
             (let [step (nb/multihead-attention-step
                         layer weights (arr/from-vec backend token [1 4]) cache)]
               {:cache (:cache step)
                :outputs (conj outputs (:output step))
                :stale (cond-> stale cache (conj cache))}))
-          {:cache nil :outputs [] :stale []} tokens))
+          {:cache initial-cache :outputs [] :stale []} tokens))
 
 (defn -main [& _]
   (let [layer (model/multihead-attention
@@ -43,7 +43,10 @@
                  weights (nb/random-weights backend model* 61)
                  full (core/run (nb/num-backend backend weights) model*
                                 (arr/from-vec backend input-values [4 4]))
-                 decoded (decode backend layer (first weights))
+                 initial-cache (nb/init-kv-cache backend 16 4)
+                 key-handle (:handle (:key initial-cache))
+                 value-handle (:handle (:value initial-cache))
+                 decoded (decode backend layer (first weights) initial-cache)
                  reads (into [(arr/->vec full)] (map arr/->vec (:outputs decoded)))]
              (.then (js/Promise.all (into-array reads))
                     (fn [values]
@@ -53,10 +56,16 @@
                             full-ok? (approx? expected full-values)
                             cache-ok? (approx? expected step-values)
                             device-cache? (and (= 4 (get-in decoded [:cache :length]))
+                                               (= 16 (get-in decoded [:cache :capacity]))
+                                               (identical? key-handle
+                                                           (:handle
+                                                            (get-in decoded [:cache :key])))
+                                               (identical? value-handle
+                                                           (:handle
+                                                            (get-in decoded [:cache :value])))
                                                (some? (.-size
                                                        (:handle
                                                         (get-in decoded [:cache :key])))))]
-                        (doseq [cache (:stale decoded)] (nb/release-kv-cache! cache))
                         (nb/release-kv-cache! (:cache decoded))
                         (println "adapter:" (or (gpu/adapter-description device) "unknown"))
                         (println "full causal Metal parity:" (if full-ok? "passed" "failed"))

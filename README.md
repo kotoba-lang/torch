@@ -90,18 +90,18 @@ Incremental autoregressive inference reuses projected, RoPE-rotated keys and
 values without a host readback:
 
 ```clojure
-(let [{:keys [output cache]}
-      (nb/multihead-attention-step layer layer-weights one-token previous-cache)]
-  ;; release a superseded cache once its queued GPU work is complete
-  (nb/release-kv-cache! previous-cache)
+(let [initial-cache (nb/init-kv-cache backend 4096 embed-dim)
+      {:keys [output cache]}
+      (nb/multihead-attention-step layer layer-weights one-token initial-cache)]
   {:logits output :cache cache})
 ```
 
 The step accepts `[1 embed]` or `[batch 1 embed]`; its output matches the same
-layer's full causal pass token-for-token, verified on Apple Metal. The current
-cache is immutable and concatenates into a new GPU buffer each step, so it has
-correct KV reuse but not yet Ollama's fixed-capacity/paged-cache allocation
-strategy.
+layer's full causal pass token-for-token, verified on Apple Metal. A cache from
+`init-kv-cache` preallocates K/V once and appends device-to-device without changing
+either GPUBuffer handle. The older nil-start immutable cache remains supported.
+Fixed-capacity cache currently targets the common batch-1 generation path; batched
+serving and Ollama-style paged/block cache allocation remain future work.
 
 When `:context` is present, Q is projected from the current model value while K/V
 are projected from the separate context sequence, enabling UNet-style cross-attention

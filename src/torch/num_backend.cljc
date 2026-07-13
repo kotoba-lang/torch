@@ -235,15 +235,45 @@
                    (t/rotary-embedding query0 heads rope-options) query0)
            key (if (:rope? merged)
                  (t/rotary-embedding key0 heads rope-options) key0)
+           fixed? (:fixed-capacity? cache)
+           _ (when (and fixed? (not= rank 2))
+               (throw (ex-info "fixed-capacity KV cache currently requires batch size 1"
+                               {:shape shape})))
+           _ (when (and fixed? (>= old-length (:capacity cache)))
+               (throw (ex-info "fixed-capacity KV cache is full"
+                               {:length old-length :capacity (:capacity cache)})))
            axis (if (= rank 3) 1 0)
-           all-key (if-let [old (:key cache)] (t/cat [old key] axis) key)
-           all-value (if-let [old (:value cache)] (t/cat [old value] axis) value)
+           all-key (if fixed?
+                     (let [backing (:key cache)]
+                       (t/copy-into! backing key (* old-length embed))
+                       (assoc backing :shape [(inc old-length) embed]))
+                     (if-let [old (:key cache)] (t/cat [old key] axis) key))
+           all-value (if fixed?
+                       (let [backing (:value cache)]
+                         (t/copy-into! backing value (* old-length embed))
+                         (assoc backing :shape [(inc old-length) embed]))
+                       (if-let [old (:value cache)] (t/cat [old value] axis) value))
            attended (t/multi-head-attention query all-key all-value heads)
            attended-flat (if (= rank 3) (t/reshape attended [batch embed]) attended)
            output (restore (t/add (nm/matmul attended-flat (:ow weights))
                                   (:ob weights)))]
        {:output output
-        :cache {:key all-key :value all-value :length (inc old-length)}}))))
+        :cache (if fixed?
+                 (assoc cache :length (inc old-length))
+                 {:key all-key :value all-value :length (inc old-length)})}))))
+
+(defn init-kv-cache
+  "Preallocate a fixed-capacity, batch-1 KV cache on `backend`. No buffer is
+  reallocated while decoding up to `capacity` tokens."
+  ([backend capacity embed]
+   (init-kv-cache backend capacity embed :f32))
+  ([backend capacity embed dtype]
+   (when-not (and (pos-int? capacity) (pos-int? embed))
+     (throw (ex-info "KV cache capacity and embedding must be positive integers"
+                     {:capacity capacity :embed embed})))
+   {:key (arr/zeros backend [capacity embed] dtype)
+    :value (arr/zeros backend [capacity embed] dtype)
+    :length 0 :capacity capacity :embed embed :fixed-capacity? true}))
 
 (defn release-kv-cache!
   "Explicitly release the two device arrays in a superseded KV cache."
