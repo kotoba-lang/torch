@@ -41,11 +41,28 @@
                     (cleanup!)
                     (.cancel reader reason))})))
 
+(defn- map-stream [source f]
+  (let [reader (.getReader source)]
+    (js/ReadableStream.
+     #js {:start
+          (fn [controller]
+            (letfn [(pump []
+                      (-> (.read reader)
+                          (.then (fn [result]
+                                   (if (.-done result)
+                                     (.close controller)
+                                     (do (.enqueue controller (f (.-value result)))
+                                         (pump)))))
+                          (.catch #(.error controller %))))]
+              (pump)))
+          :cancel #(.cancel reader %)})))
+
 (defn handler
   "Build a standard Fetch handler. Service keys:
 
   - `:version` string
   - `:models` vector of Ollama tag maps
+  - `POST /api/generate` and text-only `POST /api/chat`
   - `:generate!` normalized-request, request-context -> Promise/vector chunks
   - `:generate-stream!` normalized-request, context -> Promise/ReadableStream
   - `:cancel!` request-id, reason (optional)
@@ -90,8 +107,10 @@
               (.catch (fn [error]
                         (error-response (or (:status (ex-data error)) 400) error)))))
 
-        (and (= method "POST") (= path "/api/generate"))
+        (and (= method "POST")
+             (or (= path "/api/generate") (= path "/api/chat")))
         (let [request-id (request-id-fn)
+              chat? (= path "/api/chat")
               signal (.-signal request)
               cancelled? (atom false)
               on-abort (fn [_]
@@ -108,31 +127,42 @@
               (.then
                (fn [body]
                  (let [normalized
-                       (ollama/normalize-generate-request
+                       ((if chat? ollama/normalize-chat-request
+                            ollama/normalize-generate-request)
                         (js->clj body :keywordize-keys true))]
                    (if (and (:stream normalized) (fn? generate-stream!))
                      (-> (js/Promise.resolve
                           (generate-stream! normalized context))
                          (.then
                           (fn [source]
-                            (response 200 (ndjson-stream source cleanup!)
+                            (response 200
+                                      (ndjson-stream
+                                       (if chat? (map-stream source ollama/chat-chunk)
+                                           source)
+                                       cleanup!)
                                       "application/x-ndjson"))))
                      (-> (js/Promise.resolve (generate! normalized context))
                          (.then
                           (fn [chunks]
                             (let [chunks (vec chunks)
+                                  output-chunks (if chat?
+                                                  (mapv ollama/chat-chunk chunks)
+                                                  chunks)
                                   result
                                   (if (:stream normalized)
                                     (response
                                      200
                                      (apply str
                                             (map #(str (js/JSON.stringify (clj->js %))
-                                                       "\n") chunks))
+                                                       "\n") output-chunks))
                                      "application/x-ndjson")
                                     (let [final (or (last chunks) {})
                                           text (apply str (map :response chunks))]
                                       (json-response
-                                       200 (assoc final :response text))))]
+                                       200 (if chat?
+                                             (ollama/chat-chunk
+                                              (assoc final :response text))
+                                             (assoc final :response text)))))]
                               (cleanup!)
                               result))))))))
               (.catch (fn [error]

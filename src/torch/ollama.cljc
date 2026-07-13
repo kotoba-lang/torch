@@ -53,6 +53,45 @@
      :timeout-ms (when timeout_ms (long timeout_ms))
      :keep-alive-ms (parse-keep-alive keep_alive)}))
 
+(defn render-chat-prompt
+  "Render validated text-only chat history into a deterministic portable prompt.
+  Model-specific templates can replace this boundary when present in a catalog."
+  [messages]
+  (str (apply str
+              (map (fn [{:keys [role content]}]
+                     (case role
+                       "system" (str "System: " content "\n")
+                       "user" (str "User: " content "\n")
+                       "assistant" (str "Assistant: " content "\n")))
+                   messages))
+       "Assistant:"))
+
+(defn normalize-chat-request
+  "Validate Ollama `/api/chat` text messages and translate them to generation.
+  Multimodal content and tools are rejected until the model/runtime supports them."
+  [{:keys [model messages tools stream options timeout_ms keep_alive format
+           think logprobs top_logprobs] :as body}]
+  (when-not (and (string? model) (seq model) (vector? messages) (seq messages)
+                 (every? (fn [{:keys [role content] :as message}]
+                           (and (map? message) (#{"system" "user" "assistant"} role)
+                                (string? content) (not (contains? message :images))
+                                (not (contains? message :tool_calls))))
+                         messages)
+                 (or (nil? stream) (boolean? stream))
+                 (or (nil? options) (map? options)))
+    (throw (ex-info "invalid Ollama chat request" {:status 400 :body body})))
+  (when (seq tools)
+    (throw (ex-info "tool calling is not supported by this model runtime"
+                    {:status 400})))
+  (when (or (some? format) (= true think) (string? think) (= true logprobs)
+            (some? top_logprobs))
+    (throw (ex-info "requested Ollama chat capability is not supported"
+                    {:status 400})))
+  (assoc (normalize-generate-request
+          {:model model :prompt (render-chat-prompt messages) :stream stream
+           :options options :timeout_ms timeout_ms :keep_alive keep_alive})
+         :messages messages :chat? true))
+
 (defn submit-generate
   "Tokenize and submit an Ollama request to a continuous engine."
   [engine* tokenizer* request-id body now-ms]
@@ -83,6 +122,13 @@
    :prompt_eval_count prompt-eval-count
    :prompt_eval_duration prompt-eval-duration
    :eval_count eval-count :eval_duration eval-duration})
+
+(defn chat-chunk
+  "Translate a generate chunk into Ollama `/api/chat` response shape."
+  [chunk]
+  (-> chunk
+      (dissoc :response :context)
+      (assoc :message {:role "assistant" :content (:response chunk "")})))
 
 (defn error-body [message]
   {:error (str message)})

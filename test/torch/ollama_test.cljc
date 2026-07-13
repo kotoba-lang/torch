@@ -69,3 +69,30 @@
                (ollama/parse-keep-alive "forever")))
   (is (thrown? #?(:clj Exception :cljs js/Error)
                (ollama/parse-keep-alive -2))))
+
+(deftest chat-history-translates-to-generation-and-chat-chunks
+  (let [request (ollama/normalize-chat-request
+                 {:model "tiny" :stream false
+                  :messages [{:role "system" :content "Be concise"}
+                             {:role "user" :content "Hello"}
+                             {:role "assistant" :content "Hi"}
+                             {:role "user" :content "Again"}]
+                  :options {:num_predict 3}})]
+    (is (= (str "System: Be concise\nUser: Hello\nAssistant: Hi\n"
+                "User: Again\nAssistant:")
+           (:prompt request)))
+    (is (false? (:stream request)))
+    (is (= 3 (get-in request [:sampling :max-new-tokens])))
+    (is (= {:model "tiny" :created_at "now" :done false
+            :message {:role "assistant" :content "hi"}}
+           (ollama/chat-chunk
+            {:model "tiny" :created_at "now" :response "hi" :done false})))
+    (is (thrown-with-msg?
+         #?(:clj Exception :cljs js/Error) #"tool calling"
+         (ollama/normalize-chat-request
+          {:model "tiny" :messages [{:role "user" :content "hi"}]
+           :tools [{:type "function"}]})))
+    (is (thrown-with-msg?
+         #?(:clj Exception :cljs js/Error) #"invalid Ollama chat"
+         (ollama/normalize-chat-request
+          {:model "tiny" :messages [{:role "tool" :content "result"}]})))))

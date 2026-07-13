@@ -30,6 +30,16 @@
                (-> (.json response)
                    (.then #(vector (.-status response) %)))))))
 
+(defn- chat [url model]
+  (-> (js/fetch
+       url #js {:method "POST" :headers #js {"content-type" "application/json"}
+                :body (js/JSON.stringify
+                       (clj->js {:model model :stream false :keep_alive -1
+                                 :messages [{:role "system" :content "Be brief"}
+                                            {:role "user" :content "Hello"}]
+                                 :options {:temperature 0.0 :num_predict 2}}))})
+      (.then #(.json %))))
+
 (defn -main [& [bundle-path]]
   (let [manifest (bundle/load-bundle bundle-path)
         expected (into (:prompt-ids manifest)
@@ -70,7 +80,8 @@
                  generate-url (str base "/api/generate")
                  tags-url (str base "/api/tags")
                  ps-url (str base "/api/ps")
-                 show-url (str base "/api/show")]
+                 show-url (str base "/api/show")
+                 chat-url (str base "/api/chat")]
              (println "Real GGUF registry routing on"
                       (gpu/adapter-description request))
              (-> (js/Promise.all
@@ -82,8 +93,10 @@
                         (.then #(hash-map :initial initial :a %)))))
                  (.then
                   (fn [state]
-                    (-> (js/Promise.all #js [(json-get tags-url) (json-get ps-url)])
-                        (.then #(assoc state :tags-a (aget % 0) :ps-a (aget % 1))))))
+                    (-> (js/Promise.all #js [(json-get tags-url) (json-get ps-url)
+                                             (chat chat-url "model-a:latest")])
+                        (.then #(assoc state :tags-a (aget % 0) :ps-a (aget % 1)
+                                      :chat-a (aget % 2))))))
                  (.then
                   (fn [state]
                     (-> (post generate-url "model-b:latest" 0)
@@ -93,7 +106,7 @@
                     (-> (js/Promise.all #js [(json-get tags-url) (json-get ps-url)])
                         (.then #(assoc state :tags-b (aget % 0) :ps-b (aget % 1))))))
                  (.then
-                  (fn [{:keys [initial a b tags-a tags-b ps-a ps-b]}]
+                  (fn [{:keys [initial a b tags-a tags-b ps-a ps-b chat-a]}]
                     (let [context-a (vec (js->clj (.-context a)))
                           context-b (vec (js->clj (.-context b)))
                           rows-a (js->clj (.-models tags-a)
@@ -127,7 +140,10 @@
                                  (= ["model-a:latest"] (mapv :name ps-a-rows))
                                  (= ["model-b:latest"] (mapv :name ps-b-rows))
                                  (pos? (:size_vram (first ps-a-rows)))
-                                 (= 2048 (:context_length (first ps-a-rows))))]
+                                 (= 2048 (:context_length (first ps-a-rows))))
+                            chat? (and (true? (.-done chat-a))
+                                       (= "assistant" (.. chat-a -message -role))
+                                       (string? (.. chat-a -message -content)))]
                       (registry-runtime/expire! runtime* (+ 1000 (.now js/Date)))
                       (.shutdown server)
                       (let [stats (registry-runtime/stats runtime*)
@@ -144,6 +160,8 @@
                                  (if tags? "passed" "failed"))
                         (println "Ollama ps/show follow Metal residency:"
                                  (if management? "passed" "failed"))
+                        (println "Ollama chat runs through resident Metal model:"
+                                 (if chat? "passed" "failed"))
                         (println "inactive LRU eviction:"
                                  (if eviction? "passed" "failed"))
                         (println "load/unload exactly once:"
@@ -151,7 +169,7 @@
                         (println "registry resident bytes:" (:resident-bytes stats))
                         (println "GPU baseline restored:"
                                  (if released? "passed" "failed"))
-                        (when-not (and parity? tags? management? eviction? lifecycle? released?
+                        (when-not (and parity? tags? management? chat? eviction? lifecycle? released?
                                        (zero? (:resident-bytes stats)))
                           (throw (js/Error.
                                   "real GGUF registry verification failed")))))))))))

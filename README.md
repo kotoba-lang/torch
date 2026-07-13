@@ -254,7 +254,11 @@ engine submissions and emits Ollama-shaped token/final payloads.
 `torch.ollama-http/handler` is a standard Fetch handler suitable for `Deno.serve`;
 it implements `GET /api/version`, `GET /api/tags`, `GET /api/ps`,
 `POST /api/show`, and streaming NDJSON or
-non-streaming `POST /api/generate`, including JSON 400/404 errors. Its live
+non-streaming `POST /api/generate` and `POST /api/chat`, including JSON 400/404
+errors. Chat validates ordered system/user/assistant text history, renders a
+deterministic portable prompt, and returns Ollama `message.role/content` chunks.
+Images, thinking, structured output, and tool calls remain explicit unsupported
+boundaries rather than being silently ignored. Its live
 Request/Response verifier checks headers, status codes, three NDJSON records, and
 the assembled non-stream response:
 
@@ -427,6 +431,7 @@ clojure -M:deno-public-gguf-registry-verify && \
   target/tiny-random-llama-metal.tgb
 # Apple M4: model-name routed CPU parity / dynamic residency tags: passed
 # Ollama ps/show follow real Metal residency: passed
+# Ollama chat runs through the resident public-GGUF Metal model: passed
 # inactive model-a LRU-evicted when model-b loads under a 1.5-model budget
 # each model loaded/unloaded exactly once; resident bytes: 0
 # GPU baseline restored: passed

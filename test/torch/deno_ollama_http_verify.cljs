@@ -107,6 +107,22 @@
                      #js {:method "POST"
                           :headers #js {"content-type" "application/json"}
                           :body (js/JSON.stringify #js {:model "" :prompt 1})})
+        chat-stream-request
+        (js/Request. "http://localhost/api/chat"
+                     #js {:method "POST"
+                          :headers #js {"content-type" "application/json"}
+                          :body (js/JSON.stringify
+                                 #js {:model "tiny" :stream true
+                                      :messages #js [#js {:role "user"
+                                                          :content "hi"}]})})
+        chat-one-request
+        (js/Request. "http://localhost/api/chat"
+                     #js {:method "POST"
+                          :headers #js {"content-type" "application/json"}
+                          :body (js/JSON.stringify
+                                 #js {:model "tiny" :stream false
+                                      :messages #js [#js {:role "user"
+                                                          :content "hi"}]})})
         abort-request
         (js/Request. "http://localhost/api/generate"
                      #js {:method "POST"
@@ -121,6 +137,7 @@
               (handler ps-request) (handler show-request)
               (handler stream-request) (handler one-request)
               (handler bad-request) (js/fetch live-url) aborted-response
+              (handler chat-stream-request) (handler chat-one-request)
               live-first-byte])
         (.then
          (fn [responses]
@@ -132,11 +149,14 @@
                  one (aget responses 5)
                  bad (aget responses 6)
                  live (aget responses 7)
-                 first-byte (aget responses 9)]
+                 chat-stream (aget responses 9)
+                 chat-one (aget responses 10)
+                 first-byte (aget responses 11)]
              (-> (js/Promise.all
                   #js [(body-json version) (body-json tags) (body-json ps)
                        (body-json show) (.text stream)
-                       (body-json one) (body-json bad)])
+                       (body-json one) (body-json bad)
+                       (.text chat-stream) (body-json chat-one)])
                  (.then
                   (fn [bodies]
                     (let [version-body (aget bodies 0)
@@ -146,6 +166,8 @@
                           stream-lines (-> (aget bodies 4) .trim (.split "\n"))
                           one-body (aget bodies 5)
                           bad-body (aget bodies 6)
+                          chat-lines (-> (aget bodies 7) .trim (.split "\n"))
+                          chat-one-body (aget bodies 8)
                           _ (registry-runtime/release!
                              model-runtime "tiny:latest" 1 0)
                           _ (registry-runtime/expire! model-runtime 1)
@@ -161,6 +183,9 @@
                                    (true? (.-done one-body))
                                    (= 400 (.-status bad))
                                    (string? (.-error bad-body))
+                                   (= 3 (.-length chat-lines))
+                                   (= "hello" (.. chat-one-body -message -content))
+                                   (true? (.-done chat-one-body))
                                    (= 200 (.-status live))
                                    (= 200 (.-status first-byte))
                                    (< (.-elapsed first-byte) 100)
@@ -178,6 +203,10 @@
                                         (= 200 (.-status show))) "passed" "failed"))
                       (println "Ollama stream/non-stream generate:"
                                (if ok? "passed" "failed"))
+                      (println "Ollama stream/non-stream chat:"
+                               (if (and (= 3 (.-length chat-lines))
+                                        (= "hello" (.. chat-one-body -message -content)))
+                                 "passed" "failed"))
                       (println "Ollama invalid request status:"
                                (if (= 400 (.-status bad)) "passed" "failed"))
                       (println "Deno TCP listener and client abort:"
