@@ -130,7 +130,10 @@
   (if (instance? js/Promise value) value (js/Promise.resolve value)))
 
 (defn -main [& _]
-  (let [model* (model/sequential (model/multihead-attention 4 2))
+  (let [model* (model/sequential
+                (model/multihead-attention
+                 4 2 {:rope? true :rope-theta 10000.0
+                      :position-offset 3 :context-position-offset 7}))
         cpu-backend (cpu/cpu-backend)
         expected-vjp (assoc (into {}
                             (map (fn [[label array]] [label (arr/->vec array)]))

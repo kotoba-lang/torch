@@ -73,7 +73,11 @@ it doesn't divide). It has no batch axis, mask, or learned QKV projections;
 and output weight/bias projections in the same data-first model form. Learned
 attention accepts `[sequence embedding]` or batch-first
 `[batch sequence embedding]`; `(m/multihead-attention d h {:causal? true})`
-enables causal masking. Training/VJP calls accept one runtime options map per layer,
+enables causal masking. Llama-compatible rotary position embedding is enabled with
+`{:rope? true}`; `:rope-theta`, `:position-offset`, and
+`:context-position-offset` support long-context and cached/cross-attention positions.
+RoPE is applied head-wise to projected Q/K (not V), including its inverse-rotation
+VJP on Metal. Training/VJP calls accept one runtime options map per layer,
 including a `[batch sequence]` `:key-padding-mask` whose non-zero keys are ignored:
 
 ```clojure

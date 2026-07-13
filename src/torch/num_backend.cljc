@@ -133,7 +133,16 @@
       :multihead-attention
       (let [[embed num-heads opts] largs
             context (or (:context runtime-options) x)
-            attention-options (merge opts (dissoc runtime-options :context))
+            merged-options (merge opts (dissoc runtime-options :context))
+            rope? (:rope? merged-options)
+            rope-options {:theta (or (:rope-theta merged-options) 10000.0)
+                          :position-offset (or (:position-offset merged-options) 0)}
+            key-rope-options (assoc rope-options :position-offset
+                                    (or (:context-position-offset merged-options)
+                                        (:position-offset rope-options)))
+            attention-options (apply dissoc merged-options
+                                     [:rope? :rope-theta :position-offset
+                                      :context-position-offset])
             layout (fn [source]
                      (let [shape (:shape source) rank (count shape)
                            [batch sequence] (if (= rank 3) (take 2 shape)
@@ -151,8 +160,10 @@
                        (t/add (nm/matmul (:flat source-layout) (get weights wk))
                               (get weights bk))
                        source-layout))
-            q (project query-layout :qw :qb)
-            k (project context-layout :kw :kb)
+            q0 (project query-layout :qw :qb)
+            k0 (project context-layout :kw :kb)
+            q (if rope? (t/rotary-embedding q0 num-heads rope-options) q0)
+            k (if rope? (t/rotary-embedding k0 num-heads key-rope-options) k0)
             v (project context-layout :vw :vb)
             attended (if (seq attention-options)
                        (t/multi-head-attention q k v num-heads attention-options)

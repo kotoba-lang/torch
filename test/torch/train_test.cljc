@@ -177,7 +177,10 @@
                 (arr/->vec (:w (nth (:weights trained) 2))))))))
 
 (deftest learned-multihead-attention-trains-all-projections
-  (let [model (m/sequential (m/multihead-attention 4 2))
+  (let [model (m/sequential
+               (m/multihead-attention 4 2
+                                      {:causal? true :rope? true
+                                       :rope-theta 10000.0 :position-offset 2}))
         initial (nb/random-weights backend model 29)
         input (arr/from-vec backend
                             [0.2 -0.1 0.3 0.4, -0.2 0.1 0.5 -0.3,
@@ -185,6 +188,7 @@
         target (arr/from-vec backend
                              [0.1 0.0 0.2 -0.1, 0.0 0.2 0.1 0.3,
                               -0.2 0.1 0.0 0.2] [3 4])
+        inference (core/run (nb/num-backend backend initial) model input)
         first-pass (train/loss-and-gradients model initial input target)
         epsilon 1.0e-5
         loss-with-q0
@@ -203,6 +207,7 @@
         gradient (first (:gradients first-pass))]
     (is (= #{:qw :qb :kw :kb :vw :vb :ow :ob} (set (keys gradient))))
     (is (every? some? (vals gradient)))
+    (is (= (arr/->vec inference) (arr/->vec (:prediction first-pass))))
     (is (< (Math/abs (- numeric-q0 (first (arr/->vec (:qw gradient))))) 1.0e-5))
     (is (= [3 4] (:shape (:prediction first-pass))))
     (is (< (:loss trained) (:loss first-pass)))))

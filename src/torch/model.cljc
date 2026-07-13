@@ -63,8 +63,9 @@
   ([num-heads] {:attention [num-heads]}))
 (defn multihead-attention
   "Learned self-attention with independent Q/K/V and output projections.
-  `opts` currently supports `:causal?`; rank-2 and batch-first rank-3 inputs
-  share the same layer description."
+  `opts` supports attention masks plus Llama RoPE via `:rope?`, `:rope-theta`,
+  `:position-offset`, and `:context-position-offset`; rank-2 and batch-first
+  rank-3 inputs share the same layer description."
   ([embed-dim num-heads]
    {:multihead-attention [embed-dim num-heads]})
   ([embed-dim num-heads opts]

@@ -109,7 +109,16 @@
     :multihead-attention
     (let [[embed heads opts] (model/layer-args layer)
           context-array (:context runtime-options)
-          attention-options (merge opts (dissoc runtime-options :context))
+          merged-options (merge opts (dissoc runtime-options :context))
+          rope? (:rope? merged-options)
+          rope-options {:theta (or (:rope-theta merged-options) 10000.0)
+                        :position-offset (or (:position-offset merged-options) 0)}
+          key-rope-options (assoc rope-options :position-offset
+                                  (or (:context-position-offset merged-options)
+                                      (:position-offset rope-options)))
+          attention-options (apply dissoc merged-options
+                                   [:rope? :rope-theta :position-offset
+                                    :context-position-offset])
           input-value (:value state)
           input-shape (:shape (:data input-value))
           rank (count input-shape)
@@ -139,8 +148,10 @@
                       (ag/matmul* (:flat layout) (get parameters weight-key))
                       (get parameters bias-key))
                      layout))
-          query (project query-layout :qw :qb)
-          key (project context-layout :kw :kb)
+          query0 (project query-layout :qw :qb)
+          key0 (project context-layout :kw :kb)
+          query (if rope? (ag/rotary-embedding* query0 heads rope-options) query0)
+          key (if rope? (ag/rotary-embedding* key0 heads key-rope-options) key0)
           value (project context-layout :vw :vb)
           attended (if (seq attention-options)
                      (ag/multi-head-attention* query key value heads
