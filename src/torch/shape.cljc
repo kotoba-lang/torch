@@ -102,6 +102,27 @@
 (doseq [t [:batchnorm :layernorm]]
   (defmethod layer-shape t [_ _ in] [:ok in]))
 
+;; --- groupnorm : [num-groups channels] over a [C H W] shape (matches
+;; :conv2d's convention — num.tensor/group-norm-nchw is a real NCHW op) ------
+
+(defmethod layer-shape :groupnorm [_ args in]
+  (let [num-groups (nth-arg args 0 nil) channels (nth-arg args 1 nil)]
+    (cond
+      (not (and (pos-int? num-groups) (pos-int? channels)))
+      [:error "groupnorm expects [num-groups channels] positive ints"]
+
+      (not= 3 (count in))
+      [:error (str "groupnorm expects a [C H W] input, got " in)]
+
+      (not= (first in) channels)
+      [:error (str "groupnorm channels " channels " ≠ input channels " (first in))]
+
+      (not (zero? (mod (long channels) (long num-groups))))
+      [:error (str "groupnorm num-groups " num-groups " must evenly divide channels "
+                   channels)]
+
+      :else [:ok in])))
+
 ;; --- conv2d : [in-ch out-ch k stride? pad?] over a [C H W] shape ------------
 
 (defmethod layer-shape :conv2d [_ args in]
@@ -165,12 +186,13 @@
 
 (defmethod layer-params :batchnorm [_ args] (* 2 (nth-arg args 0 0)))
 (defmethod layer-params :layernorm [_ args] (* 2 (nth-arg args 0 0)))
+(defmethod layer-params :groupnorm [_ args] (* 2 (nth-arg args 1 0))) ; affine gamma+beta over channels
 
 (def built-in-types
   "The set of layer types this namespace understands."
   #{:linear :conv2d :maxpool2d :avgpool2d :embedding :batchnorm :layernorm
-    :dropout :flatten :relu :gelu :sigmoid :tanh :softmax :silu :attention
-    :identity})
+    :groupnorm :dropout :flatten :relu :gelu :sigmoid :tanh :softmax :silu
+    :attention :identity})
 
 (defn known?
   "True if `t` is a built-in layer type."
