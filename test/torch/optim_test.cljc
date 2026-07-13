@@ -60,6 +60,41 @@
     (is (= 1 (get-in updated [:optimizer-state :step])))
     (is (< (first (arr/->vec (get-in updated [:weights 0 :w]))) 1.0))))
 
+(deftest mixed-precision-unet-step-keeps-f32-master-weights
+  (let [model (m/sequential (m/conv2d 1 2 3 1 1)
+                            (m/groupnorm 1 2)
+                            (m/silu))
+        weights (nb/random-weights backend model 44)
+        input (arr/from-vec backend (mapv #(- (* 0.04 %) 0.3) (range 16))
+                            [1 1 4 4])
+        target (arr/from-vec backend (repeat 32 0.1) [1 2 4 4])
+        scaler (optim/grad-scaler {:initial-scale 128.0})
+        result (train/mixed-precision-adamw-step
+                model weights input target nil scaler
+                {:autocast-dtype :f16
+                 :adamw-options {:learning-rate 0.002 :weight-decay 0.0}})]
+    (is (false? (:skipped? result)))
+    (is (= :f16 (:dtype (:prediction result))))
+    (is (= :f32 (:dtype (get-in result [:weights 0 :w]))))
+    (is (= 1 (get-in result [:optimizer-state :step])))
+    (is (= 1 (:growth-tracker (:scaler result))))
+    (is (not= (arr/->vec (get-in weights [0 :w]))
+              (arr/->vec (get-in result [:weights 0 :w]))))))
+
+(deftest mixed-precision-unet-step-skips-overflow
+  (let [model (m/sequential (m/conv2d 1 2 3 1 1) (m/silu))
+        weights (nb/random-weights backend model 7)
+        input (arr/from-vec backend (repeat 16 1.0e20) [1 1 4 4])
+        target (arr/from-vec backend (repeat 32 0.0) [1 2 4 4])
+        scaler (optim/grad-scaler {:initial-scale 1.0e30})
+        result (train/mixed-precision-adamw-step
+                model weights input target nil scaler
+                {:autocast-dtype :f16})]
+    (is (:skipped? result))
+    (is (identical? weights (:weights result)))
+    (is (nil? (:optimizer-state result)))
+    (is (= 5.0e29 (:scale (:scaler result))))))
+
 (deftest adamw-trains-and-preserves-aligned-immutable-state
   (let [model (m/sequential (m/linear 2 4) (m/silu) (m/linear 4 2))
         input (arr/from-vec backend [1 0 0 1 1 1] [3 2])

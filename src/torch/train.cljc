@@ -4,7 +4,8 @@
   arrays, returning new immutable weight maps after one SGD step."
   (:require [num.array :as arr]
             [num.autograd :as ag]
-            [torch.model :as model]))
+            [torch.model :as model]
+            [torch.optim :as optim]))
 
 (def supported-layers
   #{:linear :conv2d :groupnorm :relu :silu :softmax :attention})
@@ -75,10 +76,26 @@
   reported loss unchanged. This is the reference seam used by GradScaler."
   ([model* weights input target]
    (loss-and-gradients model* weights input target {}))
-  ([model* weights input target {:keys [loss-scale] :or {loss-scale 1.0}}]
+  ([model* weights input target {:keys [loss-scale autocast-dtype]
+                                 :or {loss-scale 1.0}}]
   (when-not (and (number? loss-scale) (pos? loss-scale))
     (fail "loss-scale must be a positive number" {:loss-scale loss-scale}))
-  (let [layers (model/layers model*)]
+  (let [layers (model/layers model*)
+        _ (when (and autocast-dtype
+                     (seq (remove #{:conv2d :groupnorm :silu :relu}
+                                  (map model/layer-type layers))))
+            (fail "training autocast supports conv2d/groupnorm/silu/relu only"
+                  {:dtype autocast-dtype}))
+        cast-array #(if autocast-dtype (arr/cast % autocast-dtype) %)
+        weights (if autocast-dtype
+                  (mapv (fn [weight]
+                          (when weight
+                            (into {} (map (fn [[key value]] [key (cast-array value)]))
+                                  weight)))
+                        weights)
+                  weights)
+        input (cast-array input)
+        target (cast-array target)]
     (validate-weights! layers weights)
     (let [[result tape]
           (ag/with-tape
@@ -94,6 +111,22 @@
                (when parameters
                  (into {} (map (fn [[key value]] [key @(:grad value)])) parameters)))
              (:parameters result))}))))
+
+(defn mixed-precision-adamw-step
+  "Run typed forward, scaled backward, overflow handling, and f32 AdamW update.
+
+  `weights` remain f32 master weights. The returned prediction has the autocast
+  dtype; gradients are unscaled to f32 before the optimizer update."
+  [model* weights input target optimizer-state scaler
+   {:keys [autocast-dtype adamw-options]
+    :or {autocast-dtype :f16 adamw-options {}}}]
+  (let [{:keys [gradients] :as pass}
+        (loss-and-gradients model* weights input target
+                            {:autocast-dtype autocast-dtype
+                             :loss-scale (:scale scaler)})
+        update (optim/scaled-adamw-step weights gradients optimizer-state
+                                         scaler adamw-options)]
+    (merge (dissoc pass :gradients) update)))
 
 (defn- descend [learning-rate parameter gradient]
   (arr/from-vec (:backend parameter)

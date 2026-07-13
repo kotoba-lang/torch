@@ -193,8 +193,16 @@ configurable, with AdamW defaults when omitted.
 call `loss-and-gradients` with the scaler's `:scale`, then pass the scaled
 gradients to the optimizer. Gradients are unscaled before AdamW, non-finite
 values skip the update and back off the scale, and stable steps grow it at the
-configured interval. Storage and kernels are still f32; this is the control
-path required for future real fp16/bf16 autocast, not a mixed-precision claim.
+configured interval. Unscaled gradients and optimizer state remain f32; this
+is the control path used by the mixed-precision training API below.
+
+`torch.train/mixed-precision-adamw-step` now connects these pieces for
+conv2d/GroupNorm/SiLU/ReLU models: it casts the forward pass to f16 or bf16,
+computes f32 gradients, unscales and checks them, then updates immutable f32
+master weights with AdamW. Non-finite gradients skip the optimizer step and
+back off the scaler; both successful updates and forced-overflow skips are
+tested. Backward is still a synchronous host reference implementation, so this
+is real mixed-precision numerical behavior but not GPU-resident autograd.
 
 The reference path supports flat sequential models composed from
 `:linear/:conv2d/:groupnorm/:relu/:silu/:softmax/:attention`, with MSE and
@@ -204,7 +212,7 @@ both finite-difference agreement in `num` and decreasing loss through the
 public torch model/weight representation. It remains a synchronous reference
 trainer, not yet a replacement for PyTorch's broader optimizer catalog, GPU autograd,
 batched/masked learned-projection attention, checkpoint loading, or mixed
-precision.
+precision coverage for every layer.
 
 ## Test
 
