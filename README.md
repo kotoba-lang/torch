@@ -688,12 +688,18 @@ AdamW+GradScaler run, reload it, and prove that every subsequent loss, weight,
 moment, variance, and scaler value is exactly equal to uninterrupted training.
 
 `torch.train/mixed-precision-adamw-step` now connects these pieces for
-conv2d/GroupNorm/SiLU/ReLU models: it casts the forward pass to f16 or bf16,
+linear/attention and conv2d/GroupNorm/SiLU/ReLU models: it casts the forward pass to f16 or bf16,
 computes f32 gradients, unscales and checks them, then updates immutable f32
 master weights with AdamW. Non-finite gradients skip the optimizer step and
 back off the scaler; both successful updates and forced-overflow skips are
 tested. Backward is still a synchronous host reference implementation, so this
 is real mixed-precision numerical behavior but not GPU-resident autograd.
+Learned attention uses an explicit f32 stability island for attention/softmax
+inside the typed graph; differentiable cast VJPs return gradients to its F16
+projection layers, and all parameter gradients are materialized as f32 before
+the master-weight update. A public-model-shaped attention step verifies F16
+prediction, f32 gradients/weights, GradScaler advancement, and lower loss after
+the update.
 
 The reference path supports recursively nested sequential models composed from
 `:linear/:conv2d/:embedding/:groupnorm/:layernorm/:rmsnorm/:flatten/:relu/:silu/:sigmoid/:tanh/:gelu/:softmax/:attention/:multihead-attention/:llama-block/:lm-head`, with MSE and

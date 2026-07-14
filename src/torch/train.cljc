@@ -102,10 +102,15 @@
            nil)
     :attention
     (let [args (model/layer-args layer)
-          heads (if (and (vector? args) (seq args)) (first args) 1)]
+          heads (if (and (vector? args) (seq args)) (first args) 1)
+          input (:value state)
+          dtype (or (:dtype (:data input)) :f32)
+          stable-input (if (= dtype :f32) input (ag/cast* input :f32))
+          attended (ag/multi-head-attention* stable-input stable-input
+                                               stable-input heads)
+          output (if (= dtype :f32) attended (ag/cast* attended dtype))]
       (track state
-             (ag/multi-head-attention* (:value state) (:value state)
-                                       (:value state) heads)
+             output
              nil))
 
     :llama-block
@@ -201,10 +206,18 @@
           query (if rope? (ag/rotary-embedding* query0 heads rope-options) query0)
           key (if rope? (ag/rotary-embedding* key0 heads key-rope-options) key0)
           value (project context-layout :vw :vb)
-          attended (if (seq attention-options)
-                     (ag/multi-head-attention* query key value heads
-                                               attention-options)
-                     (ag/multi-head-attention* query key value heads))
+          attention-dtype (or (:dtype (:data query)) :f32)
+          stable-query (if (= attention-dtype :f32) query (ag/cast* query :f32))
+          stable-key (if (= attention-dtype :f32) key (ag/cast* key :f32))
+          stable-value (if (= attention-dtype :f32) value (ag/cast* value :f32))
+          stable-attended (if (seq attention-options)
+                            (ag/multi-head-attention* stable-query stable-key
+                                                      stable-value heads
+                                                      attention-options)
+                            (ag/multi-head-attention* stable-query stable-key
+                                                      stable-value heads))
+          attended (if (= attention-dtype :f32)
+                     stable-attended (ag/cast* stable-attended attention-dtype))
           attended-flat (if (= rank 3)
                           (ag/reshape* attended [(* batch sequence) embed])
                           attended)
@@ -298,9 +311,11 @@
     (fail "loss-scale must be a positive number" {:loss-scale loss-scale}))
   (let [layers (model/execution-layers model*)
         _ (when (and autocast-dtype
-                     (seq (remove #{:conv2d :groupnorm :layernorm :rmsnorm :embedding :flatten :silu :relu :sigmoid :tanh :gelu}
+                     (seq (remove #{:linear :conv2d :groupnorm :layernorm :rmsnorm
+                                    :embedding :flatten :silu :relu :sigmoid
+                                    :tanh :gelu :attention :multihead-attention}
                                   (map model/layer-type layers))))
-            (fail "training autocast supports conv2d/groupnorm/layernorm/rmsnorm/embedding/flatten/silu/relu/sigmoid/tanh/gelu only"
+            (fail "training autocast layer lacks typed forward/backward support"
                   {:dtype autocast-dtype}))
         cast-array #(if autocast-dtype (arr/cast % autocast-dtype) %)
         weights (if autocast-dtype
@@ -327,7 +342,15 @@
       {:loss (scalar-readback (:data (:loss result)))
        :prediction (:data (:prediction result))
        :layer-input-gradients (runtime-gradients (:runtime-values result))
-       :gradients (parameter-gradients (:parameters result))}))))
+       :gradients (let [gradients (parameter-gradients (:parameters result))]
+                    (if autocast-dtype
+                      (mapv (fn [gradient]
+                              (when gradient
+                                (into {} (map (fn [[key value]]
+                                                [key (arr/cast value :f32)]))
+                                      gradient)))
+                            gradients)
+                      gradients))}))))
 
 (defn mixed-precision-adamw-step
   "Run typed forward, scaled backward, overflow handling, and f32 AdamW update.
