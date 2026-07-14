@@ -48,6 +48,13 @@
         :main-opts ["-m" "cljs.main"
                     "-co" "{:optimizations :simple :target :nodejs :main torch.deno-metal-train-verify :output-to \"target/deno-metal-train-verify.cjs\"}"
                     "-c" "torch.deno-metal-train-verify"]}
+       :deno-metal-llama-train-verify
+       {:extra-paths ["test"]
+        :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-metal-llama-train-verify :output-to \"target/deno-metal-llama-train-verify.cjs\"}"
+                    "-c" "torch.deno-metal-llama-train-verify"]}
        :cljs-learned-attention-verify
        {:extra-paths ["test"]
         :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}

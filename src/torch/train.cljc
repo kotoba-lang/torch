@@ -130,7 +130,15 @@
           restore (fn [v features]
                     (if (= rank 3) (ag/reshape* v [batch sequence features]) v))
           linear (fn [v key out]
-                   (restore (ag/matmul* (flatten v) (get parameters key)) out))
+                   (let [flat (flatten v)
+                         parameter (get parameters key)]
+                     (when-not (= (or (:dtype (:data flat)) :f32)
+                                  (or (:dtype (:data parameter)) :f32))
+                       (fail "Llama linear operands must have the same dtype"
+                             {:parameter key
+                              :input-dtype (:dtype (:data flat))
+                              :weight-dtype (:dtype (:data parameter))}))
+                     (restore (ag/matmul* flat parameter) out)))
           normalized (ag/rms-norm-last* input (:attn-norm parameters) eps)
           q0 (linear normalized :qw embed)
           k0 (linear normalized :kw kv-embed)
@@ -139,8 +147,19 @@
                      :position-offset (or (:position-offset opts) 0)}
           query (ag/rotary-embedding* q0 heads rope-opts)
           key (ag/rotary-embedding* k0 kv-heads rope-opts)
+          _ (when-not (= (or (:dtype (:data query)) :f32)
+                         (or (:dtype (:data key)) :f32)
+                         (or (:dtype (:data value)) :f32))
+              (fail "Llama attention operands must have the same dtype"
+                    {:query (:dtype (:data query)) :key (:dtype (:data key))
+                     :value (:dtype (:data value))}))
           attended (ag/multi-head-attention* query key value heads
                                              {:causal? true :kv-heads kv-heads})
+          _ (when-not (= (or (:dtype (:data query)) :f32)
+                         (or (:dtype (:data attended)) :f32))
+              (fail "Llama attention changed dtype"
+                    {:input (:dtype (:data query))
+                     :output (:dtype (:data attended))}))
           attention-output (linear attended :ow embed)
           residual (ag/add* input attention-output)
           ffn-input (ag/rms-norm-last* residual (:ffn-norm parameters) eps)
@@ -321,7 +340,8 @@
         _ (when (and autocast-dtype
                      (seq (remove #{:linear :conv2d :groupnorm :layernorm :rmsnorm
                                     :embedding :flatten :silu :relu :sigmoid
-                                    :tanh :gelu :attention :multihead-attention}
+                                    :tanh :gelu :attention :multihead-attention
+                                    :llama-block :lm-head}
                                   (map model/layer-type layers))))
             (fail "training autocast layer lacks typed forward/backward support"
                   {:dtype autocast-dtype}))

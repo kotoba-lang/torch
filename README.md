@@ -700,6 +700,13 @@ loss, the asynchronous API reads back only overflow flags before fused AdamW. Ap
 F16 prediction, all eight Q/K/V/output projection gradients, GradScaler state,
 and updated master-weight parity against the CPU oracle.
 
+The same path now covers a complete pre-normalized Llama block with grouped-query
+causal attention: RMSNorm → RoPE → GQA → residual → RMSNorm → SwiGLU → residual.
+Packed-F16 activation gradients and f32 master-parameter gradients remain on
+Metal through all nine trainable tensors. `:deno-metal-llama-train-verify`
+compares prediction, every VJP, GradScaler/AdamW state, and updated weights with
+an independent f32 CPU oracle using `kv-heads=1` and two query heads.
+
 The reference path supports recursively nested sequential models composed from
 `:linear/:conv2d/:embedding/:groupnorm/:layernorm/:rmsnorm/:flatten/:relu/:silu/:sigmoid/:tanh/:gelu/:softmax/:attention/:multihead-attention/:llama-block/:lm-head`, with MSE and
 stateful PyTorch-style SGD plus immutable AdamW. NCHW grouped convolution, affine GroupNorm, SiLU, and
