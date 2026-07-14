@@ -26,7 +26,8 @@
 (defn tokenizer
   "Build a tokenizer from `:tokens` (ID order) and ordered `:merges` pairs.
   Optional keys: `:unk-id`, `:bos-id`, `:eos-id`, `:add-bos?`, `:add-eos?`,
-  and `:space-prefix` (for example `\"▁\"` for SentencePiece-style spaces)."
+  `:space-prefix` (for example `\"▁\"` for SentencePiece-style spaces),
+  `:prepend-space?`, and `:strip-leading-space?`."
   [{:keys [tokens merges scores model] :as options}]
   (when-not (and (vector? tokens) (every? string? tokens))
     (throw (ex-info "tokenizer :tokens must be a vector of strings" {})))
@@ -111,11 +112,13 @@
   tokens; if a required byte token is absent, `:unk-id` is used or an error is
   thrown."
   [tokenizer text]
-  (let [{:keys [token->id merge-ranks space-prefix bos-id eos-id add-bos? add-eos?
-                unk-id]} tokenizer
+  (let [{:keys [token->id merge-ranks space-prefix prepend-space?
+                bos-id eos-id add-bos? add-eos? unk-id]} tokenizer
         sentencepiece? (= :sentencepiece (:model tokenizer))
         text (if (and space-prefix (not sentencepiece?))
-               (str/replace text " " space-prefix) text)
+               (str/replace (if prepend-space? (str space-prefix text) text)
+                            " " space-prefix)
+               text)
         initial (when-not sentencepiece? (vec (initial-symbols tokenizer text)))
         symbols (loop [symbols initial]
                   (if-let [[_rank index _pair] (best-merge symbols merge-ranks)]
@@ -134,7 +137,8 @@
   "Decode token IDs. BOS/EOS and any IDs in `:special-ids` are skipped by
   default; pass `{:skip-special? false}` to preserve their token strings."
   ([tokenizer ids] (decode tokenizer ids {}))
-  ([{:keys [tokens bos-id eos-id special-ids space-prefix] :as _tokenizer}
+  ([{:keys [tokens bos-id eos-id special-ids space-prefix strip-leading-space?]
+     :as _tokenizer}
     ids {:keys [skip-special?] :or {skip-special? true}}]
    (let [specials (set (concat special-ids [bos-id eos-id]))
          bytes (mapcat (fn [id]
@@ -147,8 +151,10 @@
                                    :cljs (js/parseInt hex 16))]
                                (utf8-bytes token)))))
                        ids)
-         text (bytes->utf8 (vec bytes))]
-     (if space-prefix (str/replace text space-prefix " ") text))))
+         text (bytes->utf8 (vec bytes))
+         text (if space-prefix (str/replace text space-prefix " ") text)]
+     (if (and strip-leading-space? (str/starts-with? text " "))
+       (subs text 1) text))))
 
 (defn decode-step
   "Incremental decode state. Returns `{:state ... :text newly-emitted-text}`.

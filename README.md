@@ -802,8 +802,16 @@ tied embeddings, and constructs the complete runnable model:
 (def resource
   (hf/load-llama-resource "config.json"
                           "model.safetensors.index.json"
-                          backend))
+                          backend
+                          {:tokenizer-path "tokenizer.json"
+                           :tokenizer-config-path "tokenizer_config.json"}))
 ```
+
+The tokenizer loader supports the standard Llama byte-fallback BPE JSON:
+contiguous vocabulary IDs, ordered merges, UTF-8 byte tokens, normalizer space
+prefix/prepend semantics, TemplateProcessing BOS/EOS insertion, special-token
+skipping, and decoder prefix stripping. It rejects unknown normalizers or
+decoders instead of silently emitting IDs that differ from Transformers.
 
 The loader was also verified against a third-party, non-fixture checkpoint:
 
@@ -812,18 +820,27 @@ curl -L --fail -o /tmp/tiny-random-hf-llama-config.json \
   'https://huggingface.co/dacorvo/tiny-random-llama/resolve/main/config.json?download=true'
 curl -L --fail -o /tmp/tiny-random-hf-llama.safetensors \
   'https://huggingface.co/dacorvo/tiny-random-llama/resolve/main/model.safetensors?download=true'
+curl -L --fail -o /tmp/tiny-random-hf-llama-tokenizer.json \
+  'https://huggingface.co/dacorvo/tiny-random-llama/resolve/main/tokenizer.json?download=true'
+curl -L --fail -o /tmp/tiny-random-hf-llama-tokenizer-config.json \
+  'https://huggingface.co/dacorvo/tiny-random-llama/resolve/main/tokenizer_config.json?download=true'
 
 # model SHA-256: f2862981ba362b49503e463b4969a1d87496953a98858f4b0e1110bd13ab0a1c
 clojure -M:public-safetensors-verify \
   /tmp/tiny-random-hf-llama-config.json \
-  /tmp/tiny-random-hf-llama.safetensors
+  /tmp/tiny-random-hf-llama.safetensors \
+  /tmp/tiny-random-hf-llama-tokenizer.json \
+  /tmp/tiny-random-hf-llama-tokenizer-config.json
 ```
 
 That public F32 model has one 128-wide Llama block and a 32,000-token
 vocabulary. The verifier loads all 12 standard tensors and executes the complete
 embedding → decoder → norm → LM-head graph, producing `[1,32000]` finite logits.
+For `Hello, world! こんにちは`, it emits
+`[1,15043,29892,3186,29991,29871,30589,30389,30353,30644,30449]`, exactly the
+same IDs as Hugging Face `tokenizers` 0.21.4, and decodes them losslessly.
 Its weights are random; this proves format/layout/runtime compatibility, not
-language quality. Tokenizer JSON ingestion remains a separate boundary.
+language quality.
 
 ## Test
 

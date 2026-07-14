@@ -2,9 +2,11 @@
   "JVM loader for standard Hugging Face Llama config + safetensors checkpoints."
   (:require [clojure.data.json :as json]
             [clojure.set :as set]
+            [clojure.string :as str]
             [num.array :as arr]
             [torch.model :as model]
-            [torch.safetensors :as safe])
+            [torch.safetensors :as safe]
+            [torch.tokenizer :as tokenizer])
   (:import [java.nio.charset StandardCharsets]
            [java.nio.file Files Path]))
 
@@ -12,11 +14,23 @@
   (if (instance? Path value) value
       (Path/of (str value) (make-array String 0))))
 
+(defn- read-json [value limit kind]
+  (let [source (path value)
+        length (Files/size source)]
+    (when (> length limit)
+      (throw (ex-info (str "torch.huggingface: " kind " is too large")
+                      {:path (str source) :bytes length :limit limit})))
+    (let [document (json/read-str (String. (Files/readAllBytes source)
+                                           StandardCharsets/UTF_8))]
+      (when-not (map? document)
+        (throw (ex-info (str "torch.huggingface: " kind " must be an object")
+                        {:path (str source)})))
+      document)))
+
 (defn load-config
   "Read and validate the Llama subset of a Hugging Face `config.json`."
   [config-path]
-  (let [raw (json/read-str (String. (Files/readAllBytes (path config-path))
-                                    StandardCharsets/UTF_8))
+  (let [raw (read-json config-path (* 16 1024 1024) "config")
         head-count (get raw "num_attention_heads")
         config {:architecture (get raw "model_type")
                 :block-count (get raw "num_hidden_layers")
@@ -39,6 +53,107 @@
       (throw (ex-info "torch.huggingface: unsupported or invalid Llama config"
                       config)))
     config))
+
+(defn- token-content [value]
+  (if (string? value) value (get value "content")))
+
+(defn- merge-pair [merge]
+  (cond
+    (and (vector? merge) (= 2 (count merge)) (every? string? merge)) merge
+    (string? merge) (let [pair (str/split merge #" " 2)]
+                      (when (= 2 (count pair)) pair))
+    :else nil))
+
+(defn- special-template-ids [processor]
+  (mapv #(get-in % ["SpecialToken" "id"])
+        (filter #(contains? % "SpecialToken") (get processor "single" []))))
+
+(defn load-tokenizer
+  "Load the byte-fallback BPE form emitted by Hugging Face tokenizers for
+  Llama. The optional tokenizer config supplies canonical BOS/EOS/UNK names and
+  chat template metadata. Unsupported normalization/decoder semantics fail
+  closed rather than silently producing different token IDs."
+  ([tokenizer-path] (load-tokenizer tokenizer-path nil))
+  ([tokenizer-path tokenizer-config-path]
+   (let [document (read-json tokenizer-path (* 256 1024 1024) "tokenizer")
+         config (if tokenizer-config-path
+                  (read-json tokenizer-config-path (* 16 1024 1024)
+                             "tokenizer config") {})
+         model* (get document "model")
+         vocab (get model* "vocab")
+         merges (get model* "merges")
+         size (count vocab)
+         ids (set (vals vocab))
+         tokens (when (and (map? vocab) (every? string? (keys vocab))
+                           (every? integer? ids)
+                           (= ids (set (range size))))
+                  (reduce-kv (fn [result token id] (assoc result id token))
+                             (vec (repeat size nil)) vocab))
+         pairs (when (vector? merges) (mapv merge-pair merges))
+         normalizer* (get document "normalizer")
+         normalizers (if (= "Sequence" (get normalizer* "type"))
+                       (get normalizer* "normalizers") [normalizer*])
+         normalizer-types (set (map #(get % "type") normalizers))
+         prepend (some #(when (= "Prepend" (get % "type")) %) normalizers)
+         replace* (some #(when (= "Replace" (get % "type")) %) normalizers)
+         decoder* (get document "decoder")
+         decoders (if (= "Sequence" (get decoder* "type"))
+                    (get decoder* "decoders") [decoder*])
+         decoder-types (set (map #(get % "type") decoders))
+         decoder-replace (some #(when (= "Replace" (get % "type")) %) decoders)
+         decoder-strip (some #(when (= "Strip" (get % "type")) %) decoders)
+         processor (get document "post_processor")
+         template-specials (special-template-ids processor)
+         bos-token (or (token-content (get config "bos_token"))
+                       (first template-specials) "<s>")
+         eos-token (or (token-content (get config "eos_token")) "</s>")
+         unk-token (or (token-content (get config "unk_token"))
+                       (get model* "unk_token") "<unk>")
+         bos-id (get vocab bos-token)
+         eos-id (get vocab eos-token)
+         unk-id (get vocab unk-token)
+         added (get document "added_tokens" [])
+         special-ids (set (keep #(when (get % "special") (get % "id")) added))]
+     (when-not (and (= "1.0" (get document "version"))
+                    (= "BPE" (get model* "type"))
+                    (true? (get model* "byte_fallback"))
+                    (nil? (get model* "dropout"))
+                    (nil? (get model* "continuing_subword_prefix"))
+                    (nil? (get model* "end_of_word_suffix"))
+                    (nil? (get document "pre_tokenizer"))
+                    tokens (not-any? nil? tokens)
+                    pairs (not-any? nil? pairs)
+                    (= #{"Prepend" "Replace"} normalizer-types)
+                    (= "▁" (get prepend "prepend"))
+                    (= {"String" " "} (get replace* "pattern"))
+                    (= "▁" (get replace* "content"))
+                    (= #{"Replace" "ByteFallback" "Fuse" "Strip"}
+                       decoder-types)
+                    (= {"String" "▁"} (get decoder-replace "pattern"))
+                    (= " " (get decoder-replace "content"))
+                    (= " " (get decoder-strip "content"))
+                    (= 1 (get decoder-strip "start"))
+                    (= 0 (get decoder-strip "stop"))
+                    (integer? bos-id) (integer? eos-id) (integer? unk-id)
+                    (every? (fn [{:strs [id content]}]
+                              (and (integer? id) (< -1 id size)
+                                   (= content (nth tokens id))))
+                            added))
+       (throw (ex-info "torch.huggingface: unsupported tokenizer semantics"
+                       {:path (str tokenizer-path)
+                        :model-type (get model* "type")
+                        :vocab-size size
+                        :decoder-types decoder-types})))
+     (tokenizer/tokenizer
+      {:tokens tokens :merges pairs :model :bpe
+       :unk-id unk-id :bos-id bos-id :eos-id eos-id
+       :special-ids special-ids
+       :add-bos? (boolean (some #{bos-token} template-specials))
+       :add-eos? (boolean (some #{eos-token} template-specials))
+       :space-prefix "▁" :prepend-space? true :strip-leading-space? true
+       :chat-template (get config "chat_template")
+       :model-max-length (get config "model_max_length")
+       :source (str tokenizer-path)}))))
 
 (defn llama-model [config]
   (let [{:keys [block-count embed-dim hidden-dim head-count kv-head-count
@@ -147,8 +262,12 @@
    (load-llama-resource config-path checkpoint-path backend {}))
   ([config-path checkpoint-path backend options]
    (let [config (load-config config-path)
-         model* (llama-model config)]
+         model* (llama-model config)
+         tokenizer* (when-let [tokenizer-path (:tokenizer-path options)]
+                      (load-tokenizer tokenizer-path
+                                      (:tokenizer-config-path options)))]
      (with-open [checkpoint (safe/open-checkpoint checkpoint-path)]
-       {:config config :model model*
-        :weights (load-llama-weights checkpoint backend config options)
-        :checkpoint-path (str checkpoint-path)}))))
+       (cond-> {:config config :model model*
+                :weights (load-llama-weights checkpoint backend config options)
+                :checkpoint-path (str checkpoint-path)}
+         tokenizer* (assoc :tokenizer tokenizer*))))))

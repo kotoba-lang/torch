@@ -6,7 +6,8 @@
             [torch.core :as core]
             [torch.huggingface :as hf]
             [torch.num-backend :as nb]
-            [torch.safetensors :as safe])
+            [torch.safetensors :as safe]
+            [torch.tokenizer :as tokenizer])
   (:import [java.nio.file Files OpenOption]
            [java.nio.file.attribute FileAttribute]))
 
@@ -42,6 +43,28 @@
 
 (defn- write-json! [path value]
   (Files/writeString path (json/write-str value) (make-array OpenOption 0)))
+
+(def tokenizer-json
+  {"version" "1.0"
+   "added_tokens" [{"id" 0 "content" "<unk>" "special" true}
+                   {"id" 1 "content" "<s>" "special" true}
+                   {"id" 2 "content" "</s>" "special" true}]
+   "normalizer" {"type" "Sequence"
+                 "normalizers" [{"type" "Prepend" "prepend" "▁"}
+                                {"type" "Replace" "pattern" {"String" " "}
+                                 "content" "▁"}]}
+   "post_processor" {"type" "TemplateProcessing"
+                     "single" [{"SpecialToken" {"id" "<s>" "type_id" 0}}
+                               {"Sequence" {"id" "A" "type_id" 0}}]}
+   "decoder" {"type" "Sequence"
+              "decoders" [{"type" "Replace" "pattern" {"String" "▁"}
+                           "content" " "}
+                          {"type" "ByteFallback"} {"type" "Fuse"}
+                          {"type" "Strip" "content" " " "start" 1 "stop" 0}]}
+   "model" {"type" "BPE" "byte_fallback" true
+            "vocab" {"<unk>" 0 "<s>" 1 "</s>" 2 "▁" 3 "H" 4 "i" 5
+                     "▁H" 6 "▁Hi" 7}
+            "merges" ["▁ H" "▁H i"]}})
 
 (deftest loads-standard-sharded-hugging-face-llama
   (let [directory (Files/createTempDirectory "torch-hf-" (make-array FileAttribute 0))
@@ -100,3 +123,18 @@
       (finally
         (doseq [path [checkpoint config-path directory]]
           (Files/deleteIfExists path))))))
+
+(deftest loads-hugging-face-byte-fallback-bpe-semantics
+  (let [path (Files/createTempFile "torch-hf-tokenizer-" ".json"
+                                   (make-array FileAttribute 0))]
+    (try
+      (write-json! path tokenizer-json)
+      (let [loaded (hf/load-tokenizer path)]
+        (is (= [1 7] (tokenizer/encode loaded "Hi")))
+        (is (= "Hi" (tokenizer/decode loaded [1 7])))
+        (is (= #{0 1 2} (:special-ids loaded))))
+      (write-json! path (assoc tokenizer-json "normalizer" {"type" "Lowercase"}))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                            #"unsupported tokenizer semantics"
+                            (hf/load-tokenizer path)))
+      (finally (Files/deleteIfExists path)))))
