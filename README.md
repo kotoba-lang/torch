@@ -708,6 +708,13 @@ IDs to exercise embedding scatter-add semantics, then compares prediction,
 every VJP, GradScaler/AdamW state, and updated weights with an independent f32
 CPU oracle using `kv-heads=1` and two query heads.
 
+Language-model training can select stable token-label cross entropy with
+`{:loss :cross-entropy :ignore-index -100}`. Labels retain integer-valued f32
+storage while logits stay packed F16; mean reduction excludes ignored positions,
+and the loss-scaled logit VJP feeds the same asynchronous GradScaler/AdamW path.
+The Metal verifier uses shifted next-token labels and ignores the final position,
+rather than training logits against a synthetic MSE target.
+
 The reference path supports recursively nested sequential models composed from
 `:linear/:conv2d/:embedding/:groupnorm/:layernorm/:rmsnorm/:flatten/:relu/:silu/:sigmoid/:tanh/:gelu/:softmax/:attention/:multihead-attention/:llama-block/:lm-head`, with MSE and
 stateful PyTorch-style SGD plus immutable AdamW. NCHW grouped convolution, affine GroupNorm, SiLU, and

@@ -323,19 +323,23 @@
        :gradients (parameter-gradients (:parameters graph))}))))
 
 (defn loss-and-gradients
-  "Run a supported sequential model with MSE and return prediction/gradients.
+  "Run a supported sequential model and return prediction/loss/gradients.
 
   Optional `:loss-scale` multiplies the backward seed while keeping the
-  reported loss unchanged. `:layer-options` carries aligned runtime layer
+  reported loss unchanged. `:loss` is `:mse` (default) or stable token-label
+  `:cross-entropy`; the latter supports `:ignore-index`. `:layer-options` carries aligned runtime layer
   inputs such as context and key-padding masks; their gradients are returned
   in `:layer-input-gradients`. This is the reference seam used by
   GradScaler."
   ([model* weights input target]
    (loss-and-gradients model* weights input target {}))
-  ([model* weights input target {:keys [loss-scale autocast-dtype layer-options]
-                                 :or {loss-scale 1.0}}]
+  ([model* weights input target
+    {:keys [loss-scale autocast-dtype layer-options loss ignore-index]
+     :or {loss-scale 1.0 loss :mse ignore-index -100}}]
   (when-not (and (number? loss-scale) (pos? loss-scale))
     (fail "loss-scale must be a positive number" {:loss-scale loss-scale}))
+  (when-not (#{:mse :cross-entropy} loss)
+    (fail "loss must be :mse or :cross-entropy" {:loss loss}))
   (let [layers (model/execution-layers model*)
         _ (when (and autocast-dtype
                      (seq (remove #{:linear :conv2d :groupnorm :layernorm :rmsnorm
@@ -355,7 +359,7 @@
                   weights)
         embedding-input? (= :embedding (model/layer-type (first layers)))
         input (if embedding-input? input (cast-array input))
-        target (cast-array target)
+        target (if (= loss :cross-entropy) target (cast-array target))
         layer-options (or layer-options (repeat (count layers) nil))]
     (validate-weights! layers weights)
     (when-not (= (count layers) (count layer-options))
@@ -366,12 +370,17 @@
             (let [graph (forward-graph layers weights input layer-options)
                   prediction (:prediction graph)
                   prediction-dtype (or (:dtype (:data prediction)) :f32)
-                  stable-prediction (if (= prediction-dtype :f32)
-                                      prediction (ag/cast* prediction :f32))
-                  stable-target (if (= prediction-dtype :f32)
-                                  target (arr/cast target :f32))
-                  loss (ag/mse-loss* stable-prediction stable-target)]
-              (assoc graph :loss loss)))]
+                  loss-node
+                  (if (= loss :cross-entropy)
+                    (ag/cross-entropy-loss* prediction target
+                                            {:ignore-index ignore-index})
+                    (let [stable-prediction (if (= prediction-dtype :f32)
+                                              prediction
+                                              (ag/cast* prediction :f32))
+                          stable-target (if (= prediction-dtype :f32)
+                                          target (arr/cast target :f32))]
+                      (ag/mse-loss* stable-prediction stable-target)))]
+              (assoc graph :loss loss-node)))]
       (ag/backward! (:loss result) (arr/from-vec (:backend input) [loss-scale] []) tape)
       {:loss (scalar-readback (:data (:loss result)))
        :prediction (:data (:prediction result))
@@ -392,12 +401,15 @@
   `weights` remain f32 master weights. The returned prediction has the autocast
   dtype; gradients are unscaled to f32 before the optimizer update."
   [model* weights input target optimizer-state scaler
-   {:keys [autocast-dtype adamw-options]
+   {:keys [autocast-dtype adamw-options layer-options loss ignore-index]
     :or {autocast-dtype :f16 adamw-options {}}}]
   (let [{:keys [gradients] :as pass}
         (loss-and-gradients model* weights input target
                             {:autocast-dtype autocast-dtype
-                             :loss-scale (:scale scaler)})
+                             :loss-scale (:scale scaler)
+                             :layer-options layer-options
+                             :loss (or loss :mse)
+                             :ignore-index (or ignore-index -100)})
         update (optim/scaled-adamw-step weights gradients optimizer-state
                                          scaler adamw-options)]
     (merge (dissoc pass :gradients) update)))
@@ -411,13 +423,15 @@
   returns a completed CompletableFuture. Beyond the reported scalar loss, only
   scalar overflow flags are read from an asynchronous device backend."
   [model* weights input target optimizer-state scaler
-   {:keys [autocast-dtype adamw-options layer-options]
+   {:keys [autocast-dtype adamw-options layer-options loss ignore-index]
     :or {autocast-dtype :f16 adamw-options {}}}]
   (let [{:keys [gradients] :as pass}
         (loss-and-gradients model* weights input target
                             {:autocast-dtype autocast-dtype
                              :loss-scale (:scale scaler)
-                             :layer-options layer-options})
+                             :layer-options layer-options
+                             :loss (or loss :mse)
+                             :ignore-index (or ignore-index -100)})
         update (optim/scaled-adamw-step-async
                 weights gradients optimizer-state scaler adamw-options)
         finish (fn [result] (merge (dissoc pass :gradients) result))]

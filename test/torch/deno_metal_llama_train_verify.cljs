@@ -9,12 +9,9 @@
             [torch.train :as train]))
 
 (def input-values [2 0 2])
-(def target-values
-  [0.1 0.0 0.2 -0.1 0.0 0.1 -0.2 0.0,
-   0.0 0.2 0.1 0.3 -0.1 0.0 0.1 -0.2,
-   -0.2 0.1 0.0 0.2 0.1 -0.1 0.0 0.3])
+(def target-values [0 2 -100])
 (def input-shape [1 3])
-(def target-shape [1 3 8])
+(def target-shape [1 3])
 (def parameter-names
   [:attn-norm :qw :kw :vw :ow :ffn-norm :gate :up :down])
 (def parameter-paths
@@ -48,7 +45,8 @@
                   model* cpu-weights
                   (arr/from-vec cpu-backend input-values input-shape)
                   (arr/from-vec cpu-backend target-values target-shape)
-                  {:loss-scale (:scale scaler)})
+                  {:loss :cross-entropy :ignore-index -100
+                   :loss-scale (:scale scaler)})
         cpu-step (optim/scaled-adamw-step
                   cpu-weights (:gradients cpu-pass) nil scaler adamw-options)
         expected-prediction (arr/->vec (:prediction cpu-pass))
@@ -63,12 +61,14 @@
                  target (arr/from-vec backend target-values target-shape)
                  pass (train/loss-and-gradients
                        model* weights input target
-                       {:autocast-dtype :f16 :loss-scale (:scale scaler)})
+                       {:autocast-dtype :f16 :loss :cross-entropy
+                        :ignore-index -100 :loss-scale (:scale scaler)})
                  step (train/mixed-precision-adamw-step-async
                        model* (nb/random-weights backend model* 79)
                        (arr/from-vec backend input-values input-shape)
                        (arr/from-vec backend target-values target-shape)
                        nil scaler {:autocast-dtype :f16
+                                   :loss :cross-entropy :ignore-index -100
                                    :adamw-options adamw-options})]
              (.then
               step

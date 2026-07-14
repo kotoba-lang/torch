@@ -7,6 +7,11 @@
 
 (def backend (cpu/cpu-backend))
 
+(defn- approx-vec? [expected actual]
+  (and (= (count expected) (count actual))
+       (every? true? (map #(< (Math/abs (- %1 %2)) 1.0e-9)
+                          expected actual))))
+
 (deftest model-description-trains-through-autograd
   (let [model (m/sequential (m/linear 2 3) (m/relu)
                             (m/linear 3 2) (m/softmax))
@@ -326,3 +331,20 @@
     (is (some #(not (zero? %)) (arr/->vec context-gradient)))
     (is (= #{:qw :qb :kw :kb :vw :vb :ow :ob}
            (set (keys (first (:gradients result))))))))
+
+(deftest token-label-cross-entropy-trains-through-model-api
+  (let [model (m/sequential (m/linear 2 3))
+        weights [{:w (arr/from-vec backend (repeat 6 0.0) [2 3])
+                  :b (arr/from-vec backend (repeat 3 0.0) [3])}]
+        result (train/loss-and-gradients
+                model weights
+                (arr/from-vec backend [1.0 0.0, 0.0 1.0] [2 2])
+                (arr/from-vec backend [2 -100] [2])
+                {:loss :cross-entropy :ignore-index -100})
+        gradients (first (:gradients result))]
+    (is (< (Math/abs (- (:loss result) (Math/log 3.0))) 1.0e-9))
+    (is (approx-vec? [(/ 1.0 3.0) (/ 1.0 3.0) (/ -2.0 3.0)
+                      0.0 0.0 0.0]
+                     (arr/->vec (:w gradients))))
+    (is (approx-vec? [(/ 1.0 3.0) (/ 1.0 3.0) (/ -2.0 3.0)]
+                     (arr/->vec (:b gradients))))))
