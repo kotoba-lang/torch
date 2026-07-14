@@ -870,6 +870,51 @@ expires the model, and asserts `loads=1`, `unloads=1`, `loaded-models=0`, and
 Its weights are random; this proves format/layout/runtime compatibility, not
 language quality.
 
+### Hugging Face → Apple Metal serving
+
+The JVM exporter converts the same safetensors resource into a portable
+`TGBNDL1` v3 bundle. It streams tensor payloads through a temporary file and
+atomically replaces the destination, so it does not retain a second complete
+model payload in heap. Dense HF matrices are already transposed into the Metal
+runtime's execution layout; tokenizer normalization/decoder options travel in
+the manifest with the weights:
+
+```sh
+clojure -M:hf-bundle-export \
+  /tmp/tiny-random-hf-llama-config.json \
+  /tmp/tiny-random-hf-llama.safetensors \
+  /tmp/tiny-random-hf-llama-tokenizer.json \
+  /tmp/tiny-random-hf-llama-tokenizer-config.json \
+  target/tiny-random-hf-llama-metal.tgb
+
+# Full Llama CPU/Metal greedy parity and buffer release
+clojure -M:deno-public-gguf-metal-verify
+deno run --allow-all target/deno-public-gguf-metal-verify.cjs \
+  target/tiny-random-hf-llama-metal.tgb
+
+# Real Ollama streaming/non-streaming HTTP and cancellation
+clojure -M:deno-public-gguf-ollama-verify
+deno run --allow-all target/deno-public-gguf-ollama-verify.cjs \
+  target/tiny-random-hf-llama-metal.tgb
+
+# Resident registry, Ollama management/chat/embed, and OpenAI APIs
+clojure -M:deno-public-gguf-registry-verify
+deno run --allow-all target/deno-public-gguf-registry-verify.cjs \
+  target/tiny-random-hf-llama-metal.tgb
+```
+
+On Apple M4 the 34,646,927-byte public HF bundle produced the same four greedy
+tokens on CPU and Metal (`[22056,1092,8384,8375]`). Releasing weights and cache
+retired 14 buffers / 33,457,664 bytes with no transient buffers left. The real
+Ollama socket returned its first streamed response before completion, matched
+streaming and non-streaming contexts, propagated disconnect cancellation, and
+restored the GPU baseline. The registry suite additionally passed Ollama
+generate/chat/embed/ps/show/copy/delete, OpenAI models/chat/embeddings, dynamic
+residency tags, LRU eviction, exactly-once load/unload, and ended with both
+registry resident bytes and GPU live bytes back at baseline. The historical
+verifier alias names contain `gguf`, but the verifier itself is now portable and
+driven by the v2/v3 bundle manifest.
+
 ## Test
 
 ```
