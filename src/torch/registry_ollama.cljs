@@ -114,6 +114,8 @@
                                  #(into {} (remove (fn [[key _]]
                                                     (re-find #"tokenizer.*(tokens|scores|merges)"
                                                              (str key)))) %)))))
+    :copy-model! #(registry-runtime/copy-model! (:runtime router*) %1 %2)
+    :delete-model! #(registry-runtime/delete-model! (:runtime router*) %)
     :generate-stream! #(js/Promise.resolve (routed-stream router* %1 %2))
     :generate! #(routed-generate router* %1 %2)
     :embed! #(routed-embed router* %1 %2)

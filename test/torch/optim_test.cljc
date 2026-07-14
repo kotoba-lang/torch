@@ -16,6 +16,50 @@
     (is (= 1 (get-in result [:state :step])))
     (is (< (first (arr/->vec (get-in result [:weights 0 :w]))) 1.0))))
 
+(deftest sgd-momentum-nesterov-and-weight-decay-match-reference-equations
+  (let [weights [{:w (arr/from-vec backend [1.0] [1])}]
+        gradients [{:w (arr/from-vec backend [0.5] [1])}]
+        options {:learning-rate 0.1 :momentum 0.9 :weight-decay 0.1
+                 :nesterov true}
+        first-step (optim/sgd-step weights gradients nil options)
+        second-step (optim/sgd-step (:weights first-step) gradients
+                                    (:state first-step) options)]
+    (is (< (Math/abs (- 0.886
+                        (first (arr/->vec (get-in first-step [:weights 0 :w])))))
+           1.0e-12))
+    (is (< (Math/abs (- 0.725566
+                        (first (arr/->vec (get-in second-step [:weights 0 :w])))))
+           1.0e-12))
+    (is (= 2 (get-in second-step [:state :step])))
+    (is (< (Math/abs (- 1.1286
+                        (first (arr/->vec
+                                (get-in second-step
+                                        [:state :slots 0 :w :momentum-buffer])))))
+           1.0e-12))))
+
+(deftest sgd-first-buffer-skips-dampening-and-maximize-reverses-direction
+  (let [weights [{:w (arr/from-vec backend [1.0] [1])}]
+        gradients [{:w (arr/from-vec backend [0.5] [1])}]
+        options {:learning-rate 0.1 :momentum 0.5 :dampening 0.2}
+        first-step (optim/sgd-step weights gradients nil options)
+        second-step (optim/sgd-step (:weights first-step) gradients
+                                    (:state first-step) options)
+        maximized (optim/sgd-step weights gradients nil
+                                  {:learning-rate 0.1 :maximize true})]
+    (is (< (Math/abs (- 0.95 (first (arr/->vec
+                                     (get-in first-step [:weights 0 :w])))))
+           1.0e-12))
+    (is (< (Math/abs (- 0.885 (first (arr/->vec
+                                      (get-in second-step [:weights 0 :w])))))
+           1.0e-12))
+    (is (< (Math/abs (- 1.05 (first (arr/->vec
+                                     (get-in maximized [:weights 0 :w])))))
+           1.0e-12))
+    (is (thrown-with-msg?
+         #?(:clj Exception :cljs js/Error) #"invalid SGD"
+         (optim/sgd-step weights gradients nil
+                         {:momentum 0.9 :dampening 0.1 :nesterov true})))))
+
 (deftest dynamic-loss-scaling-unscales-and-detects-overflow
   (let [scaler (optim/grad-scaler {:initial-scale 8.0 :growth-interval 2})
         finite [(hash-map :w (arr/from-vec backend [16.0 -8.0] [2]))]
@@ -138,3 +182,34 @@
     (is (= [2 4] (:shape (get-in trained [:state :slots 0 :w :moment]))))
     (is (not= (arr/->vec (:w (first initial)))
               (arr/->vec (:w (first (:weights trained))))))))
+
+(deftest unified-optimizer-step-connects-model-autograd-and-stateful-sgd
+  (let [model (m/sequential (m/linear 2 4) (m/silu) (m/linear 4 2))
+        input (arr/from-vec backend [1 0 0 1 1 1] [3 2])
+        target (arr/from-vec backend [1 0 0 1 1 0] [3 2])
+        initial (nb/random-weights backend model 83)
+        trained
+        (loop [iteration 0 weights initial state nil losses []]
+          (if (= iteration 60)
+            {:weights weights :state state :losses losses}
+            (let [result
+                  (train/optimizer-step
+                   model weights input target state
+                   {:optimizer :sgd
+                    :optimizer-options
+                    {:learning-rate 0.05 :momentum 0.9 :nesterov true
+                     :weight-decay 0.001}})]
+              (recur (inc iteration) (:weights result)
+                     (:optimizer-state result) (conj losses (:loss result))))))]
+    (is (< (last (:losses trained)) (first (:losses trained))))
+    (is (= 60 (get-in trained [:state :step])))
+    (is (some? (get-in trained [:state :slots 0 :w :momentum-buffer])))
+    (is (nil? (get-in trained [:state :slots 1]))))
+  (is (thrown-with-msg?
+       #?(:clj Exception :cljs js/Error) #"optimizer must"
+       (train/optimizer-step
+        (m/sequential (m/linear 1 1))
+        [{:w (arr/from-vec backend [1.0] [1 1])
+          :b (arr/from-vec backend [0.0] [1])}]
+        (arr/from-vec backend [1.0] [1 1])
+        (arr/from-vec backend [0.0] [1 1]) nil {:optimizer :unknown}))))

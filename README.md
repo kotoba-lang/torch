@@ -258,7 +258,7 @@ released and reused to prefill request `:c`.
 engine submissions and emits Ollama-shaped token/final payloads.
 `torch.ollama-http/handler` is a standard Fetch handler suitable for `Deno.serve`;
 it implements `GET /api/version`, `GET /api/tags`, `GET /api/ps`,
-`POST /api/show`, `POST /api/embed`, and streaming NDJSON or
+`POST /api/show`, `POST /api/copy`, `DELETE /api/delete`, `POST /api/embed`, and streaming NDJSON or
 non-streaming `POST /api/generate` and `POST /api/chat`, including JSON 400/404
 errors. Chat validates ordered system/user/assistant text history, renders a
 model-specific prompt from GGUF `tokenizer.chat_template`, and returns Ollama
@@ -279,10 +279,20 @@ checked against full-sequence CPU hidden states, while the registry verifier run
 two inputs through the public GGUF on Apple Metal and checks dimensions, unit
 norms, lifecycle refcounts, and final GPU cleanup.
 
+The same listener also exposes the Ollama-supported OpenAI compatibility surface:
+`GET /v1/models`, `GET /v1/models/{model}`, `POST /v1/chat/completions`, and
+`POST /v1/embeddings`. Chat defaults to non-streaming as OpenAI clients expect;
+streaming uses `text/event-stream`, one `data:` frame per native generation
+chunk, and a terminal `[DONE]`. Both forms preserve OpenAI choices and token
+usage envelopes while executing through the same resident model and cancellation
+path as `/api/chat`. Unsupported multiple choices, tools, response formats,
+stop sequences, and non-float embedding encodings fail explicitly with an
+OpenAI-shaped error instead of being silently ignored.
+
 ```sh
 clojure -M:deno-ollama-http-verify
 deno run --allow-all target/deno-ollama-http-verify.cjs
-# version/tags, generate/chat, batched embed, invalid request: passed
+# native Ollama plus OpenAI models/chat/embeddings, SSE cancellation: passed
 ```
 
 `serve!` starts a real Deno listener (default `127.0.0.1:11434`) and exposes its
@@ -310,7 +320,10 @@ forced administrative unload, live catalog/tag snapshots, and residency/load/
 eviction metrics are included. The unload callback is where GGUF weights, paged
 K/V pools, and device resources are released. `/api/tags` accepts a snapshot
 function, so loaded/active registry state is visible without rebuilding the HTTP
-handler. A production host still needs to connect its GGUF loader callback to
+handler. `/api/copy` creates an independently loadable catalog alias without
+sharing resident ownership; `/api/delete` releases an inactive resource before
+removing its descriptor and rejects active or unknown models without corrupting
+the registry. A production host still needs to connect its GGUF loader callback to
 model-specific continuous engines.
 
 `torch.registry-runtime` supplies that serialization without `swap!` retries:
@@ -450,6 +463,8 @@ clojure -M:deno-public-gguf-registry-verify && \
 # Ollama ps/show follow real Metal residency: passed
 # Ollama chat runs through the resident public-GGUF Metal model: passed
 # Ollama normalized batched embeddings run on Metal: passed
+# Ollama copy/delete mutate the live model catalog: passed
+# OpenAI chat/embeddings use the resident public-GGUF Metal model: passed
 # inactive model-a LRU-evicted when model-b loads under a 1.5-model budget
 # each model loaded/unloaded exactly once; resident bytes: 0
 # GPU baseline restored: passed
@@ -458,6 +473,11 @@ clojure -M:deno-public-gguf-registry-verify && \
 The remaining production work is now operational scale rather than a missing
 model route: long-context soak/load tests, durable catalog configuration,
 authentication, telemetry, and deployment hardening.
+
+The lifecycle verifier observes a copied alias appear in `/api/tags` and disappear
+after deletion before starting Metal inference. Pure registry tests additionally
+cover duplicate destinations, unknown names, active-delete rejection, and
+exactly-once unload of an inactive alias.
 
 A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
 blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding
@@ -610,6 +630,14 @@ parameter update is a fused device dispatch that produces new weight, first-mome
 and variance buffers; first-step zero slots are allocated on-device. No parameter,
 gradient, or optimizer slot is downloaded.
 
+`torch.optim/sgd-step` implements PyTorch SGD semantics over the same aligned
+device tensors: momentum, first-step buffer initialization, dampening, coupled
+weight decay, Nesterov, and maximize are supported. Momentum buffers are
+immutable optimizer state and remain on the tensor backend; invalid Nesterov
+combinations and mismatched parameter/gradient layouts fail before an update.
+`torch.train/optimizer-step` connects model execution, MSE backward, and either
+`:sgd` or `:adamw` in one call, returning the next weights and optimizer state.
+
 `torch.optim/grad-scaler` and `scaled-adamw-step` provide dynamic loss scaling:
 call `loss-and-gradients` with the scaler's `:scale`, then pass the scaled
 gradients to the optimizer. Gradients are unscaled before AdamW, non-finite
@@ -665,7 +693,7 @@ is real mixed-precision numerical behavior but not GPU-resident autograd.
 
 The reference path supports recursively nested sequential models composed from
 `:linear/:conv2d/:embedding/:groupnorm/:layernorm/:rmsnorm/:flatten/:relu/:silu/:sigmoid/:tanh/:gelu/:softmax/:attention/:multihead-attention/:llama-block/:lm-head`, with MSE and
-positive-rate SGD plus immutable AdamW. NCHW grouped convolution, affine GroupNorm, SiLU, and
+stateful PyTorch-style SGD plus immutable AdamW. NCHW grouped convolution, affine GroupNorm, SiLU, and
 multi-head self-attention all have real reverse-mode gradients; tests verify
 both finite-difference agreement in `num` and decreasing loss through the
 public torch model/weight representation. It is not yet a replacement for
@@ -702,6 +730,9 @@ immutable `sgd-step` update is composed from device elementwise multiply/subtrac
 so parameter and gradient buffers are never downloaded. AdamW now follows the same
 GPU-resident path: four learned-attention steps on Apple M4 verify every final
 weight, first moment, variance, and the decreasing loss trajectory against CPU.
+The same verifier runs Nesterov SGD with momentum and weight decay, comparing
+every final projection weight, every momentum buffer, and the complete loss
+trajectory against CPU without parameter readback during the update.
 The Apple M4 verifier covers both the finite async update and an injected infinity:
 the finite path advances AdamW and GradScaler, while overflow leaves weights and
 optimizer state unchanged and halves the scale. Only scalar control flags cross the

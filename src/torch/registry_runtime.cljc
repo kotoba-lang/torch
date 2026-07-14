@@ -38,6 +38,15 @@
    (transact! runtime*
               #(hash-map :registry (registry/unload % name force?)))))
 
+(defn copy-model! [runtime* source destination]
+  (transact! runtime*
+             #(hash-map :registry
+                        (registry/copy-model % source destination))))
+
+(defn delete-model! [runtime* name]
+  (transact! runtime*
+             #(hash-map :registry (registry/delete-model % name))))
+
 (defn snapshot [runtime*] @(:state runtime*))
 (defn tags [runtime*] (registry/tags (snapshot runtime*)))
 (defn running-models [runtime*] (registry/running-models (snapshot runtime*)))

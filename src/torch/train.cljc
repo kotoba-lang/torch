@@ -345,6 +345,33 @@
                                          scaler adamw-options)]
     (merge (dissoc pass :gradients) update)))
 
+(defn optimizer-step
+  "Run MSE forward/backward and one immutable optimizer update.
+
+  Options accept `:optimizer` (`:sgd` or `:adamw`), `:optimizer-options`, and
+  the same `:layer-options` accepted by `loss-and-gradients`. Returns the
+  pre-update loss/prediction plus new weights and `:optimizer-state`, ready for
+  the next call."
+  ([model* weights input target]
+   (optimizer-step model* weights input target nil {}))
+  ([model* weights input target optimizer-state options]
+   (let [{:keys [optimizer optimizer-options layer-options]
+          :or {optimizer :adamw optimizer-options {}}} options
+         _ (when-not (#{:sgd :adamw} optimizer)
+             (fail "optimizer must be :sgd or :adamw" {:optimizer optimizer}))
+         pass (loss-and-gradients model* weights input target
+                                  {:layer-options layer-options})
+         update (case optimizer
+                  :sgd (optim/sgd-step weights (:gradients pass)
+                                       optimizer-state optimizer-options)
+                  :adamw (optim/adamw-step weights (:gradients pass)
+                                           optimizer-state optimizer-options))]
+     (-> pass
+         (dissoc :gradients)
+         (assoc :weights (:weights update)
+                :optimizer-state (:state update)
+                :optimizer optimizer)))))
+
 (defn- descend [learning-rate parameter gradient]
   (let [shape (:shape parameter)
         scalar-field (arr/from-vec (:backend parameter)

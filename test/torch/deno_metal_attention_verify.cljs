@@ -79,6 +79,34 @@
   {:learning-rate 0.01 :beta1 0.9 :beta2 0.999
    :eps 1.0e-8 :weight-decay 0.001})
 
+(def sgd-options
+  {:learning-rate 0.03 :momentum 0.9 :weight-decay 0.001
+   :nesterov true})
+
+(defn- run-stateful-sgd-training [backend model* steps]
+  (let [input (arr/from-vec backend input-values input-shape)
+        target (arr/from-vec backend target-values input-shape)]
+    (loop [step 0 weights (nb/random-weights backend model* 29)
+           state nil losses []]
+      (if (= step steps)
+        {:weights weights :state state :losses losses}
+        (let [{:keys [loss gradients]}
+              (train/loss-and-gradients model* weights input target
+                                        (execution-options backend))
+              update (optim/sgd-step weights gradients state sgd-options)]
+          (recur (inc step) (:weights update) (:state update)
+                 (conj losses loss)))))))
+
+(defn- sgd-arrays [training]
+  (let [weights (first (:weights training))
+        slots (first (get-in training [:state :slots]))]
+    (into {}
+          (mapcat (fn [key]
+                    [[(keyword (str "sgd-weight-" (name key))) (get weights key)]
+                     [(keyword (str "sgd-momentum-" (name key)))
+                      (get-in slots [key :momentum-buffer])]])
+                  parameter-names))))
+
 (defn- run-adamw-training [backend model* steps]
   (let [input (arr/from-vec backend input-values input-shape)
         target (arr/from-vec backend target-values input-shape)]
@@ -142,6 +170,7 @@
                                         (run-inference cpu-backend model*)))
         cpu-mse (run-mse cpu-backend model*)
         cpu-training (run-training cpu-backend model* 8)
+        cpu-stateful-sgd (run-stateful-sgd-training cpu-backend model* 4)
         cpu-adamw (run-adamw-training cpu-backend model* 4)
         cpu-scaled-fixture (scaled-fixture cpu-backend model*)
         cpu-scaled (optim/scaled-adamw-step
@@ -151,6 +180,9 @@
         expected-adamw (into {} (map (fn [[label array]]
                                        [label (arr/->vec array)]))
                              (adamw-arrays cpu-adamw))
+        expected-stateful-sgd
+        (into {} (map (fn [[label array]] [label (arr/->vec array)]))
+              (sgd-arrays cpu-stateful-sgd))
         expected-trained
         (prefix-keys "trained-"
                      (into {}
@@ -172,6 +204,7 @@
                                    :inference (run-inference backend model*))
                  actual-mse-pass (run-mse backend model*)
                  actual-training (run-training backend model* 8)
+                 actual-stateful-sgd (run-stateful-sgd-training backend model* 4)
                  actual-adamw (run-adamw-training backend model* 4)
                  gpu-scaled-fixture (scaled-fixture backend model*)
                  actual-mse
@@ -187,7 +220,8 @@
                    (.then
                     (arr/->vec array)
                     (fn [values]
-                      (let [tolerance (if (.startsWith (name label) "adamw-weight-")
+                      (let [tolerance (if (or (.startsWith (name label) "adamw-weight-")
+                                              (.startsWith (name label) "sgd-weight-"))
                                         1.0e-3 2.0e-4)]
                         (when-not (approx-vec? (get expected label) values tolerance)
                         (throw (js/Error.
@@ -208,7 +242,10 @@
                                            (first (:weights actual-training))))
                          (map (fn [[label array]]
                                 (check-array expected-adamw label array))
-                              (adamw-arrays actual-adamw)))
+                              (adamw-arrays actual-adamw))
+                         (map (fn [[label array]]
+                                (check-array expected-stateful-sgd label array))
+                              (sgd-arrays actual-stateful-sgd)))
                  loss-check
                  (.then (->promise (:loss actual-mse-pass))
                         (fn [loss]
@@ -238,6 +275,19 @@
                         (throw (js/Error. "Metal AdamW loss trajectory diverged")))
                       (swap! passed inc)
                       (println "✓ adamw-losses" actual-losses))))
+                 stateful-sgd-loss-check
+                 (.then
+                  (js/Promise.all
+                   (into-array (map ->promise (:losses actual-stateful-sgd))))
+                  (fn [loss-array]
+                    (let [actual-losses (vec (js/Array.from loss-array))]
+                      (when-not
+                       (and (approx-vec? (:losses cpu-stateful-sgd)
+                                         actual-losses 2.0e-4)
+                            (< (last actual-losses) (first actual-losses)))
+                        (throw (js/Error. "Metal stateful SGD trajectory diverged")))
+                      (swap! passed inc)
+                      (println "✓ stateful-sgd-losses" actual-losses))))
                  scaled-control-check
                  (.then
                   (optim/scaled-adamw-step-async
@@ -276,7 +326,7 @@
              (-> (js/Promise.all
                   (into-array (conj (vec array-checks)
                                     loss-check training-loss-check adamw-loss-check
-                                    scaled-control-check)))
+                                    stateful-sgd-loss-check scaled-control-check)))
                  (.then (fn [_]
                           (println (str "Metal learned MultiheadAttention training: "
                                         @passed " passed"))))))))

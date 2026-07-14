@@ -26,6 +26,24 @@
     (throw (ex-info "cannot replace a loaded model descriptor" {:model name})))
   (assoc-in registry* [:catalog name] descriptor))
 
+(defn copy-model
+  "Copy one catalog descriptor to a new model name. Resident resources are not
+  aliased: the destination is loaded independently on first acquire."
+  [registry* source destination]
+  (when-not (and (string? source) (seq source)
+                 (string? destination) (seq destination))
+    (throw (ex-info "model copy requires source and destination"
+                    {:status 400})))
+  (let [descriptor (get-in registry* [:catalog source])]
+    (when-not descriptor
+      (throw (ex-info "unknown source model"
+                      {:model source :reason :unknown-model :status 404})))
+    (when (contains? (:catalog registry*) destination)
+      (throw (ex-info "destination model already exists"
+                      {:model destination :reason :model-exists :status 409})))
+    (assoc-in registry* [:catalog destination]
+              (assoc descriptor :name destination :model destination))))
+
 (defn- unload-entry [registry* name reason]
   (let [{:keys [resource size]} (get-in registry* [:loaded name])]
     ((:unload-fn registry*) resource)
@@ -136,6 +154,21 @@
                          {:model name :active active})))
        (unload-entry registry* name :explicit))
      registry*)))
+
+(defn delete-model
+  "Delete a catalog model, releasing an inactive resident resource first.
+  Active resources are never invalidated by the public lifecycle API."
+  [registry* name]
+  (when-not (contains? (:catalog registry*) name)
+    (throw (ex-info "unknown model"
+                    {:model name :reason :unknown-model :status 404})))
+  (when (pos? (or (get-in registry* [:loaded name :active]) 0))
+    (throw (ex-info "cannot delete an active model"
+                    {:model name :reason :model-active :status 409})))
+  (-> (if (contains? (:loaded registry*) name)
+        (unload-entry registry* name :explicit)
+        registry*)
+      (update :catalog dissoc name)))
 
 (defn tags
   "Ollama-style catalog rows with loaded residency metadata."
