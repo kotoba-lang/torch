@@ -5,6 +5,7 @@
   (:require [num.array :as arr]
             [num.autograd :as ag :include-macros true]
             [num.core :as nm]
+            [num.protocol :as p]
             [torch.model :as model]
             [torch.optim :as optim]))
 
@@ -207,16 +208,23 @@
           key (if rope? (ag/rotary-embedding* key0 heads key-rope-options) key0)
           value (project context-layout :vw :vb)
           attention-dtype (or (:dtype (:data query)) :f32)
-          stable-query (if (= attention-dtype :f32) query (ag/cast* query :f32))
-          stable-key (if (= attention-dtype :f32) key (ag/cast* key :f32))
-          stable-value (if (= attention-dtype :f32) value (ag/cast* value :f32))
+          typed-fused? (and (= attention-dtype :f16)
+                            (nil? (:key-padding-mask attention-options))
+                            (satisfies? p/IDTypeTensorOps
+                                        (:backend (:data query))))
+          stable-query (if (or (= attention-dtype :f32) typed-fused?)
+                         query (ag/cast* query :f32))
+          stable-key (if (or (= attention-dtype :f32) typed-fused?)
+                       key (ag/cast* key :f32))
+          stable-value (if (or (= attention-dtype :f32) typed-fused?)
+                         value (ag/cast* value :f32))
           stable-attended (if (seq attention-options)
                             (ag/multi-head-attention* stable-query stable-key
                                                       stable-value heads
                                                       attention-options)
                             (ag/multi-head-attention* stable-query stable-key
                                                       stable-value heads))
-          attended (if (= attention-dtype :f32)
+          attended (if (or (= attention-dtype :f32) typed-fused?)
                      stable-attended (ag/cast* stable-attended attention-dtype))
           attended-flat (if (= rank 3)
                           (ag/reshape* attended [(* batch sequence) embed])
@@ -336,7 +344,13 @@
     (let [[result tape]
           (ag/with-tape
             (let [graph (forward-graph layers weights input layer-options)
-                  loss (ag/mse-loss* (:prediction graph) target)]
+                  prediction (:prediction graph)
+                  prediction-dtype (or (:dtype (:data prediction)) :f32)
+                  stable-prediction (if (= prediction-dtype :f32)
+                                      prediction (ag/cast* prediction :f32))
+                  stable-target (if (= prediction-dtype :f32)
+                                  target (arr/cast target :f32))
+                  loss (ag/mse-loss* stable-prediction stable-target)]
               (assoc graph :loss loss)))]
       (ag/backward! (:loss result) (arr/from-vec (:backend input) [loss-scale] []) tape)
       {:loss (scalar-readback (:data (:loss result)))
@@ -367,6 +381,31 @@
         update (optim/scaled-adamw-step weights gradients optimizer-state
                                          scaler adamw-options)]
     (merge (dissoc pass :gradients) update)))
+
+(defn mixed-precision-adamw-step-async
+  "GPU-capable mixed-precision AdamW step.
+
+  Runs the same typed forward and scaled backward as
+  `mixed-precision-adamw-step`, then uses device-side gradient unscale,
+  non-finite detection, and fused AdamW. ClojureScript returns a Promise; JVM
+  returns a completed CompletableFuture. Beyond the reported scalar loss, only
+  scalar overflow flags are read from an asynchronous device backend."
+  [model* weights input target optimizer-state scaler
+   {:keys [autocast-dtype adamw-options layer-options]
+    :or {autocast-dtype :f16 adamw-options {}}}]
+  (let [{:keys [gradients] :as pass}
+        (loss-and-gradients model* weights input target
+                            {:autocast-dtype autocast-dtype
+                             :loss-scale (:scale scaler)
+                             :layer-options layer-options})
+        update (optim/scaled-adamw-step-async
+                weights gradients optimizer-state scaler adamw-options)
+        finish (fn [result] (merge (dissoc pass :gradients) result))]
+    #?(:cljs (.then update finish)
+       :clj (.thenApply
+             ^java.util.concurrent.CompletableFuture update
+             (reify java.util.function.Function
+               (apply [_ result] (finish result)))))))
 
 (defn optimizer-step
   "Run MSE forward/backward and one immutable optimizer update.

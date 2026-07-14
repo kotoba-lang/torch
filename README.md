@@ -602,9 +602,8 @@ projection GEMMs, transpose, last-axis bias, stable-softmax attention, and outpu
 projection all retain physical half storage. Causal attention is supported;
 key-padding masks remain on the f32 path and are rejected explicitly. Standalone
 softmax is likewise still rejected instead of silently changing dtype. Training
-autograd still uses f32 master tensors: GradScaler's overflow control is ready,
-but autocast forward and backward are not yet connected into a complete
-mixed-precision trainer.
+keeps f32 master tensors, while mask-free F16 attention now uses num's fused
+device-resident backward rather than leaving the GPU.
 
 ## Reference training (`torch.train`)
 
@@ -687,19 +686,19 @@ double intermediates even for logically-f32 arrays. Tests interrupt an
 AdamW+GradScaler run, reload it, and prove that every subsequent loss, weight,
 moment, variance, and scaler value is exactly equal to uninterrupted training.
 
-`torch.train/mixed-precision-adamw-step` now connects these pieces for
+`torch.train/mixed-precision-adamw-step` and its GPU-capable asynchronous twin
+`mixed-precision-adamw-step-async` connect these pieces for
 linear/attention and conv2d/GroupNorm/SiLU/ReLU models: it casts the forward pass to f16 or bf16,
 computes f32 gradients, unscales and checks them, then updates immutable f32
 master weights with AdamW. Non-finite gradients skip the optimizer step and
 back off the scaler; both successful updates and forced-overflow skips are
-tested. Backward is still a synchronous host reference implementation, so this
-is real mixed-precision numerical behavior but not GPU-resident autograd.
-Learned attention uses an explicit f32 stability island for attention/softmax
-inside the typed graph; differentiable cast VJPs return gradients to its F16
-projection layers, and all parameter gradients are materialized as f32 before
-the master-weight update. A public-model-shaped attention step verifies F16
-prediction, f32 gradients/weights, GradScaler advancement, and lower loss after
-the update.
+tested. On Deno Metal, mask-free learned attention keeps projection and
+attention activations in physical F16, runs the attention VJP on-device, uses
+f32 device stability reductions for projection bias and MSE, and materializes
+f32 parameter gradients before the master update. Beyond its reported scalar
+loss, the asynchronous API reads back only overflow flags before fused AdamW. Apple M4 verification covers
+F16 prediction, all eight Q/K/V/output projection gradients, GradScaler state,
+and updated master-weight parity against the CPU oracle.
 
 The reference path supports recursively nested sequential models composed from
 `:linear/:conv2d/:embedding/:groupnorm/:layernorm/:rmsnorm/:flatten/:relu/:silu/:sigmoid/:tanh/:gelu/:softmax/:attention/:multihead-attention/:llama-block/:lm-head`, with MSE and

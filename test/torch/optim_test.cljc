@@ -171,12 +171,22 @@
                 model weights input target nil scaler
                 {:autocast-dtype :f16
                  :adamw-options {:learning-rate 0.001 :weight-decay 0.0}})
+        async-result #?(:clj
+                        (.get (train/mixed-precision-adamw-step-async
+                               model weights input target nil scaler
+                               {:autocast-dtype :f16
+                                :adamw-options {:learning-rate 0.001
+                                                :weight-decay 0.0}}))
+                        :cljs nil)
         next-pass (train/loss-and-gradients model (:weights result) input target
                                             {:autocast-dtype :f16})]
     (is (false? (:skipped? result)))
     (is (= :f16 (:dtype (:prediction result))))
     (is (= :f32 (:dtype (get-in result [:weights 0 :qw]))))
     (is (= 1 (get-in result [:optimizer-state :step])))
+    (is (or (nil? async-result)
+            (= (arr/->vec (get-in result [:weights 0 :qw]))
+               (arr/->vec (get-in async-result [:weights 0 :qw])))))
     (is (= #{:f32} (set (map :dtype (vals (first (:gradients pass)))))))
     (is (< (:loss next-pass) (:loss pass)))
     (is (not= (arr/->vec (get-in weights [0 :qw]))

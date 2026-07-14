@@ -5,7 +5,9 @@
             [num.deno-gpu :as gpu]
             [torch.core :as core]
             [torch.model :as model]
-            [torch.num-backend :as backend]))
+            [torch.num-backend :as backend]
+            [torch.optim :as optim]
+            [torch.train :as train]))
 
 (defn- approx-vec? [expected actual tolerance]
   (and (= (count expected) (count actual))
@@ -20,6 +22,7 @@
                                           (model/rmsnorm 4) (model/gelu))
         attention-model (model/sequential (model/multihead-attention 4 1))
         attention-input-values [0.1 0.2 0.3 0.4, -0.2 0.1 0.5 -0.3]
+        attention-target-values [0.2 0.0 0.1 -0.1, -0.1 0.3 0.2 0.0]
         input-values (mapv #(- (* 0.03 %) 0.4) (range 32))
         token-values [2 0 2 1]
         cpu-backend (cpu/cpu-backend)
@@ -41,7 +44,27 @@
          (core/run (backend/num-backend
                     cpu-backend (backend/random-weights cpu-backend attention-model 11))
                    attention-model
-                   (arr/from-vec cpu-backend attention-input-values [1 2 4])))]
+                   (arr/from-vec cpu-backend attention-input-values [1 2 4])))
+        cpu-training
+        (train/loss-and-gradients
+         attention-model (backend/random-weights cpu-backend attention-model 11)
+         (arr/from-vec cpu-backend attention-input-values [1 2 4])
+         (arr/from-vec cpu-backend attention-target-values [1 2 4])
+         {:autocast-dtype :f16 :loss-scale 8.0})
+        expected-training-gradients
+        (mapv (fn [key] (arr/->vec (get (first (:gradients cpu-training)) key)))
+              [:qw :qb :kw :kb :vw :vb :ow :ob])
+        scaler (optim/grad-scaler {:initial-scale 8.0 :growth-interval 2})
+        adamw-options {:learning-rate 0.01 :weight-decay 0.001}
+        cpu-mixed
+        (train/mixed-precision-adamw-step
+         attention-model (backend/random-weights cpu-backend attention-model 11)
+         (arr/from-vec cpu-backend attention-input-values [1 2 4])
+         (arr/from-vec cpu-backend attention-target-values [1 2 4])
+         nil scaler {:autocast-dtype :f16 :adamw-options adamw-options})
+        expected-updated
+        (mapv (fn [key] (arr/->vec (get (first (:weights cpu-mixed)) key)))
+              [:qw :qb :kw :kb :vw :vb :ow :ob])]
     (-> (gpu/request-device)
         (.then
          (fn [device-result]
@@ -65,27 +88,86 @@
                                                 {:autocast-dtype :f16})
                            attention-model
                            (arr/from-vec gpu-backend attention-input-values [1 2 4]
-                                         :f16))]
+                                         :f16))
+                 gpu-training
+                 (train/loss-and-gradients
+                  attention-model
+                  (backend/random-weights gpu-backend attention-model 11)
+                  (arr/from-vec gpu-backend attention-input-values [1 2 4])
+                  (arr/from-vec gpu-backend attention-target-values [1 2 4])
+                  {:autocast-dtype :f16 :loss-scale 8.0})
+                 gpu-training-gradients
+                 (mapv #(get (first (:gradients gpu-training)) %)
+                       [:qw :qb :kw :kb :vw :vb :ow :ob])
+                 gpu-mixed
+                 (train/mixed-precision-adamw-step-async
+                  attention-model
+                  (backend/random-weights gpu-backend attention-model 11)
+                  (arr/from-vec gpu-backend attention-input-values [1 2 4])
+                  (arr/from-vec gpu-backend attention-target-values [1 2 4])
+                  nil scaler {:autocast-dtype :f16 :adamw-options adamw-options})
+                 gpu-mixed-values
+                 (.then gpu-mixed
+                        (fn [result]
+                          (.then
+                           (js/Promise.all
+                            (into-array
+                             (map #(arr/->vec (get (first (:weights result)) %))
+                                  [:qw :qb :kw :kb :vw :vb :ow :ob])))
+                           (fn [values] [result (mapv vec (array-seq values))]))))]
              (println "adapter:" (or (gpu/adapter-description device-result) "unknown"))
              (.then (js/Promise.all (into-array [(arr/->vec output)
                                                  (arr/->vec embedding-output)
-                                                 (arr/->vec attention-output)]))
+                                                 (arr/->vec attention-output)
+                                                 (:loss gpu-training)
+                                                 (arr/->vec (:prediction gpu-training))
+                                                 (js/Promise.all
+                                                  (into-array
+                                                   (map arr/->vec
+                                                        gpu-training-gradients)))
+                                                 gpu-mixed-values]))
                     (fn [actual-values]
                       (let [actual (vec (aget actual-values 0))
                             actual-embedding (vec (aget actual-values 1))
                             actual-attention (vec (aget actual-values 2))
+                            actual-loss (aget actual-values 3)
+                            actual-training-prediction (vec (aget actual-values 4))
+                            actual-gradients (mapv vec (array-seq (aget actual-values 5)))
+                            [actual-mixed actual-updated] (aget actual-values 6)
                             ok? (approx-vec? expected actual 0.03)
                             embedding-ok? (approx-vec? expected-embedding
                                                         actual-embedding 0.01)
                             attention-ok? (approx-vec? expected-attention
-                                                        actual-attention 0.03)]
+                                                        actual-attention 0.03)
+                            training-ok?
+                            (and (< (Math/abs (- actual-loss (:loss cpu-training))) 0.01)
+                                 (approx-vec? (arr/->vec (:prediction cpu-training))
+                                              actual-training-prediction 0.03)
+                                 (every? true?
+                                         (map #(approx-vec? %1 %2 0.04)
+                                              expected-training-gradients
+                                              actual-gradients))
+                                 (= :f16 (:dtype (:prediction gpu-training)))
+                                 (every? #(= :f32 (:dtype %)) gpu-training-gradients))
+                            mixed-step-ok?
+                            (and (false? (:skipped? actual-mixed))
+                                 (= 1 (get-in actual-mixed [:optimizer-state :step]))
+                                 (= (:scale scaler) (get-in actual-mixed [:scaler :scale]))
+                                 (every? true?
+                                         (map #(approx-vec? %1 %2 0.04)
+                                              expected-updated actual-updated)))]
                         (println (str "torch conv→GroupNorm→LayerNorm→activations f16: "
                                       (if ok? "passed" "failed")))
                         (println (str "torch Embedding→RMSNorm→GELU f16: "
                                       (if embedding-ok? "passed" "failed")))
                         (println (str "torch learned attention f16: "
                                       (if attention-ok? "passed" "failed")))
-                        (when-not (and ok? embedding-ok? attention-ok?)
+                        (println (str "torch learned attention f16 backward: "
+                                      (if training-ok? "passed" "failed")))
+                        (println (str "torch learned attention async AdamW: "
+                                      (if mixed-step-ok? "passed" "failed")))
+                        (when-not (and ok? embedding-ok? attention-ok? training-ok?
+                                       mixed-step-ok?)
                           (.exit js/Deno 1))))))))
         (.catch (fn [error]
                   (js/console.error error)

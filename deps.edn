@@ -30,12 +30,14 @@
         :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
         :main-opts ["-m" "torch.gguf-bundle-export"]}
   :test {:extra-paths ["test"]
+         :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
          :extra-deps {io.github.cognitect-labs/test-runner
                       {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
          :main-opts ["-m" "cognitect.test-runner"]
          :exec-fn cognitect.test-runner.api/test}
        :deno-autocast-verify
        {:extra-paths ["test"]
+        :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
         :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
         :main-opts ["-m" "cljs.main"
                     "-co" "{:optimizations :simple :target :nodejs :main torch.deno-autocast-verify :output-to \"target/deno-autocast-verify.cjs\"}"
