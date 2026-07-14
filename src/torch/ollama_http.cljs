@@ -62,6 +62,7 @@
 
   - `:version` string
   - `:models` vector of Ollama tag maps
+  - `:copy-model!` source, destination and `:delete-model!` model (optional)
   - `POST /api/generate`, text-only `POST /api/chat`, and `POST /api/embed`
   - `:generate!` normalized-request, request-context -> Promise/vector chunks
   - `:generate-stream!` normalized-request, context -> Promise/ReadableStream
@@ -69,8 +70,8 @@
   - `:request-id-fn` zero-arg ID supplier (optional)
 
   The returned function can be passed directly to `Deno.serve`."
-  [{:keys [version models running-models show-model generate! generate-stream! embed!
-           cancel! request-id-fn]
+  [{:keys [version models running-models show-model copy-model! delete-model!
+           generate! generate-stream! embed! cancel! request-id-fn]
     :or {version "0.0.0" models [] cancel! (fn [& _])
          request-id-fn #(str (random-uuid))}}]
   (when-not (or (fn? generate!) (fn? generate-stream!))
@@ -104,6 +105,37 @@
                            (throw (ex-info "invalid Ollama show request"
                                            {:status 400})))
                          (json-response 200 (show-model model (boolean verbose))))))
+              (.catch (fn [error]
+                        (error-response (or (:status (ex-data error)) 400) error)))))
+
+        (and (= method "POST") (= path "/api/copy"))
+        (if-not (fn? copy-model!)
+          (js/Promise.resolve (json-response 404 {:error "model copy unavailable"}))
+          (-> (.json request)
+              (.then (fn [body]
+                       (let [{:keys [source destination]}
+                             (js->clj body :keywordize-keys true)]
+                         (when-not (and (string? source) (seq source)
+                                        (string? destination) (seq destination))
+                           (throw (ex-info "invalid Ollama copy request"
+                                           {:status 400})))
+                         (copy-model! source destination)
+                         (json-response 200 {}))))
+              (.catch (fn [error]
+                        (error-response (or (:status (ex-data error)) 400) error)))))
+
+        (and (= method "DELETE") (= path "/api/delete"))
+        (if-not (fn? delete-model!)
+          (js/Promise.resolve (json-response 404 {:error "model delete unavailable"}))
+          (-> (.json request)
+              (.then (fn [body]
+                       (let [{:keys [model]}
+                             (js->clj body :keywordize-keys true)]
+                         (when-not (and (string? model) (seq model))
+                           (throw (ex-info "invalid Ollama delete request"
+                                           {:status 400})))
+                         (delete-model! model)
+                         (json-response 200 {}))))
               (.catch (fn [error]
                         (error-response (or (:status (ex-data error)) 400) error)))))
 

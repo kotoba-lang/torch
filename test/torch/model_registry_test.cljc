@@ -91,3 +91,26 @@
          #?(:clj Exception :cljs js/Error) #"unknown model"
          (registry/describe released "missing")))
     (is (empty? (registry/running-models (registry/expire released 70))))))
+
+(deftest copy-and-delete-model-lifecycle
+  (let [events (atom [])
+        original (fixture 100 events)
+        copied (registry/copy-model original "a" "a-backup")]
+    (is (= ["a" "a-backup" "b" "c"]
+           (mapv :name (registry/tags copied))))
+    (is (= "sha:a" (:digest (registry/describe copied "a-backup"))))
+    (is (thrown-with-msg?
+         #?(:clj Exception :cljs js/Error) #"already exists"
+         (registry/copy-model copied "a" "a-backup")))
+    (let [acquired (registry/acquire copied "a-backup" 1)]
+      (is (thrown-with-msg?
+           #?(:clj Exception :cljs js/Error) #"active model"
+           (registry/delete-model (:registry acquired) "a-backup")))
+      (let [released (registry/release (:registry acquired) "a-backup" 2 -1)
+            deleted (registry/delete-model released "a-backup")]
+        (is (nil? (get-in deleted [:catalog "a-backup"])))
+        (is (nil? (get-in deleted [:loaded "a-backup"])))
+        (is (= [[:load "a-backup"] [:unload "a-backup"]] @events))))
+    (is (thrown-with-msg?
+         #?(:clj Exception :cljs js/Error) #"unknown model"
+         (registry/delete-model original "missing")))))

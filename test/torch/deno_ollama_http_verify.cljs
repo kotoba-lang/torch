@@ -28,6 +28,7 @@
                   :cancel (fn [_]
                             (doseq [timer @timers] (js/clearTimeout timer)))})))
         live-cancellations (atom [])
+        lifecycle-calls (atom [])
         model-events (atom [])
         model-runtime
         (registry-runtime/runtime
@@ -46,6 +47,11 @@
                  :running-models #(registry-runtime/running-models model-runtime)
                  :show-model (fn [name _]
                                {:details {:family "llama"} :model_info {:name name}})
+                 :copy-model! (fn [source destination]
+                                (swap! lifecycle-calls conj
+                                       [:copy source destination]))
+                 :delete-model! (fn [model]
+                                  (swap! lifecycle-calls conj [:delete model]))
                  :embed! (fn [request _]
                            (js/Promise.resolve
                             {:embeddings (mapv (fn [_] [0.6 0.8]) (:inputs request))
@@ -134,6 +140,18 @@
                           :body (js/JSON.stringify
                                  #js {:model "tiny"
                                       :input #js ["one" "two"]})})
+        copy-request
+        (js/Request. "http://localhost/api/copy"
+                     #js {:method "POST"
+                          :headers #js {"content-type" "application/json"}
+                          :body (js/JSON.stringify
+                                 #js {:source "tiny:latest"
+                                      :destination "tiny:backup"})})
+        delete-request
+        (js/Request. "http://localhost/api/delete"
+                     #js {:method "DELETE"
+                          :headers #js {"content-type" "application/json"}
+                          :body (js/JSON.stringify #js {:model "tiny:backup"})})
         abort-request
         (js/Request. "http://localhost/api/generate"
                      #js {:method "POST"
@@ -150,7 +168,7 @@
               (handler bad-request) (js/fetch live-url) aborted-response
               (handler chat-stream-request) (handler chat-one-request)
               (handler embed-request)
-              live-first-byte])
+              live-first-byte (handler copy-request) (handler delete-request)])
         (.then
          (fn [responses]
            (let [version (aget responses 0)
@@ -164,13 +182,16 @@
                  chat-stream (aget responses 9)
                  chat-one (aget responses 10)
                  embed (aget responses 11)
-                 first-byte (aget responses 12)]
+                 first-byte (aget responses 12)
+                 copy-response (aget responses 13)
+                 delete-response (aget responses 14)]
              (-> (js/Promise.all
                   #js [(body-json version) (body-json tags) (body-json ps)
                        (body-json show) (.text stream)
                        (body-json one) (body-json bad)
                        (.text chat-stream) (body-json chat-one)
-                       (body-json embed)])
+                       (body-json embed) (body-json copy-response)
+                       (body-json delete-response)])
                  (.then
                   (fn [bodies]
                     (let [version-body (aget bodies 0)
@@ -203,6 +224,11 @@
                                    (true? (.-done chat-one-body))
                                    (= 2 (.-length (.-embeddings embed-body)))
                                    (= 2 (.-prompt_eval_count embed-body))
+                                   (= 200 (.-status copy-response))
+                                   (= 200 (.-status delete-response))
+                                   (= #{[:copy "tiny:latest" "tiny:backup"]
+                                        [:delete "tiny:backup"]}
+                                      (set @lifecycle-calls))
                                    (= 200 (.-status live))
                                    (= 200 (.-status first-byte))
                                    (< (.-elapsed first-byte) 100)
@@ -226,6 +252,11 @@
                                  "passed" "failed"))
                       (println "Ollama batched embed endpoint:"
                                (if (= 2 (.-length (.-embeddings embed-body)))
+                                 "passed" "failed"))
+                      (println "Ollama copy/delete model endpoints:"
+                               (if (and (= 200 (.-status copy-response))
+                                        (= 200 (.-status delete-response))
+                                        (= 2 (count @lifecycle-calls)))
                                  "passed" "failed"))
                       (println "Ollama invalid request status:"
                                (if (= 400 (.-status bad)) "passed" "failed"))

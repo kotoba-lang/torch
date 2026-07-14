@@ -258,7 +258,7 @@ released and reused to prefill request `:c`.
 engine submissions and emits Ollama-shaped token/final payloads.
 `torch.ollama-http/handler` is a standard Fetch handler suitable for `Deno.serve`;
 it implements `GET /api/version`, `GET /api/tags`, `GET /api/ps`,
-`POST /api/show`, `POST /api/embed`, and streaming NDJSON or
+`POST /api/show`, `POST /api/copy`, `DELETE /api/delete`, `POST /api/embed`, and streaming NDJSON or
 non-streaming `POST /api/generate` and `POST /api/chat`, including JSON 400/404
 errors. Chat validates ordered system/user/assistant text history, renders a
 model-specific prompt from GGUF `tokenizer.chat_template`, and returns Ollama
@@ -282,7 +282,7 @@ norms, lifecycle refcounts, and final GPU cleanup.
 ```sh
 clojure -M:deno-ollama-http-verify
 deno run --allow-all target/deno-ollama-http-verify.cjs
-# version/tags, generate/chat, batched embed, invalid request: passed
+# version/tags, generate/chat, batched embed, copy/delete, invalid request: passed
 ```
 
 `serve!` starts a real Deno listener (default `127.0.0.1:11434`) and exposes its
@@ -310,7 +310,10 @@ forced administrative unload, live catalog/tag snapshots, and residency/load/
 eviction metrics are included. The unload callback is where GGUF weights, paged
 K/V pools, and device resources are released. `/api/tags` accepts a snapshot
 function, so loaded/active registry state is visible without rebuilding the HTTP
-handler. A production host still needs to connect its GGUF loader callback to
+handler. `/api/copy` creates an independently loadable catalog alias without
+sharing resident ownership; `/api/delete` releases an inactive resource before
+removing its descriptor and rejects active or unknown models without corrupting
+the registry. A production host still needs to connect its GGUF loader callback to
 model-specific continuous engines.
 
 `torch.registry-runtime` supplies that serialization without `swap!` retries:
@@ -450,6 +453,7 @@ clojure -M:deno-public-gguf-registry-verify && \
 # Ollama ps/show follow real Metal residency: passed
 # Ollama chat runs through the resident public-GGUF Metal model: passed
 # Ollama normalized batched embeddings run on Metal: passed
+# Ollama copy/delete mutate the live model catalog: passed
 # inactive model-a LRU-evicted when model-b loads under a 1.5-model budget
 # each model loaded/unloaded exactly once; resident bytes: 0
 # GPU baseline restored: passed
@@ -458,6 +462,11 @@ clojure -M:deno-public-gguf-registry-verify && \
 The remaining production work is now operational scale rather than a missing
 model route: long-context soak/load tests, durable catalog configuration,
 authentication, telemetry, and deployment hardening.
+
+The lifecycle verifier observes a copied alias appear in `/api/tags` and disappear
+after deletion before starting Metal inference. Pure registry tests additionally
+cover duplicate destinations, unknown names, active-delete rejection, and
+exactly-once unload of an inactive alias.
 
 A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
 blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding

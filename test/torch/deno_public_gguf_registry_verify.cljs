@@ -30,6 +30,14 @@
                (-> (.json response)
                    (.then #(vector (.-status response) %)))))))
 
+(defn- mutate-model [url method body]
+  (-> (js/fetch url #js {:method method
+                          :headers #js {"content-type" "application/json"}
+                          :body (js/JSON.stringify (clj->js body))})
+      (.then (fn [response]
+               (-> (.json response)
+                   (.then #(vector (.-status response) %)))))))
+
 (defn- chat [url model]
   (-> (js/fetch
        url #js {:method "POST" :headers #js {"content-type" "application/json"}
@@ -100,16 +108,38 @@
                  ps-url (str base "/api/ps")
                  show-url (str base "/api/show")
                  chat-url (str base "/api/chat")
-                 embed-url (str base "/api/embed")]
+                 embed-url (str base "/api/embed")
+                 copy-url (str base "/api/copy")
+                 delete-url (str base "/api/delete")]
              (println "Real GGUF registry routing on"
                       (gpu/adapter-description request))
-             (-> (js/Promise.all
-                  #js [(json-get ps-url) (show show-url "model-a:latest")
-                       (show show-url "missing:latest")])
+             (-> (mutate-model copy-url "POST"
+                               {:source "model-a:latest"
+                                :destination "model-a:backup"})
+                 (.then
+                  (fn [copy-result]
+                    (-> (json-get tags-url)
+                        (.then #(hash-map :copy-result copy-result
+                                         :copied-tags %)))))
+                 (.then
+                  (fn [state]
+                    (-> (mutate-model delete-url "DELETE"
+                                      {:model "model-a:backup"})
+                        (.then #(assoc state :delete-result %)))))
+                 (.then
+                  (fn [state]
+                    (-> (json-get tags-url)
+                        (.then #(assoc state :deleted-tags %)))))
+                 (.then
+                  (fn [lifecycle]
+                    (-> (js/Promise.all
+                         #js [(json-get ps-url) (show show-url "model-a:latest")
+                              (show show-url "missing:latest")])
+                        (.then #(hash-map :lifecycle lifecycle :initial %)))))
                  (.then
                   (fn [initial]
                     (-> (post generate-url "model-a:latest" -1)
-                        (.then #(hash-map :initial initial :a %)))))
+                        (.then #(assoc initial :a %)))))
                  (.then
                   (fn [state]
                     (-> (js/Promise.all #js [(json-get tags-url) (json-get ps-url)
@@ -128,8 +158,8 @@
                     (-> (js/Promise.all #js [(json-get tags-url) (json-get ps-url)])
                         (.then #(assoc state :tags-b (aget % 0) :ps-b (aget % 1))))))
                  (.then
-                  (fn [{:keys [initial a b tags-a tags-b ps-a ps-b chat-a embed-a
-                               invalid-embed]}]
+                  (fn [{:keys [lifecycle initial a b tags-a tags-b ps-a ps-b chat-a
+                               embed-a invalid-embed]}]
                     (let [context-a (vec (js->clj (.-context a)))
                           context-b (vec (js->clj (.-context b)))
                           rows-a (js->clj (.-models tags-a)
@@ -177,7 +207,19 @@
                                                                    (js/Math.sqrt
                                                                     (reduce + (map (fn [x] (* x x)) %)))))
                                                     1.0e-5)
-                                                embeddings))]
+                                                embeddings))
+                            [copy-status _] (:copy-result lifecycle)
+                            [delete-status _] (:delete-result lifecycle)
+                            copied-names (->> (.-models (:copied-tags lifecycle))
+                                              (js->clj)
+                                              (map #(get % "name")) set)
+                            deleted-names (->> (.-models (:deleted-tags lifecycle))
+                                               (js->clj)
+                                               (map #(get % "name")) set)
+                            lifecycle-api?
+                            (and (= 200 copy-status) (= 200 delete-status)
+                                 (contains? copied-names "model-a:backup")
+                                 (not (contains? deleted-names "model-a:backup")))]
                       (registry-runtime/expire! runtime* (+ 1000 (.now js/Date)))
                       (.shutdown server)
                       (let [stats (registry-runtime/stats runtime*)
@@ -198,6 +240,8 @@
                                  (if chat? "passed" "failed"))
                         (println "Ollama normalized embeddings run on Metal:"
                                  (if embed? "passed" "failed"))
+                        (println "Ollama copy/delete mutate live catalog:"
+                                 (if lifecycle-api? "passed" "failed"))
                         (println "inactive LRU eviction:"
                                  (if eviction? "passed" "failed"))
                         (println "load/unload exactly once:"
@@ -205,7 +249,8 @@
                         (println "registry resident bytes:" (:resident-bytes stats))
                         (println "GPU baseline restored:"
                                  (if released? "passed" "failed"))
-                        (when-not (and parity? tags? management? chat? embed? eviction? lifecycle? released?
+                        (when-not (and parity? tags? management? chat? embed?
+                                       lifecycle-api? eviction? lifecycle? released?
                                        (zero? (:resident-bytes stats)))
                           (throw (js/Error.
                                   "real GGUF registry verification failed")))))))))))
