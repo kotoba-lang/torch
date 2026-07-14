@@ -714,11 +714,13 @@ storage while logits stay packed F16; mean reduction excludes ignored positions,
 and the loss-scaled logit VJP feeds the same asynchronous GradScaler/AdamW path.
 The Metal verifier uses shifted next-token labels and ignores the final position,
 rather than training logits against a synthetic MSE target.
-Its vocabulary is 32,000 rather than a toy class count. On Apple M4, the full
-two-block forward, cross-entropy backward, asynchronous AdamW step, and complete
-prediction/gradient/updated-weight readback take 1.11 seconds with 13,077,196
-tracked peak live GPU bytes. All 21 parameter VJPs and updates remain within the
-CPU-oracle tolerances at this vocabulary size.
+Its vocabulary is 32,000, embedding width is 128, SwiGLU width is 256, sequence
+length is 8, and each block uses four query heads with two KV heads. On Apple M4,
+the full two-block forward, cross-entropy backward, asynchronous AdamW step, and
+complete prediction/gradient/updated-weight readback take 44.02 seconds with
+411,066,140 tracked peak live GPU bytes. All 21 parameter VJPs stay within a 1%
+tensor-range maximum plus bounded mean-error gate, and every updated weight uses
+the stricter elementwise CPU-oracle tolerance.
 
 The reference path supports recursively nested sequential models composed from
 `:linear/:conv2d/:embedding/:groupnorm/:layernorm/:rmsnorm/:flatten/:relu/:silu/:sigmoid/:tanh/:gelu/:softmax/:attention/:multihead-attention/:llama-block/:lm-head`, with MSE and

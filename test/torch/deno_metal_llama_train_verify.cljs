@@ -8,11 +8,13 @@
             [torch.optim :as optim]
             [torch.train :as train]))
 
-(def input-values [2 0 2])
-(def target-values [0 2 -100])
+(def input-values [2 0 2 5 7 5 11 13])
+(def target-values [0 2 5 7 5 11 13 -100])
 (def vocabulary-size 32000)
-(def input-shape [1 3])
-(def target-shape [1 3])
+(def embedding-size 128)
+(def hidden-size 256)
+(def input-shape [1 8])
+(def target-shape [1 8])
 (def parameter-names
   [:attn-norm :qw :kw :vw :ow :ffn-norm :gate :up :down])
 (def parameter-paths
@@ -22,23 +24,35 @@
                [[3 :w] [4 :w]])))
 (def adamw-options {:learning-rate 0.001 :weight-decay 0.0})
 
-(defn- approx-vec? [expected actual tolerance]
+(defn- approx-vec? [expected actual absolute relative]
   (and (= (count expected) (count actual))
-       (every? true? (map #(< (Math/abs (- %1 %2)) tolerance)
+       (every? true? (map #(< (Math/abs (- %1 %2))
+                              (+ absolute (* relative (Math/abs %1))))
                           expected actual))))
+
+(defn- error-stats [expected actual]
+  (let [errors (mapv #(Math/abs (- %1 %2)) expected actual)]
+    {:max (reduce max 0.0 errors)
+     :mean (/ (reduce + errors) (max 1 (count errors)))
+     :reference-max (reduce max 0.0 (map #(Math/abs %) expected))}))
+
+(defn- acceptable-error? [{:keys [max mean reference-max]}
+                           max-atol range-rtol mean-atol]
+  (and (< max (+ max-atol (* range-rtol reference-max)))
+       (< mean mean-atol)))
 
 (defn- arrays [entries]
   (mapv (fn [[layer key]] (get (nth entries layer) key)) parameter-paths))
 
 (defn -main [& _]
   (let [model* (model/sequential
-                (model/embedding vocabulary-size 4)
-                (model/llama-block 4 2 8
-                                   {:kv-heads 1 :position-offset 2})
-                (model/llama-block 4 2 8
-                                   {:kv-heads 1 :position-offset 2})
-                (model/rmsnorm 4)
-                (model/lm-head 4 vocabulary-size))
+                (model/embedding vocabulary-size embedding-size)
+                (model/llama-block embedding-size 4 hidden-size
+                                   {:kv-heads 2 :position-offset 2})
+                (model/llama-block embedding-size 4 hidden-size
+                                   {:kv-heads 2 :position-offset 2})
+                (model/rmsnorm embedding-size)
+                (model/lm-head embedding-size vocabulary-size))
         cpu-backend (cpu/cpu-backend)
         scaler (optim/grad-scaler {:initial-scale 8.0 :growth-interval 2})
         cpu-weights (nb/random-weights cpu-backend model* 79)
@@ -91,14 +105,16 @@
                          actual-weights (mapv vec (subvec values gradient-end
                                                           (+ gradient-end
                                                              parameter-count)))
-                         prediction-ok? (approx-vec? expected-prediction
-                                                     actual-prediction 0.05)
-                         gradients-ok? (every? true?
-                                               (map #(approx-vec? %1 %2 0.08)
-                                                    expected-gradients
-                                                    actual-gradients))
+                         prediction-error (error-stats expected-prediction
+                                                       actual-prediction)
+                         gradient-errors (mapv error-stats expected-gradients
+                                               actual-gradients)
+                         prediction-ok? (acceptable-error? prediction-error
+                                                           0.03 0.002 0.01)
+                         gradients-ok? (every? #(acceptable-error? % 0.05 0.01 0.03)
+                                               gradient-errors)
                          weights-ok? (every? true?
-                                             (map #(approx-vec? %1 %2 0.05)
+                                             (map #(approx-vec? %1 %2 0.03 0.01)
                                                   expected-weights actual-weights))
                          state-ok? (and (false? (:skipped? updated))
                                         (= 1 (get-in updated
@@ -131,7 +147,9 @@
                        (js/console.error
                         #js {:loss #js [(:loss cpu-pass) actual-loss]
                              :prediction prediction-ok?
+                             :prediction-error (clj->js prediction-error)
                              :gradients gradients-ok?
+                             :gradient-errors (clj->js gradient-errors)
                              :weights weights-ok?
                              :state state-ok?
                              :resources resource-ok?})
