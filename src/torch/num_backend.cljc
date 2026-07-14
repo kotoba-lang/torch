@@ -31,6 +31,7 @@
   (:require [num.array :as arr]
             [num.core :as nm]
             [num.quantized :as quantized]
+            [num.protocol :as p]
             [num.tensor :as t]
             [torch.model :as model]
             [torch.paged-runtime :as paged]
@@ -129,16 +130,7 @@
   [lyr weights x runtime-options]
   (let [t' (model/layer-type lyr) largs (model/layer-args lyr)]
     (case t'
-      :linear (if (= :f32 (or (:dtype x) :f32))
-                (t/add (matmul-weight x (:w weights)) (:b weights))
-                (let [product (matmul-weight x (:w weights))
-                      rows (first (:shape product))
-                      bias (:b weights)
-                      expanded (arr/from-vec (:backend product)
-                                             (vec (mapcat identity
-                                                          (repeat rows (arr/->vec bias))))
-                                             (:shape product) (:dtype product))]
-                  (nm/add product expanded)))
+      :linear (t/add (matmul-weight x (:w weights)) (:b weights))
       :relu   (nm/relu x)
       :silu   (t/silu x)
       :sigmoid (nm/sigmoid x)
@@ -730,13 +722,27 @@
          (let [lyrs (model/execution-layers model*)
                layer-options (or (:layer-options options)
                                  (repeat (count lyrs) nil))
+               typed-attention? (and (= :f16 autocast-dtype)
+                                     (satisfies? p/IDTypeTensorOps backend))
+               supported (cond-> #{:linear :relu :silu :sigmoid :tanh :gelu
+                                   :flatten :conv2d :groupnorm :layernorm
+                                   :rmsnorm :embedding}
+                           typed-attention? (conj :attention :multihead-attention))
                unsupported (when autocast-dtype
-                             (seq (remove #{:linear :relu :silu :sigmoid :tanh :gelu :flatten :conv2d :groupnorm :layernorm :rmsnorm :embedding}
-                                          (map model/layer-type lyrs))))]
+                             (seq (remove supported (map model/layer-type lyrs))))]
            (when unsupported
              (throw (ex-info
-                     "torch.num-backend: autocast supports linear/relu/silu/sigmoid/tanh/gelu/flatten/conv2d/groupnorm/layernorm/rmsnorm/embedding"
-                     {:unsupported (vec unsupported) :dtype autocast-dtype})))
+                     "torch.num-backend: autocast layer lacks a typed backend kernel"
+                     {:unsupported (vec unsupported) :supported supported
+                      :dtype autocast-dtype})))
+           (when (and autocast-dtype
+                      (some (fn [[lyr options]]
+                              (and (= :multihead-attention (model/layer-type lyr))
+                                   (:key-padding-mask options)))
+                            (map vector lyrs layer-options)))
+             (throw (ex-info
+                     "torch.num-backend: F16 attention does not support key-padding-mask"
+                     {:dtype autocast-dtype})))
            (when-not (= (count lyrs) (count layer-options))
              (throw (ex-info "torch.num-backend: layer-options count mismatch"
                              {:layers (count lyrs)

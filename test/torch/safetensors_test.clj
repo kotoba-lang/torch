@@ -58,6 +58,26 @@
     (Files/write path (.array buffer) (make-array OpenOption 0))
     path))
 
+(defn- write-index! [path document]
+  (Files/writeString path (json/write-str document)
+                     (make-array OpenOption 0)))
+
+(defn- delete-tree! [paths]
+  (doseq [path paths] (Files/deleteIfExists path)))
+
+(defn- write-raw-checkpoint [header payload]
+  (let [header-bytes (.getBytes (json/write-str header) StandardCharsets/UTF_8)
+        buffer (doto (ByteBuffer/allocate (+ 8 (alength header-bytes)
+                                             (alength ^bytes payload)))
+                 (.order ByteOrder/LITTLE_ENDIAN))
+        path (Files/createTempFile "torch-malformed-" ".safetensors"
+                                   (make-array java.nio.file.attribute.FileAttribute 0))]
+    (.putLong buffer (alength header-bytes))
+    (.put buffer header-bytes)
+    (.put buffer ^bytes payload)
+    (Files/write path (.array buffer) (make-array OpenOption 0))
+    path))
+
 (deftest loads-real-safetensors-file-and-preserves-inference
   (let [model* (model/sequential (model/linear 4 4)
                                  (model/multihead-attention 4 2))
@@ -99,3 +119,81 @@
                  1.0e-6)
               name)))
       (finally (Files/deleteIfExists checkpoint-path)))))
+
+(deftest loads-hugging-face-sharded-safetensors-state-dict
+  (let [model* (model/sequential (model/linear 4 4)
+                                 (model/multihead-attention 4 2))
+        weights (nb/random-weights backend model* 71)
+        state-dict (state/state-dict model* weights)
+        entries (vec (sort-by key state-dict))
+        midpoint (quot (inc (count entries)) 2)
+        directory (Files/createTempDirectory "torch-sharded-"
+                                             (make-array java.nio.file.attribute.FileAttribute 0))
+        shard-a (.resolve directory "model-00001-of-00002.safetensors")
+        shard-b (.resolve directory "model-00002-of-00002.safetensors")
+        index (.resolve directory "model.safetensors.index.json")
+        first-names (set (map key (subvec entries 0 midpoint)))
+        weight-map (into (sorted-map)
+                         (map (fn [[name _]]
+                                [name (if (contains? first-names name)
+                                        "model-00001-of-00002.safetensors"
+                                        "model-00002-of-00002.safetensors")]))
+                         entries)
+        input (arr/from-vec backend [0.2 -0.1 0.3 0.4, -0.2 0.1 0.5 -0.3]
+                            [2 4])]
+    (try
+      (safe/write-file! shard-a (into (sorted-map) (subvec entries 0 midpoint)))
+      (safe/write-file! shard-b (into (sorted-map) (subvec entries midpoint)))
+      (write-index! index {"metadata" {"total_size" 0}
+                           "weight_map" weight-map})
+      (with-open [checkpoint (safe/open-checkpoint index)]
+        (is (= (vec (sort (keys state-dict))) (safe/tensor-names checkpoint)))
+        (is (= (:shape (get state-dict (first (sort (keys state-dict)))))
+               (:shape (safe/read-tensor checkpoint backend
+                                         (first (sort (keys state-dict))))))))
+      (let [loaded (safe/load-weights index backend model*)
+            expected (core/run (nb/num-backend backend weights) model* input)
+            actual (core/run (nb/num-backend backend loaded) model* input)]
+        (is (every? #(< (Math/abs %) 1.0e-6)
+                    (map - (arr/->vec expected) (arr/->vec actual)))))
+      (finally
+        (delete-tree! [index shard-b shard-a directory])))))
+
+(deftest sharded-index-confines-files-and-matches-manifest
+  (let [directory (Files/createTempDirectory "torch-index-invalid-"
+                                             (make-array java.nio.file.attribute.FileAttribute 0))
+        index (.resolve directory "model.safetensors.index.json")
+        shard (.resolve directory "model-00001-of-00001.safetensors")
+        tensor (arr/from-vec backend [1.0] [1])]
+    (try
+      (write-index! index {"weight_map" {"x" "../outside.safetensors"}})
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"escapes index directory"
+                            (safe/open-index index)))
+      (safe/write-file! shard {"actual" tensor})
+      (write-index! index
+                    {"weight_map" {"declared" "model-00001-of-00001.safetensors"}})
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                            #"index does not match shard contents"
+                            (safe/open-index index)))
+      (finally
+        (delete-tree! [index shard directory])))))
+
+(deftest rejects-overlapping-gapped-and-invalid-metadata-files
+  (let [overlap (write-raw-checkpoint
+                 {"a" {"dtype" "F32" "shape" [1] "data_offsets" [0 4]}
+                  "b" {"dtype" "F32" "shape" [1] "data_offsets" [0 4]}}
+                 (f32-bytes [1.0]))
+        gap (write-raw-checkpoint
+             {"a" {"dtype" "F32" "shape" [1] "data_offsets" [4 8]}}
+             (f32-bytes [0.0 1.0]))
+        metadata (write-raw-checkpoint
+                  {"__metadata__" {"not-a-string" 1}}
+                  (byte-array 0))]
+    (try
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"overlap or leave holes"
+                            (safe/open-file overlap)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"overlap or leave holes"
+                            (safe/open-file gap)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"invalid header metadata"
+                            (safe/open-file metadata)))
+      (finally (delete-tree! [metadata gap overlap])))))

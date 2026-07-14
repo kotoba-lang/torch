@@ -83,7 +83,10 @@
 (defn -main [& [bundle-path]]
   (let [manifest (bundle/load-bundle bundle-path)
         expected (into (:prompt-ids manifest)
-                       (take 2 (:generated-ids manifest)))]
+                       (take 2 (:generated-ids manifest)))
+        expected-format (get-in manifest [:details :format])
+        context-length (get-in manifest [:config :context-length])
+        embed-dim (get-in manifest [:config :embed-dim])]
     (-> (gpu/request-device)
         (.then
          (fn [request]
@@ -129,7 +132,7 @@
                  openai-models-url (str base "/v1/models")
                  openai-chat-url (str base "/v1/chat/completions")
                  openai-embed-url (str base "/v1/embeddings")]
-             (println "Real GGUF registry routing on"
+             (println "Real portable Llama registry routing on"
                       (gpu/adapter-description request))
              (-> (mutate-model copy-url "POST"
                                {:source "model-a:latest"
@@ -216,23 +219,27 @@
                             management?
                             (and (zero? (.-length (.-models initial-ps)))
                                  (= 200 show-status) (= 404 missing-status)
-                                 (= "gguf" (get-in show-body [:details :format]))
+                                 (= expected-format
+                                    (get-in show-body [:details :format]))
                                  (= "llama" (get-in show-body [:details :family]))
                                  (= "{{ '<|im_start|>' }}" (:template show-body))
                                  (= #{"completion" "embedding"}
                                     (set (:capabilities show-body)))
-                                 (= 2048 (get-in show-body [:model_info
-                                                            :llama.context_length]))
+                                 (= context-length
+                                    (get-in show-body [:model_info
+                                                       :llama.context_length]))
                                  (= ["model-a:latest"] (mapv :name ps-a-rows))
                                  (= ["model-b:latest"] (mapv :name ps-b-rows))
                                  (pos? (:size_vram (first ps-a-rows)))
-                                 (= 2048 (:context_length (first ps-a-rows))))
+                                 (= context-length
+                                    (:context_length (first ps-a-rows))))
                             chat? (and (true? (.-done chat-a))
                                        (= "assistant" (.. chat-a -message -role))
                                        (string? (.. chat-a -message -content)))
                             embeddings (js->clj (.-embeddings embed-a))
                             [invalid-embed-status _] (js->clj invalid-embed)
-                            embed? (and (= [16 16] (mapv count embeddings))
+                            embed? (and (= [embed-dim embed-dim]
+                                           (mapv count embeddings))
                                         (= 400 invalid-embed-status)
                                         (every? #(< (js/Math.abs (- 1.0
                                                                    (js/Math.sqrt
@@ -293,7 +300,7 @@
                                        lifecycle-api? openai? eviction? lifecycle? released?
                                        (zero? (:resident-bytes stats)))
                           (throw (js/Error.
-                                  "real GGUF registry verification failed")))))))))))
+                                  "real portable registry verification failed")))))))))))
         (.then #(js/Deno.exit 0))
         (.catch (fn [error]
                   (println "ERROR:" (or (.-stack error) (str error)))

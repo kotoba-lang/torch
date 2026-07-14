@@ -41,7 +41,8 @@
               (throw (js/Error. "bundle manifest is outside file bounds")))
           manifest (reader/read-string
                     (.decode decoder (.slice bytes manifest-start payload-base)))]
-      (when-not (= :torch/gguf-metal-bundle-v2 (:format manifest))
+      (when-not (#{:torch/gguf-metal-bundle-v2
+                   :torch/llama-metal-bundle-v3} (:format manifest))
         (throw (js/Error. "unsupported Metal bundle version")))
       {:bytes bytes :manifest manifest :payload-base payload-base})))
 
@@ -77,14 +78,16 @@
                       weights)))))
 
 (defn build-model [{:keys [vocab embed-dim hidden-dim head-count kv-head-count
-                           block-count rope-theta]}]
+                           block-count rope-theta norm-eps]}]
   (apply model/sequential
          (concat [(model/embedding vocab embed-dim)]
                  (repeat block-count
                          (model/llama-block embed-dim head-count hidden-dim
                                             {:kv-heads kv-head-count
-                                             :rope-theta rope-theta}))
-                 [(model/rmsnorm embed-dim) (model/lm-head embed-dim vocab)])))
+                                             :rope-theta rope-theta
+                                             :eps (or norm-eps 1.0e-6)}))
+                 [(model/rmsnorm embed-dim (or norm-eps 1.0e-6))
+                  (model/lm-head embed-dim vocab)])))
 
 (defn- upload-weight [backend {:keys [kind shape source-shape quant-type bytes values]}]
   (case kind

@@ -596,11 +596,14 @@ deno run --allow-all target/deno-autocast-verify.cjs
 # torch conv→GroupNorm→SiLU f16: passed
 ```
 
-Autocast deliberately rejects softmax and attention until their typed kernels
-exist instead of silently returning f32. Training
-autograd still uses f32 master tensors: GradScaler's overflow control is ready,
-but autocast forward and backward are not yet connected into a complete
-mixed-precision trainer.
+On a backend exposing num's typed tensor kernels, F16 autocast now executes
+parameter-free and learned multi-head attention without returning to f32:
+projection GEMMs, transpose, last-axis bias, stable-softmax attention, and output
+projection all retain physical half storage. Causal attention is supported;
+key-padding masks remain on the f32 path and are rejected explicitly. Standalone
+softmax is likewise still rejected instead of silently changing dtype. Training
+keeps f32 master tensors, while mask-free F16 attention now uses num's fused
+device-resident backward rather than leaving the GPU.
 
 ## Reference training (`torch.train`)
 
@@ -683,13 +686,41 @@ double intermediates even for logically-f32 arrays. Tests interrupt an
 AdamW+GradScaler run, reload it, and prove that every subsequent loss, weight,
 moment, variance, and scaler value is exactly equal to uninterrupted training.
 
-`torch.train/mixed-precision-adamw-step` now connects these pieces for
-conv2d/GroupNorm/SiLU/ReLU models: it casts the forward pass to f16 or bf16,
+`torch.train/mixed-precision-adamw-step` and its GPU-capable asynchronous twin
+`mixed-precision-adamw-step-async` connect these pieces for
+linear/attention and conv2d/GroupNorm/SiLU/ReLU models: it casts the forward pass to f16 or bf16,
 computes f32 gradients, unscales and checks them, then updates immutable f32
 master weights with AdamW. Non-finite gradients skip the optimizer step and
 back off the scaler; both successful updates and forced-overflow skips are
-tested. Backward is still a synchronous host reference implementation, so this
-is real mixed-precision numerical behavior but not GPU-resident autograd.
+tested. On Deno Metal, mask-free learned attention keeps projection and
+attention activations in physical F16, runs the attention VJP on-device, uses
+f32 device stability reductions for projection bias and MSE, and materializes
+f32 parameter gradients before the master update. Beyond its reported scalar
+loss, the asynchronous API reads back only overflow flags before fused AdamW. Apple M4 verification covers
+F16 prediction, all eight Q/K/V/output projection gradients, GradScaler state,
+and updated master-weight parity against the CPU oracle.
+
+The same path now trains a complete language-model graph: Embedding → two
+pre-normalized GQA Llama blocks → final RMSNorm → vocabulary LM head. Packed-F16
+activation gradients and f32 master-parameter gradients remain on Metal through
+all 21 trainable tensors. `:deno-metal-llama-train-verify` uses repeated token
+IDs to exercise embedding scatter-add semantics, then compares prediction,
+every VJP, GradScaler/AdamW state, and updated weights with an independent f32
+CPU oracle using `kv-heads=1` and two query heads.
+
+Language-model training can select stable token-label cross entropy with
+`{:loss :cross-entropy :ignore-index -100}`. Labels retain integer-valued f32
+storage while logits stay packed F16; mean reduction excludes ignored positions,
+and the loss-scaled logit VJP feeds the same asynchronous GradScaler/AdamW path.
+The Metal verifier uses shifted next-token labels and ignores the final position,
+rather than training logits against a synthetic MSE target.
+Its vocabulary is 32,000, embedding width is 128, SwiGLU width is 256, sequence
+length is 8, and each block uses four query heads with two KV heads. On Apple M4,
+the full two-block forward, cross-entropy backward, asynchronous AdamW step, and
+complete prediction/gradient/updated-weight readback take 44.02 seconds with
+411,066,140 tracked peak live GPU bytes. All 21 parameter VJPs stay within a 1%
+tensor-range maximum plus bounded mean-error gate, and every updated weight uses
+the stricter elementwise CPU-oracle tolerance.
 
 The reference path supports recursively nested sequential models composed from
 `:linear/:conv2d/:embedding/:groupnorm/:layernorm/:rmsnorm/:flatten/:relu/:silu/:sigmoid/:tanh/:gelu/:softmax/:attention/:multihead-attention/:llama-block/:lm-head`, with MSE and
@@ -786,6 +817,134 @@ declared shape, missing names, and unexpected names before loading. Tensor paylo
 remain on disk until requested, so a checkpoint is not materialized wholesale.
 F32, F16, and BF16 checkpoints are decoded and uploaded as f32 by default for the
 current attention kernels; `:dtype` can request another num storage dtype.
+
+Large Hugging Face checkpoints may be passed as
+`model.safetensors.index.json`. The loader opens each declared shard lazily,
+confines shard filenames to the index directory, and rejects missing,
+unexpected, duplicated, or incorrectly assigned tensors before allocating model
+weights. `torch.huggingface/load-llama-resource` additionally reads a standard
+Llama `config.json`, validates every HF tensor shape, converts linear matrices
+from `[out,in]` to the engine's `[in,out]`, supports grouped-query attention and
+tied embeddings, and constructs the complete runnable model:
+
+```clojure
+(require '[torch.huggingface :as hf])
+
+(def resource
+  (hf/load-llama-resource "config.json"
+                          "model.safetensors.index.json"
+                          backend
+                          {:tokenizer-path "tokenizer.json"
+                           :tokenizer-config-path "tokenizer_config.json"}))
+```
+
+The tokenizer loader supports the standard Llama byte-fallback BPE JSON:
+contiguous vocabulary IDs, ordered merges, UTF-8 byte tokens, normalizer space
+prefix/prepend semantics, TemplateProcessing BOS/EOS insertion, special-token
+skipping, and decoder prefix stripping. It rejects unknown normalizers or
+decoders instead of silently emitting IDs that differ from Transformers.
+
+`torch.huggingface-resource` connects these artifacts to the bounded model
+registry. Its descriptor accounts for the deduplicated byte total of config,
+index, every shard, tokenizer, and tokenizer config; acquire loads once,
+concurrent references share the resident resource, and release/expiry/eviction
+destroys every distinct weight handle once. An optional engine factory receives
+the complete model/tokenizer/weights resource for Ollama or OpenAI serving:
+
+```clojure
+(require '[torch.huggingface-resource :as hf-resource]
+         '[torch.model-registry :as registry])
+
+(def descriptor
+  (hf-resource/descriptor
+   "hf-llama" "config.json" "model.safetensors.index.json"
+   {:tokenizer-path "tokenizer.json"
+    :tokenizer-config-path "tokenizer_config.json"}))
+
+(def callbacks (hf-resource/callbacks backend engine-fn))
+(def models
+  (-> (registry/registry (:size descriptor)
+                         (:load-fn callbacks) (:unload-fn callbacks))
+      (registry/register descriptor)))
+```
+
+The loader was also verified against a third-party, non-fixture checkpoint:
+
+```sh
+curl -L --fail -o /tmp/tiny-random-hf-llama-config.json \
+  'https://huggingface.co/dacorvo/tiny-random-llama/resolve/main/config.json?download=true'
+curl -L --fail -o /tmp/tiny-random-hf-llama.safetensors \
+  'https://huggingface.co/dacorvo/tiny-random-llama/resolve/main/model.safetensors?download=true'
+curl -L --fail -o /tmp/tiny-random-hf-llama-tokenizer.json \
+  'https://huggingface.co/dacorvo/tiny-random-llama/resolve/main/tokenizer.json?download=true'
+curl -L --fail -o /tmp/tiny-random-hf-llama-tokenizer-config.json \
+  'https://huggingface.co/dacorvo/tiny-random-llama/resolve/main/tokenizer_config.json?download=true'
+
+# model SHA-256: f2862981ba362b49503e463b4969a1d87496953a98858f4b0e1110bd13ab0a1c
+clojure -M:public-safetensors-verify \
+  /tmp/tiny-random-hf-llama-config.json \
+  /tmp/tiny-random-hf-llama.safetensors \
+  /tmp/tiny-random-hf-llama-tokenizer.json \
+  /tmp/tiny-random-hf-llama-tokenizer-config.json
+```
+
+That public F32 model has one 128-wide Llama block and a 32,000-token
+vocabulary. The verifier loads all 12 standard tensors and executes the complete
+embedding → decoder → norm → LM-head graph, producing `[1,32000]` finite logits.
+For `Hello, world! こんにちは`, it emits
+`[1,15043,29892,3186,29991,29871,30589,30389,30353,30644,30449]`, exactly the
+same IDs as Hugging Face `tokenizers` 0.21.4, and decodes them losslessly.
+The public verifier then acquires this model through the registry, prefills
+`Hi` into a real KV cache, greedily generates two tokens, releases the request,
+expires the model, and asserts `loads=1`, `unloads=1`, `loaded-models=0`, and
+`resident-bytes=0`.
+Its weights are random; this proves format/layout/runtime compatibility, not
+language quality.
+
+### Hugging Face → Apple Metal serving
+
+The JVM exporter converts the same safetensors resource into a portable
+`TGBNDL1` v3 bundle. It streams tensor payloads through a temporary file and
+atomically replaces the destination, so it does not retain a second complete
+model payload in heap. Dense HF matrices are already transposed into the Metal
+runtime's execution layout; tokenizer normalization/decoder options travel in
+the manifest with the weights:
+
+```sh
+clojure -M:hf-bundle-export \
+  /tmp/tiny-random-hf-llama-config.json \
+  /tmp/tiny-random-hf-llama.safetensors \
+  /tmp/tiny-random-hf-llama-tokenizer.json \
+  /tmp/tiny-random-hf-llama-tokenizer-config.json \
+  target/tiny-random-hf-llama-metal.tgb
+
+# Full Llama CPU/Metal greedy parity and buffer release
+clojure -M:deno-public-gguf-metal-verify
+deno run --allow-all target/deno-public-gguf-metal-verify.cjs \
+  target/tiny-random-hf-llama-metal.tgb
+
+# Real Ollama streaming/non-streaming HTTP and cancellation
+clojure -M:deno-public-gguf-ollama-verify
+deno run --allow-all target/deno-public-gguf-ollama-verify.cjs \
+  target/tiny-random-hf-llama-metal.tgb
+
+# Resident registry, Ollama management/chat/embed, and OpenAI APIs
+clojure -M:deno-public-gguf-registry-verify
+deno run --allow-all target/deno-public-gguf-registry-verify.cjs \
+  target/tiny-random-hf-llama-metal.tgb
+```
+
+On Apple M4 the 34,646,927-byte public HF bundle produced the same four greedy
+tokens on CPU and Metal (`[22056,1092,8384,8375]`). Releasing weights and cache
+retired 14 buffers / 33,457,664 bytes with no transient buffers left. The real
+Ollama socket returned its first streamed response before completion, matched
+streaming and non-streaming contexts, propagated disconnect cancellation, and
+restored the GPU baseline. The registry suite additionally passed Ollama
+generate/chat/embed/ps/show/copy/delete, OpenAI models/chat/embeddings, dynamic
+residency tags, LRU eviction, exactly-once load/unload, and ended with both
+registry resident bytes and GPU live bytes back at baseline. The historical
+verifier alias names contain `gguf`, but the verifier itself is now portable and
+driven by the v2/v3 bundle manifest.
 
 ## Test
 
