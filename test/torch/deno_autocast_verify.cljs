@@ -18,6 +18,8 @@
                                  (model/silu) (model/sigmoid) (model/tanh) (model/gelu))
         embedding-model (model/sequential (model/embedding 5 4)
                                           (model/rmsnorm 4) (model/gelu))
+        attention-model (model/sequential (model/multihead-attention 4 1))
+        attention-input-values [0.1 0.2 0.3 0.4, -0.2 0.1 0.5 -0.3]
         input-values (mapv #(- (* 0.03 %) 0.4) (range 32))
         token-values [2 0 2 1]
         cpu-backend (cpu/cpu-backend)
@@ -33,7 +35,13 @@
         (arr/->vec
          (core/run (backend/num-backend cpu-backend cpu-embedding-weights
                                         {:autocast-dtype :f16})
-                   embedding-model (arr/from-vec cpu-backend token-values [4])))]
+                   embedding-model (arr/from-vec cpu-backend token-values [4])))
+        expected-attention
+        (arr/->vec
+         (core/run (backend/num-backend
+                    cpu-backend (backend/random-weights cpu-backend attention-model 11))
+                   attention-model
+                   (arr/from-vec cpu-backend attention-input-values [1 2 4])))]
     (-> (gpu/request-device)
         (.then
          (fn [device-result]
@@ -49,21 +57,36 @@
                  (core/run (backend/num-backend gpu-backend embedding-weights
                                                 {:autocast-dtype :f16})
                            embedding-model
-                           (arr/from-vec gpu-backend token-values [4]))]
+                           (arr/from-vec gpu-backend token-values [4]))
+                 attention-weights (backend/random-weights gpu-backend attention-model 11
+                                                           {:dtype :f16})
+                 attention-output
+                 (core/run (backend/num-backend gpu-backend attention-weights
+                                                {:autocast-dtype :f16})
+                           attention-model
+                           (arr/from-vec gpu-backend attention-input-values [1 2 4]
+                                         :f16))]
              (println "adapter:" (or (gpu/adapter-description device-result) "unknown"))
              (.then (js/Promise.all (into-array [(arr/->vec output)
-                                                 (arr/->vec embedding-output)]))
+                                                 (arr/->vec embedding-output)
+                                                 (arr/->vec attention-output)]))
                     (fn [actual-values]
                       (let [actual (vec (aget actual-values 0))
                             actual-embedding (vec (aget actual-values 1))
+                            actual-attention (vec (aget actual-values 2))
                             ok? (approx-vec? expected actual 0.03)
                             embedding-ok? (approx-vec? expected-embedding
-                                                        actual-embedding 0.01)]
+                                                        actual-embedding 0.01)
+                            attention-ok? (approx-vec? expected-attention
+                                                        actual-attention 0.03)]
                         (println (str "torch conv→GroupNorm→LayerNorm→activations f16: "
                                       (if ok? "passed" "failed")))
                         (println (str "torch Embedding→RMSNorm→GELU f16: "
                                       (if embedding-ok? "passed" "failed")))
-                        (when-not (and ok? embedding-ok?) (.exit js/Deno 1))))))))
+                        (println (str "torch learned attention f16: "
+                                      (if attention-ok? "passed" "failed")))
+                        (when-not (and ok? embedding-ok? attention-ok?)
+                          (.exit js/Deno 1))))))))
         (.catch (fn [error]
                   (js/console.error error)
                   (.exit js/Deno 1))))))

@@ -596,8 +596,12 @@ deno run --allow-all target/deno-autocast-verify.cjs
 # torch conv→GroupNorm→SiLU f16: passed
 ```
 
-Autocast deliberately rejects softmax and attention until their typed kernels
-exist instead of silently returning f32. Training
+On a backend exposing num's typed tensor kernels, F16 autocast now executes
+parameter-free and learned multi-head attention without returning to f32:
+projection GEMMs, transpose, last-axis bias, stable-softmax attention, and output
+projection all retain physical half storage. Causal attention is supported;
+key-padding masks remain on the f32 path and are rejected explicitly. Standalone
+softmax is likewise still rejected instead of silently changing dtype. Training
 autograd still uses f32 master tensors: GradScaler's overflow control is ready,
 but autocast forward and backward are not yet connected into a complete
 mixed-precision trainer.

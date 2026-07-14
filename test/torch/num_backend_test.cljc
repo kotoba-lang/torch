@@ -243,7 +243,7 @@
         weights (nb/random-weights backend model 3)
         input (arr/from-vec backend [1.0 2.0] [1 2])]
     (is (thrown-with-msg?
-         #?(:clj Exception :cljs js/Error) #"autocast supports"
+         #?(:clj Exception :cljs js/Error) #"typed backend kernel"
          (core/run (nb/num-backend backend weights {:autocast-dtype :f16})
                    model input)))))
 

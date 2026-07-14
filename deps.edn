@@ -12,7 +12,8 @@
         io.github.kotoba-lang/num
         {:git/sha "a03c9dbfcf056cff21dfef9fc67012f3fc97444f"}}
  :aliases
- {:hf-bundle-export
+ {:dev {:override-deps {io.github.kotoba-lang/num {:local/root "../num"}}}
+  :hf-bundle-export
        {:extra-paths ["test"]
         :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
         :main-opts ["-m" "torch.hf-bundle-export"]}
