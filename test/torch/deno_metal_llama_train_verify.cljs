@@ -10,6 +10,7 @@
 
 (def input-values [2 0 2])
 (def target-values [0 2 -100])
+(def vocabulary-size 32000)
 (def input-shape [1 3])
 (def target-shape [1 3])
 (def parameter-names
@@ -31,13 +32,13 @@
 
 (defn -main [& _]
   (let [model* (model/sequential
-                (model/embedding 8 4)
+                (model/embedding vocabulary-size 4)
                 (model/llama-block 4 2 8
                                    {:kv-heads 1 :position-offset 2})
                 (model/llama-block 4 2 8
                                    {:kv-heads 1 :position-offset 2})
                 (model/rmsnorm 4)
-                (model/lm-head 4 8))
+                (model/lm-head 4 vocabulary-size))
         cpu-backend (cpu/cpu-backend)
         scaler (optim/grad-scaler {:initial-scale 8.0 :growth-interval 2})
         cpu-weights (nb/random-weights cpu-backend model* 79)
@@ -56,6 +57,7 @@
         (.then
          (fn [device]
            (let [backend (gpu/backend device)
+                 started (.now js/performance)
                  weights (nb/random-weights backend model* 79)
                  input (arr/from-vec backend input-values input-shape)
                  target (arr/from-vec backend target-values target-shape)
@@ -105,9 +107,18 @@
                                         (every? #(= :f32 (:dtype %))
                                                 (arrays (:gradients pass))))
                          loss-ok? (< (Math/abs (- actual-loss (:loss cpu-pass)))
-                                     0.02)]
+                                     0.02)
+                         elapsed-ms (- (.now js/performance) started)
+                         stats (gpu/backend-stats backend)
+                         resource-ok? (and (< elapsed-ms 120000.0)
+                                           (< (:peak-live-bytes stats)
+                                              (* 512 1024 1024)))]
                      (println "adapter:"
                               (or (gpu/adapter-description device) "Apple Metal"))
+                     (println "vocabulary:" vocabulary-size
+                              "elapsed-ms:" elapsed-ms
+                              "peak-live-bytes:" (:peak-live-bytes stats)
+                              "live-bytes:" (:live-bytes stats))
                      (println (str "Llama LM F16 prediction: "
                                    (if prediction-ok? "passed" "failed")))
                      (println (str "Llama LM F16 21-parameter VJP: "
@@ -116,13 +127,14 @@
                                    (if (and weights-ok? state-ok? loss-ok?)
                                      "passed" "failed")))
                      (when-not (and prediction-ok? gradients-ok? weights-ok?
-                                    state-ok? loss-ok?)
+                                    state-ok? loss-ok? resource-ok?)
                        (js/console.error
                         #js {:loss #js [(:loss cpu-pass) actual-loss]
                              :prediction prediction-ok?
                              :gradients gradients-ok?
                              :weights weights-ok?
-                             :state state-ok?})
+                             :state state-ok?
+                             :resources resource-ok?})
                        (.exit js/Deno 1))))))))))
         (.catch (fn [error]
                   (js/console.error error)
