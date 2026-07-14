@@ -12,12 +12,24 @@ jobs:
   test:
     name: clojure -M:test (JDK ${{ matrix.java }})
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: torch
     strategy:
       fail-fast: false
       matrix:
         java: ['17', '21']
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout torch
+        uses: actions/checkout@v4
+        with:
+          path: torch
+
+      - name: Checkout num local dependency
+        uses: actions/checkout@v4
+        with:
+          repository: kotoba-lang/num
+          path: num
 
       - name: Setup JDK ${{ matrix.java }}
         uses: actions/setup-java@v4
@@ -37,7 +49,7 @@ jobs:
           path: |
             ~/.m2
             ~/.gitlibs
-          key: ${{ runner.os }}-jdk${{ matrix.java }}-clj-${{ hashFiles('deps.edn') }}
+          key: ${{ runner.os }}-jdk${{ matrix.java }}-clj-${{ hashFiles('torch/deps.edn', 'num/deps.edn') }}
           restore-keys: |
             ${{ runner.os }}-jdk${{ matrix.java }}-clj-
 
