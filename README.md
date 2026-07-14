@@ -787,6 +787,44 @@ remain on disk until requested, so a checkpoint is not materialized wholesale.
 F32, F16, and BF16 checkpoints are decoded and uploaded as f32 by default for the
 current attention kernels; `:dtype` can request another num storage dtype.
 
+Large Hugging Face checkpoints may be passed as
+`model.safetensors.index.json`. The loader opens each declared shard lazily,
+confines shard filenames to the index directory, and rejects missing,
+unexpected, duplicated, or incorrectly assigned tensors before allocating model
+weights. `torch.huggingface/load-llama-resource` additionally reads a standard
+Llama `config.json`, validates every HF tensor shape, converts linear matrices
+from `[out,in]` to the engine's `[in,out]`, supports grouped-query attention and
+tied embeddings, and constructs the complete runnable model:
+
+```clojure
+(require '[torch.huggingface :as hf])
+
+(def resource
+  (hf/load-llama-resource "config.json"
+                          "model.safetensors.index.json"
+                          backend))
+```
+
+The loader was also verified against a third-party, non-fixture checkpoint:
+
+```sh
+curl -L --fail -o /tmp/tiny-random-hf-llama-config.json \
+  'https://huggingface.co/dacorvo/tiny-random-llama/resolve/main/config.json?download=true'
+curl -L --fail -o /tmp/tiny-random-hf-llama.safetensors \
+  'https://huggingface.co/dacorvo/tiny-random-llama/resolve/main/model.safetensors?download=true'
+
+# model SHA-256: f2862981ba362b49503e463b4969a1d87496953a98858f4b0e1110bd13ab0a1c
+clojure -M:public-safetensors-verify \
+  /tmp/tiny-random-hf-llama-config.json \
+  /tmp/tiny-random-hf-llama.safetensors
+```
+
+That public F32 model has one 128-wide Llama block and a 32,000-token
+vocabulary. The verifier loads all 12 standard tensors and executes the complete
+embedding → decoder → norm → LM-head graph, producing `[1,32000]` finite logits.
+Its weights are random; this proves format/layout/runtime compatibility, not
+language quality. Tokenizer JSON ingestion remains a separate boundary.
+
 ## Test
 
 ```

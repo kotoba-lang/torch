@@ -21,6 +21,12 @@
   Closeable
   (close [_] (.close channel) (.close file)))
 
+(defrecord SafeTensorIndex [path metadata tensor-map shards]
+  Closeable
+  (close [_]
+    (doseq [checkpoint (vals shards)]
+      (.close ^Closeable checkpoint))))
+
 (defn- read-fully-at! [^FileChannel channel ^ByteBuffer buffer position]
   (loop [position (long position)]
     (when (.hasRemaining buffer)
@@ -50,14 +56,27 @@
               _ (read-fully-at! channel header-buffer 8)
               header (json/read-str
                       (String. (.array header-buffer) StandardCharsets/UTF_8))
+              _ (when-not (map? header)
+                  (throw (ex-info "torch.safetensors: header must be an object"
+                                  {:path (str path)})))
               metadata (get header "__metadata__" {})
               tensors (dissoc header "__metadata__")
               data-start (+ 8 header-length)
               payload-length (- file-length data-start)]
+          (when-not (and (map? metadata)
+                         (every? string? (keys metadata))
+                         (every? string? (vals metadata)))
+            (throw (ex-info "torch.safetensors: invalid header metadata"
+                            {:path (str path)})))
           (doseq [[name {:strs [dtype shape data_offsets] :as entry}] tensors]
-            (let [[start end] data_offsets width (get dtype-bytes dtype)
-                  expected (when width (* width (nelems shape)))]
-              (when-not (and width (vector? shape) (= 2 (count data_offsets))
+            (let [[start end] data_offsets
+                  valid-shape? (and (vector? shape)
+                                    (every? #(and (integer? %) (not (neg? %))) shape))
+                  width (get dtype-bytes dtype)
+                  expected (when (and width valid-shape?)
+                             (* width (nelems shape)))]
+              (when-not (and (string? name) (not (.isBlank ^String name))
+                             width valid-shape? (= 2 (count data_offsets))
                              (integer? start) (integer? end)
                              (<= 0 start end payload-length)
                              (= expected (- end start)))
@@ -65,12 +84,125 @@
                                 {:tensor name :entry entry
                                  :payload-length payload-length
                                  :expected-bytes expected})))))
+          (let [windows (sort-by (juxt first second last)
+                                 (map (fn [[name entry]]
+                                        (let [[start end] (get entry "data_offsets")]
+                                          [start end name]))
+                                      tensors))
+                covered (reduce (fn [cursor [start end name]]
+                                  (when-not (= cursor start)
+                                    (throw (ex-info
+                                            "torch.safetensors: tensor windows overlap or leave holes"
+                                            {:tensor name :expected-offset cursor
+                                             :actual-offset start})))
+                                  end)
+                                0 windows)]
+            (when-not (= covered payload-length)
+              (throw (ex-info "torch.safetensors: unreferenced payload bytes"
+                              {:covered covered :payload-length payload-length}))))
           (->SafeTensorFile file channel (str path) data-start tensors metadata)))
       (catch Throwable error
         (.close channel) (.close file) (throw error)))))
 
-(defn tensor-names [checkpoint] (vec (sort (keys (:tensors checkpoint)))))
-(defn tensor-info [checkpoint name] (get (:tensors checkpoint) name))
+(defn- index-path? [path]
+  (.endsWith (str path) ".safetensors.index.json"))
+
+(defn- safe-shard-path [^Path parent shard-name]
+  (when-not (and (string? shard-name)
+                 (not (.isBlank ^String shard-name))
+                 (.endsWith ^String shard-name ".safetensors"))
+    (throw (ex-info "torch.safetensors: invalid shard filename"
+                    {:shard shard-name})))
+  (let [candidate (.normalize (.resolve parent ^String shard-name))]
+    (when (or (.isAbsolute (Path/of shard-name (make-array String 0)))
+              (not (.startsWith candidate parent)))
+      (throw (ex-info "torch.safetensors: shard escapes index directory"
+                      {:shard shard-name :directory (str parent)})))
+    (let [options (make-array java.nio.file.LinkOption 0)
+          real-parent (.toRealPath parent options)
+          real-candidate (.toRealPath candidate options)]
+      (when-not (.startsWith real-candidate real-parent)
+        (throw (ex-info "torch.safetensors: shard symlink escapes index directory"
+                        {:shard shard-name :directory (str real-parent)})))
+      real-candidate)))
+
+(defn open-index
+  "Open a Hugging Face sharded safetensors index. Every declared shard is
+  confined to the index directory and its actual tensor names must match the
+  `weight_map` exactly. Payloads remain lazy in each RandomAccessFile."
+  [path]
+  (let [index-path (.toAbsolutePath ^Path (if (instance? Path path)
+                                            path (Path/of (str path) (make-array String 0))))
+        length (Files/size index-path)]
+    (when (> length max-header-bytes)
+      (throw (ex-info "torch.safetensors: index is too large"
+                      {:bytes length :limit max-header-bytes})))
+    (let [document (json/read-str (String. (Files/readAllBytes index-path)
+                                           StandardCharsets/UTF_8))
+          weight-map (get document "weight_map")
+          metadata (get document "metadata" {})]
+      (when-not (and (map? document) (map? metadata)
+                     (map? weight-map) (seq weight-map)
+                     (every? #(and (string? %) (not (.isBlank ^String %)))
+                             (keys weight-map)))
+        (throw (ex-info "torch.safetensors: invalid sharded index"
+                        {:path (str index-path)})))
+      (let [parent (.normalize (.getParent index-path))
+            shard-paths (into (sorted-map)
+                              (map (fn [name] [name (safe-shard-path parent name)]))
+                              (set (vals weight-map)))
+            opened (atom {})]
+        (try
+          (doseq [[name shard-path] shard-paths]
+            (swap! opened assoc name (open-file shard-path)))
+          (let [actual-locations
+                (reduce-kv
+                 (fn [locations shard checkpoint]
+                   (reduce (fn [m tensor]
+                             (update m tensor (fnil conj []) shard))
+                           locations (keys (:tensors checkpoint))))
+                 {} @opened)
+                declared (set (keys weight-map))
+                actual (set (keys actual-locations))
+                missing (vec (sort (set/difference declared actual)))
+                unexpected (vec (sort (set/difference actual declared)))
+                ambiguous (into (sorted-map)
+                                (filter (fn [[_ locations]]
+                                          (> (count locations) 1)))
+                                actual-locations)
+                misplaced (into (sorted-map)
+                                (keep (fn [[tensor shard]]
+                                        (when (and (contains? actual tensor)
+                                                   (not= [shard]
+                                                         (get actual-locations tensor)))
+                                          [tensor {:declared shard
+                                                   :actual (get actual-locations tensor)}])))
+                                weight-map)]
+            (when (or (seq missing) (seq unexpected) (seq ambiguous)
+                      (seq misplaced))
+              (throw (ex-info "torch.safetensors: index does not match shard contents"
+                              {:missing missing :unexpected unexpected
+                               :ambiguous ambiguous :misplaced misplaced})))
+            (->SafeTensorIndex (str index-path) metadata weight-map @opened))
+          (catch Throwable error
+            (doseq [checkpoint (vals @opened)]
+              (.close ^Closeable checkpoint))
+            (throw error)))))))
+
+(defn open-checkpoint
+  "Open either one `.safetensors` file or a `.safetensors.index.json` manifest."
+  [path]
+  (if (index-path? path) (open-index path) (open-file path)))
+
+(defn tensor-names [checkpoint]
+  (vec (sort (keys (if (instance? SafeTensorIndex checkpoint)
+                     (:tensor-map checkpoint) (:tensors checkpoint))))))
+
+(defn tensor-info [checkpoint name]
+  (if (instance? SafeTensorIndex checkpoint)
+    (when-let [shard (get (:tensor-map checkpoint) name)]
+      (tensor-info (get (:shards checkpoint) shard) name))
+    (get (:tensors checkpoint) name)))
 
 (defn- write-fully! [^FileChannel channel ^ByteBuffer buffer]
   (while (.hasRemaining buffer) (.write channel buffer)))
@@ -191,28 +323,46 @@
              "U64" (Double/parseDouble (Long/toUnsignedString (.getLong buffer))))))
         (range count)))
 
+(defn read-tensor-data
+  "Decode one tensor window without uploading it. Returns dtype, shape, and a
+  flat row-major value vector; useful at checkpoint-layout conversion seams."
+  [checkpoint name]
+  (if (instance? SafeTensorIndex checkpoint)
+    (if-let [shard (get (:tensor-map checkpoint) name)]
+      (read-tensor-data (get (:shards checkpoint) shard) name)
+      (throw (ex-info "torch.safetensors: tensor not found"
+                      {:tensor name :path (:path checkpoint)})))
+    (let [{:strs [dtype shape data_offsets] :as info} (tensor-info checkpoint name)]
+      (when-not info
+        (throw (ex-info "torch.safetensors: tensor not found"
+                        {:tensor name :path (:path checkpoint)})))
+      (let [[start end] data_offsets
+            length (- end start)]
+        (when (> length Integer/MAX_VALUE)
+          (throw (ex-info "torch.safetensors: tensor exceeds JVM decode window"
+                          {:tensor name :bytes length
+                           :limit Integer/MAX_VALUE})))
+        (let [buffer (doto (ByteBuffer/allocate (int length))
+                       (.order ByteOrder/LITTLE_ENDIAN))]
+          (read-fully-at! (:channel checkpoint) buffer
+                          (+ (:data-start checkpoint) start))
+          {:dtype dtype :shape (mapv long shape)
+           :values (decode-values buffer dtype (nelems shape))})))))
+
 (defn read-tensor
   "Read one tensor window and upload it to `backend`. `target-dtype` defaults
   to f32 so f16/bf16 checkpoints can execute through current f32 kernels."
   ([checkpoint backend name] (read-tensor checkpoint backend name :f32))
   ([checkpoint backend name target-dtype]
-   (let [{:strs [dtype shape data_offsets] :as info} (tensor-info checkpoint name)]
-     (when-not info
-       (throw (ex-info "torch.safetensors: tensor not found"
-                       {:tensor name :path (:path checkpoint)})))
-     (let [[start end] data_offsets
-           buffer (doto (ByteBuffer/allocate (int (- end start)))
-                    (.order ByteOrder/LITTLE_ENDIAN))]
-       (read-fully-at! (:channel checkpoint) buffer (+ (:data-start checkpoint) start))
-       (arr/from-vec backend (decode-values buffer dtype (nelems shape))
-                     (mapv long shape) target-dtype)))))
+   (let [{:keys [shape values]} (read-tensor-data checkpoint name)]
+     (arr/from-vec backend values shape target-dtype))))
 
 (defn load-weights
   "Load exactly the tensors required by `model*` and return its aligned weight
   vector. Strict mode rejects unrelated checkpoint tensors."
   ([path backend model*] (load-weights path backend model* {}))
   ([path backend model* {:keys [strict? dtype] :or {strict? true dtype :f32}}]
-   (with-open [checkpoint (open-file path)]
+   (with-open [checkpoint (open-checkpoint path)]
      (let [required (set (map :name (state/manifest model*)))
            provided (set (tensor-names checkpoint))
            missing (vec (sort (set/difference required provided)))
