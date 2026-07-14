@@ -1,6 +1,7 @@
 (ns torch.optim
   "Immutable optimizers over torch.train's weight/gradient layout."
   (:require [num.array :as arr]
+            [num.core :as nm]
             [num.tensor :as t]))
 
 (defn- fail [message data]
@@ -62,6 +63,95 @@
   [parameter gradient moment variance step
    options]
   (t/adamw-step parameter gradient moment variance step options))
+
+(defn- scalar-like [array value]
+  (arr/from-vec (:backend array)
+                (repeat (arr/nelems (:shape array)) value)
+                (:shape array)))
+
+(defn- scale [array value]
+  (nm/mul array (scalar-like array value)))
+
+(defn- validate-aligned! [weights gradients optimizer options]
+  (when-not (= (count weights) (count gradients))
+    (fail (str "invalid " optimizer " weights/gradients")
+          {:weights (count weights) :gradients (count gradients)
+           :options options}))
+  (doseq [[weight gradient] (map vector weights gradients)]
+    (when (or (not= (some? weight) (some? gradient))
+              (and weight (not= (set (keys weight)) (set (keys gradient)))))
+      (fail (str optimizer " parameter/gradient layout differs")
+            {:parameters (some-> weight keys) :gradients (some-> gradient keys)}))))
+
+(defn sgd-step
+  "Apply one PyTorch-style SGD update without tensor readback.
+
+  Supports momentum, dampening, coupled weight decay, Nesterov, and maximize.
+  State is nil initially and then contains aligned momentum buffers. As in
+  PyTorch, the first momentum buffer is initialized from the complete adjusted
+  gradient and therefore does not apply dampening on its first step."
+  ([weights gradients state] (sgd-step weights gradients state {}))
+  ([weights gradients state options]
+   (let [{:keys [learning-rate momentum dampening weight-decay nesterov maximize]
+          :as normalized}
+         (merge {:learning-rate 1.0e-3 :momentum 0.0 :dampening 0.0
+                 :weight-decay 0.0 :nesterov false :maximize false}
+                options)]
+     (when-not (and (pos? learning-rate) (not (neg? momentum))
+                    (not (neg? dampening)) (not (neg? weight-decay))
+                    (boolean? nesterov) (boolean? maximize)
+                    (or (not nesterov)
+                        (and (pos? momentum) (zero? dampening))))
+       (fail "invalid SGD options" {:options normalized}))
+     (validate-aligned! weights gradients "SGD" normalized)
+     (let [previous (or (:slots state) (vec (repeat (count weights) nil)))
+           step (inc (long (or (:step state) 0)))
+           results
+           (mapv
+            (fn [weight gradient slots]
+              (when weight
+                (into {}
+                      (map
+                       (fn [[key parameter]]
+                         (let [raw-gradient (get gradient key)
+                               adjusted (if (pos? weight-decay)
+                                          (nm/add raw-gradient
+                                                  (scale parameter weight-decay))
+                                          raw-gradient)
+                               old-buffer (get-in slots [key :momentum-buffer])
+                               buffer (when (pos? momentum)
+                                        (if old-buffer
+                                          (nm/add (scale old-buffer momentum)
+                                                  (scale adjusted (- 1.0 dampening)))
+                                          adjusted))
+                               direction (cond
+                                           (and nesterov buffer)
+                                           (nm/add adjusted (scale buffer momentum))
+                                           buffer buffer
+                                           :else adjusted)
+                               delta (scale direction learning-rate)
+                               parameter' ((if maximize nm/add nm/sub)
+                                           parameter delta)]
+                           [key {:parameter parameter'
+                                 :momentum-buffer buffer}]))
+                       weight))))
+            weights gradients previous)]
+       {:weights
+        (mapv (fn [result]
+                (when result
+                  (into {} (map (fn [[key value]] [key (:parameter value)])) result)))
+              results)
+        :state
+        {:step step
+         :slots
+         (mapv (fn [result]
+                 (when result
+                   (into {}
+                         (keep (fn [[key value]]
+                                 (when-let [buffer (:momentum-buffer value)]
+                                   [key {:momentum-buffer buffer}])))
+                         result)))
+               results)}}))))
 
 (defn adamw-step
   "Apply one AdamW update.

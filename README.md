@@ -630,6 +630,14 @@ parameter update is a fused device dispatch that produces new weight, first-mome
 and variance buffers; first-step zero slots are allocated on-device. No parameter,
 gradient, or optimizer slot is downloaded.
 
+`torch.optim/sgd-step` implements PyTorch SGD semantics over the same aligned
+device tensors: momentum, first-step buffer initialization, dampening, coupled
+weight decay, Nesterov, and maximize are supported. Momentum buffers are
+immutable optimizer state and remain on the tensor backend; invalid Nesterov
+combinations and mismatched parameter/gradient layouts fail before an update.
+`torch.train/optimizer-step` connects model execution, MSE backward, and either
+`:sgd` or `:adamw` in one call, returning the next weights and optimizer state.
+
 `torch.optim/grad-scaler` and `scaled-adamw-step` provide dynamic loss scaling:
 call `loss-and-gradients` with the scaler's `:scale`, then pass the scaled
 gradients to the optimizer. Gradients are unscaled before AdamW, non-finite
@@ -685,7 +693,7 @@ is real mixed-precision numerical behavior but not GPU-resident autograd.
 
 The reference path supports recursively nested sequential models composed from
 `:linear/:conv2d/:embedding/:groupnorm/:layernorm/:rmsnorm/:flatten/:relu/:silu/:sigmoid/:tanh/:gelu/:softmax/:attention/:multihead-attention/:llama-block/:lm-head`, with MSE and
-positive-rate SGD plus immutable AdamW. NCHW grouped convolution, affine GroupNorm, SiLU, and
+stateful PyTorch-style SGD plus immutable AdamW. NCHW grouped convolution, affine GroupNorm, SiLU, and
 multi-head self-attention all have real reverse-mode gradients; tests verify
 both finite-difference agreement in `num` and decreasing loss through the
 public torch model/weight representation. It is not yet a replacement for
@@ -722,6 +730,9 @@ immutable `sgd-step` update is composed from device elementwise multiply/subtrac
 so parameter and gradient buffers are never downloaded. AdamW now follows the same
 GPU-resident path: four learned-attention steps on Apple M4 verify every final
 weight, first moment, variance, and the decreasing loss trajectory against CPU.
+The same verifier runs Nesterov SGD with momentum and weight decay, comparing
+every final projection weight, every momentum buffer, and the complete loss
+trajectory against CPU without parameter readback during the update.
 The Apple M4 verifier covers both the finite async update and an injected infinity:
 the finite path advances AdamW and GradScaler, while overflow leaves weights and
 optimizer state unchanged and halves the scale. Only scalar control flags cross the
