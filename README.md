@@ -279,10 +279,20 @@ checked against full-sequence CPU hidden states, while the registry verifier run
 two inputs through the public GGUF on Apple Metal and checks dimensions, unit
 norms, lifecycle refcounts, and final GPU cleanup.
 
+The same listener also exposes the Ollama-supported OpenAI compatibility surface:
+`GET /v1/models`, `GET /v1/models/{model}`, `POST /v1/chat/completions`, and
+`POST /v1/embeddings`. Chat defaults to non-streaming as OpenAI clients expect;
+streaming uses `text/event-stream`, one `data:` frame per native generation
+chunk, and a terminal `[DONE]`. Both forms preserve OpenAI choices and token
+usage envelopes while executing through the same resident model and cancellation
+path as `/api/chat`. Unsupported multiple choices, tools, response formats,
+stop sequences, and non-float embedding encodings fail explicitly with an
+OpenAI-shaped error instead of being silently ignored.
+
 ```sh
 clojure -M:deno-ollama-http-verify
 deno run --allow-all target/deno-ollama-http-verify.cjs
-# version/tags, generate/chat, batched embed, copy/delete, invalid request: passed
+# native Ollama plus OpenAI models/chat/embeddings, SSE cancellation: passed
 ```
 
 `serve!` starts a real Deno listener (default `127.0.0.1:11434`) and exposes its
@@ -454,6 +464,7 @@ clojure -M:deno-public-gguf-registry-verify && \
 # Ollama chat runs through the resident public-GGUF Metal model: passed
 # Ollama normalized batched embeddings run on Metal: passed
 # Ollama copy/delete mutate the live model catalog: passed
+# OpenAI chat/embeddings use the resident public-GGUF Metal model: passed
 # inactive model-a LRU-evicted when model-b loads under a 1.5-model budget
 # each model loaded/unloaded exactly once; resident bytes: 0
 # GPU baseline restored: passed

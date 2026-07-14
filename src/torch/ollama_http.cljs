@@ -1,6 +1,7 @@
 (ns torch.ollama-http
   "Deno/browser-standard HTTP surface for the Ollama compatibility contract."
-  (:require [torch.ollama :as ollama]))
+  (:require [torch.ollama :as ollama]
+            [torch.openai :as openai]))
 
 (defn- response [status body content-type]
   (js/Response.
@@ -12,6 +13,9 @@
 
 (defn- error-response [status error]
   (json-response status (ollama/error-body (or (.-message error) (str error)))))
+
+(defn- openai-error-response [status error]
+  (json-response status (openai/error-body (or (.-message error) (str error)))))
 
 (defn- ndjson-stream [source cleanup!]
   (let [reader (.getReader source)
@@ -57,6 +61,44 @@
               (pump)))
           :cancel #(.cancel reader %)})))
 
+(defn- openai-sse-stream [source id created cleanup!]
+  (let [reader (.getReader source)
+        encoder (js/TextEncoder.)
+        first? (atom true)
+        encode! (fn [controller value]
+                  (.enqueue controller
+                            (.encode encoder
+                                     (str "data: "
+                                          (js/JSON.stringify (clj->js value))
+                                          "\n\n"))))
+        finish! (fn [controller]
+                  (.enqueue controller (.encode encoder "data: [DONE]\n\n"))
+                  (cleanup!)
+                  (.close controller))]
+    (js/ReadableStream.
+     #js {:start
+          (fn [controller]
+            (letfn [(pump []
+                      (-> (.read reader)
+                          (.then
+                           (fn [result]
+                             (if (.-done result)
+                               (finish! controller)
+                               (let [native (.-value result)]
+                                 (encode! controller
+                                          (openai/chat-chunk id created native @first?))
+                                 (reset! first? false)
+                                 (if (:done native)
+                                   (finish! controller)
+                                   (pump))))))
+                          (.catch (fn [error]
+                                    (cleanup!)
+                                    (.error controller error)))))]
+              (pump)))
+          :cancel (fn [reason]
+                    (cleanup!)
+                    (.cancel reader reason))})))
+
 (defn handler
   "Build a standard Fetch handler. Service keys:
 
@@ -83,6 +125,21 @@
       (cond
         (and (= method "GET") (= path "/api/version"))
         (js/Promise.resolve (json-response 200 {:version version}))
+
+        (and (= method "GET") (= path "/v1/models"))
+        (js/Promise.resolve
+         (json-response 200
+                        (openai/models-response
+                         (if (fn? models) (models) models))))
+
+        (and (= method "GET") (.startsWith path "/v1/models/"))
+        (let [model-id (js/decodeURIComponent (subs path (count "/v1/models/")))
+              rows (if (fn? models) (models) models)
+              descriptor (some #(when (= model-id (or (:model %) (:name %))) %) rows)]
+          (js/Promise.resolve
+           (if descriptor
+             (json-response 200 (openai/model-row descriptor))
+             (json-response 404 (openai/error-body (str "model '" model-id "' not found"))))))
 
         (and (= method "GET") (= path "/api/tags"))
         (js/Promise.resolve
@@ -138,6 +195,68 @@
                          (json-response 200 {}))))
               (.catch (fn [error]
                         (error-response (or (:status (ex-data error)) 400) error)))))
+
+        (and (= method "POST") (= path "/v1/embeddings"))
+        (if-not (fn? embed!)
+          (js/Promise.resolve
+           (json-response 404 (openai/error-body "embeddings unavailable")))
+          (let [context {:request-id (request-id-fn) :signal (.-signal request)}]
+            (-> (.json request)
+                (.then (fn [body]
+                         (let [normalized
+                               (openai/normalize-embed-request
+                                (js->clj body :keywordize-keys true))]
+                           (-> (js/Promise.resolve (embed! normalized context))
+                               (.then
+                                (fn [result]
+                                  (json-response
+                                   200 (openai/embeddings-response
+                                        (assoc result :model (:model normalized))))))))))
+                (.catch (fn [error]
+                          (openai-error-response
+                           (or (:status (ex-data error)) 400) error))))))
+
+        (and (= method "POST") (= path "/v1/chat/completions"))
+        (let [request-id (request-id-fn)
+              completion-id (str "chatcmpl-" request-id)
+              created (long (js/Math.floor (/ (.now js/Date) 1000)))
+              signal (.-signal request)
+              cancelled? (atom false)
+              on-abort (fn [_]
+                         (when (compare-and-set! cancelled? false true)
+                           (cancel! request-id :client-disconnect)))
+              cleaned? (atom false)
+              cleanup! (fn []
+                         (when (compare-and-set! cleaned? false true)
+                           (.removeEventListener signal "abort" on-abort)))
+              context {:request-id request-id :signal signal}]
+          (.addEventListener signal "abort" on-abort #js {:once true})
+          (when (.-aborted signal) (on-abort nil))
+          (-> (.json request)
+              (.then
+               (fn [body]
+                 (let [normalized
+                       (openai/normalize-chat-request
+                        (js->clj body :keywordize-keys true))]
+                   (if (and (:stream normalized) (fn? generate-stream!))
+                     (-> (js/Promise.resolve
+                          (generate-stream! normalized context))
+                         (.then
+                          (fn [source]
+                            (response
+                             200
+                             (openai-sse-stream source completion-id created cleanup!)
+                             "text/event-stream"))))
+                     (-> (js/Promise.resolve (generate! normalized context))
+                         (.then
+                          (fn [chunks]
+                            (cleanup!)
+                            (json-response
+                             200 (openai/chat-response completion-id created chunks)))))))))
+              (.catch (fn [error]
+                        (cleanup!)
+                        (openai-error-response
+                         (or (:status (ex-data error)) 400) error)))))
 
         (and (= method "POST") (= path "/api/embed"))
         (if-not (fn? embed!)
