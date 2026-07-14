@@ -242,6 +242,9 @@
                            (map (comp :found-inf val) gradient))
                          (remove nil? results)))}))
 
+(defn- gradient-arrays [gradients]
+  (mapcat (fn [gradient] (when gradient (vals gradient))) gradients))
+
 (defn scaled-adamw-step-async
   "Asynchronously unscale/check gradients and apply AdamW without tensor readback.
 
@@ -259,10 +262,13 @@
            (let [found-inf? (boolean (some #(pos? (first %)) flag-values))
                  next-scaler (update-grad-scaler scaler found-inf?)]
              (if found-inf?
-               {:weights weights :optimizer-state optimizer-state
-                :scaler next-scaler :skipped? true}
+               (do
+                 (arr/release-all! (concat flags (gradient-arrays gradients)))
+                 {:weights weights :optimizer-state optimizer-state
+                  :scaler next-scaler :skipped? true})
                (let [{:keys [weights state]}
                      (adamw-step weights gradients optimizer-state options)]
+                 (arr/release-all! (concat flags (gradient-arrays gradients)))
                  {:weights weights :optimizer-state state
                   :scaler next-scaler :skipped? false}))))]
      #?(:cljs

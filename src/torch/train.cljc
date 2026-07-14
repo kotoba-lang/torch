@@ -278,6 +278,29 @@
             (into {} (map (fn [[key value]] [key @(:grad value)])) values)))
         runtime-values))
 
+(defn- layout-arrays [layout]
+  (mapcat (fn [entry] (when (map? entry) (vals entry))) layout))
+
+(defn- nested-arrays [value]
+  (cond
+    (and (map? value) (:backend value) (:handle value)) [value]
+    (map? value) (mapcat nested-arrays (vals value))
+    (sequential? value) (mapcat nested-arrays value)
+    :else []))
+
+(defn- release-tape-except!
+  "Release graph-owned forward/backward buffers while preserving returned or
+  caller-owned arrays. Queued GPU consumers remain ordered before destruction."
+  [tape preserved]
+  (let [preserved-handles (into #{} (keep :handle) preserved)
+        displaced (some-> tape meta :gradient-temporaries deref)
+        candidates (concat displaced
+                           (mapcat (fn [value] [(:data value) @(:grad value)])
+                                   @tape))]
+    (arr/release-all!
+     (remove #(or (nil? %) (contains? preserved-handles (:handle %)))
+             candidates))))
+
 (defn- scalar-readback [array]
   (let [values (arr/->vec array)]
     #?(:cljs (if (instance? js/Promise values)
@@ -341,6 +364,9 @@
   (when-not (#{:mse :cross-entropy} loss)
     (fail "loss must be :mse or :cross-entropy" {:loss loss}))
   (let [layers (model/execution-layers model*)
+        master-weights weights
+        source-input input
+        source-target target
         _ (when (and autocast-dtype
                      (seq (remove #{:linear :conv2d :groupnorm :layernorm :rmsnorm
                                     :embedding :flatten :silu :relu :sigmoid
@@ -382,18 +408,27 @@
                       (ag/mse-loss* stable-prediction stable-target)))]
               (assoc graph :loss loss-node)))]
       (ag/backward! (:loss result) (arr/from-vec (:backend input) [loss-scale] []) tape)
-      {:loss (scalar-readback (:data (:loss result)))
-       :prediction (:data (:prediction result))
-       :layer-input-gradients (runtime-gradients (:runtime-values result))
-       :gradients (let [gradients (parameter-gradients (:parameters result))]
-                    (if autocast-dtype
-                      (mapv (fn [gradient]
-                              (when gradient
-                                (into {} (map (fn [[key value]]
-                                                [key (arr/cast value :f32)]))
-                                      gradient)))
-                            gradients)
-                      gradients))}))))
+      (let [loss-value (scalar-readback (:data (:loss result)))
+            prediction (:data (:prediction result))
+            layer-input-gradients (runtime-gradients (:runtime-values result))
+            raw-gradients (parameter-gradients (:parameters result))
+            gradients (if autocast-dtype
+                        (mapv (fn [gradient]
+                                (when gradient
+                                  (into {} (map (fn [[key value]]
+                                                  [key (arr/cast value :f32)]))
+                                        gradient)))
+                              raw-gradients)
+                        raw-gradients)
+            preserved (concat [prediction source-input source-target]
+                              (layout-arrays master-weights)
+                              (layout-arrays gradients)
+                              (layout-arrays layer-input-gradients))]
+        (release-tape-except! tape preserved)
+        {:loss loss-value
+         :prediction prediction
+         :layer-input-gradients layer-input-gradients
+         :gradients gradients})))))
 
 (defn mixed-precision-adamw-step
   "Run typed forward, scaled backward, overflow handling, and f32 AdamW update.
@@ -401,7 +436,8 @@
   `weights` remain f32 master weights. The returned prediction has the autocast
   dtype; gradients are unscaled to f32 before the optimizer update."
   [model* weights input target optimizer-state scaler
-   {:keys [autocast-dtype adamw-options layer-options loss ignore-index]
+   {:keys [autocast-dtype adamw-options layer-options loss ignore-index
+           release-inputs?]
     :or {autocast-dtype :f16 adamw-options {}}}]
   (let [{:keys [gradients] :as pass}
         (loss-and-gradients model* weights input target
@@ -412,6 +448,10 @@
                              :ignore-index (or ignore-index -100)})
         update (optim/scaled-adamw-step weights gradients optimizer-state
                                          scaler adamw-options)]
+    (arr/release-all! (layout-arrays gradients))
+    (when (and release-inputs? (not (:skipped? update)))
+      (arr/release-all! (concat (layout-arrays weights)
+                                (nested-arrays optimizer-state))))
     (merge (dissoc pass :gradients) update)))
 
 (defn mixed-precision-adamw-step-async
@@ -423,7 +463,8 @@
   returns a completed CompletableFuture. Beyond the reported scalar loss, only
   scalar overflow flags are read from an asynchronous device backend."
   [model* weights input target optimizer-state scaler
-   {:keys [autocast-dtype adamw-options layer-options loss ignore-index]
+   {:keys [autocast-dtype adamw-options layer-options loss ignore-index
+           release-inputs?]
     :or {autocast-dtype :f16 adamw-options {}}}]
   (let [{:keys [gradients] :as pass}
         (loss-and-gradients model* weights input target
@@ -434,7 +475,12 @@
                              :ignore-index (or ignore-index -100)})
         update (optim/scaled-adamw-step-async
                 weights gradients optimizer-state scaler adamw-options)
-        finish (fn [result] (merge (dissoc pass :gradients) result))]
+        finish (fn [result]
+                 (arr/release-all! (layout-arrays gradients))
+                 (when (and release-inputs? (not (:skipped? result)))
+                   (arr/release-all! (concat (layout-arrays weights)
+                                             (nested-arrays optimizer-state))))
+                 (merge (dissoc pass :gradients) result))]
     #?(:cljs (.then update finish)
        :clj (.thenApply
              ^java.util.concurrent.CompletableFuture update

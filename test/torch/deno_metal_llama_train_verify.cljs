@@ -44,6 +44,38 @@
 (defn- arrays [entries]
   (mapv (fn [[layer key]] (get (nth entries layer) key)) parameter-paths))
 
+(defn- release-pass! [pass]
+  (arr/release! (:prediction pass))
+  (when-let [gradients (:gradients pass)]
+    (arr/release-all! (arrays gradients))))
+
+(defn- nested-arrays [value]
+  (cond
+    (and (map? value) (:backend value) (:handle value)) [value]
+    (map? value) (mapcat nested-arrays (vals value))
+    (sequential? value) (mapcat nested-arrays value)
+    :else []))
+
+(defn- continue-training
+  [backend model* input target state remaining losses samples]
+  (.then
+   (js/Promise.resolve (:loss state))
+   (fn [loss]
+     (arr/release! (:prediction state))
+     (let [losses (conj losses loss)
+           samples (conj samples (gpu/backend-stats backend))]
+       (if (zero? remaining)
+         {:state state :losses losses :samples samples}
+         (.then
+          (train/mixed-precision-adamw-step-async
+           model* (:weights state) input target
+           (:optimizer-state state) (:scaler state)
+           {:autocast-dtype :f16 :loss :cross-entropy :ignore-index -100
+            :release-inputs? true :adamw-options adamw-options})
+          (fn [next-state]
+            (continue-training backend model* input target next-state
+                               (dec remaining) losses samples))))))))
+
 (defn -main [& _]
   (let [model* (model/sequential
                 (model/embedding vocabulary-size embedding-size)
@@ -79,12 +111,13 @@
                        model* weights input target
                        {:autocast-dtype :f16 :loss :cross-entropy
                         :ignore-index -100 :loss-scale (:scale scaler)})
+                 step-weights (nb/random-weights backend model* 79)
                  step (train/mixed-precision-adamw-step-async
-                       model* (nb/random-weights backend model* 79)
-                       (arr/from-vec backend input-values input-shape)
-                       (arr/from-vec backend target-values target-shape)
+                       model* step-weights
+                       input target
                        nil scaler {:autocast-dtype :f16
                                    :loss :cross-entropy :ignore-index -100
+                                   :release-inputs? true
                                    :adamw-options adamw-options})]
              (.then
               step
@@ -142,18 +175,51 @@
                      (println (str "Llama LM async AdamW: "
                                    (if (and weights-ok? state-ok? loss-ok?)
                                      "passed" "failed")))
-                     (when-not (and prediction-ok? gradients-ok? weights-ok?
-                                    state-ok? loss-ok? resource-ok?)
-                       (js/console.error
-                        #js {:loss #js [(:loss cpu-pass) actual-loss]
-                             :prediction prediction-ok?
-                             :prediction-error (clj->js prediction-error)
-                             :gradients gradients-ok?
-                             :gradient-errors (clj->js gradient-errors)
-                             :weights weights-ok?
-                             :state state-ok?
-                             :resources resource-ok?})
-                       (.exit js/Deno 1))))))))))
+                     (if-not (and prediction-ok? gradients-ok? weights-ok?
+                                  state-ok? loss-ok? resource-ok?)
+                       (do
+                         (js/console.error
+                          #js {:loss #js [(:loss cpu-pass) actual-loss]
+                               :prediction prediction-ok?
+                               :prediction-error (clj->js prediction-error)
+                               :gradients gradients-ok?
+                               :gradient-errors (clj->js gradient-errors)
+                               :weights weights-ok?
+                               :state state-ok?
+                               :resources resource-ok?})
+                         (.exit js/Deno 1))
+                       (do
+                         (release-pass! pass)
+                         (arr/release-all! (arrays weights))
+                         (.then
+                          (continue-training backend model* input target updated
+                                             3 [] [])
+                          (fn [{:keys [state losses samples]}]
+                            (let [live-bytes (mapv :live-bytes samples)
+                                  live-buffers (mapv :live-buffers samples)
+                                  small-live
+                                  (mapv (fn [sample]
+                                          (into (sorted-map)
+                                                (filter (fn [[bytes _]]
+                                                          (<= bytes 8192)))
+                                                (:live-buffers-by-size sample)))
+                                        samples)
+                                  plateau? (apply = (take-last 3 live-bytes))
+                                  decreasing? (every? true? (map > losses (rest losses)))]
+                              (println "continued-losses:" losses)
+                              (println "continued-live-bytes:" live-bytes)
+                              (println "continued-live-buffers:" live-buffers)
+                              (println "continued-small-live:" small-live)
+                              (println (str "Llama LM memory plateau: "
+                                            (if plateau? "passed" "failed")))
+                              (println (str "Llama LM CE decreases: "
+                                            (if decreasing? "passed" "failed")))
+                              (arr/release-all!
+                               (concat (arrays (:weights state))
+                                       (nested-arrays (:optimizer-state state))
+                                       [input target]))
+                              (when-not (and plateau? decreasing?)
+                                (.exit js/Deno 1)))))))))))))))
         (.catch (fn [error]
                   (js/console.error error)
                   (.exit js/Deno 1))))))
