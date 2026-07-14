@@ -813,6 +813,30 @@ prefix/prepend semantics, TemplateProcessing BOS/EOS insertion, special-token
 skipping, and decoder prefix stripping. It rejects unknown normalizers or
 decoders instead of silently emitting IDs that differ from Transformers.
 
+`torch.huggingface-resource` connects these artifacts to the bounded model
+registry. Its descriptor accounts for the deduplicated byte total of config,
+index, every shard, tokenizer, and tokenizer config; acquire loads once,
+concurrent references share the resident resource, and release/expiry/eviction
+destroys every distinct weight handle once. An optional engine factory receives
+the complete model/tokenizer/weights resource for Ollama or OpenAI serving:
+
+```clojure
+(require '[torch.huggingface-resource :as hf-resource]
+         '[torch.model-registry :as registry])
+
+(def descriptor
+  (hf-resource/descriptor
+   "hf-llama" "config.json" "model.safetensors.index.json"
+   {:tokenizer-path "tokenizer.json"
+    :tokenizer-config-path "tokenizer_config.json"}))
+
+(def callbacks (hf-resource/callbacks backend engine-fn))
+(def models
+  (-> (registry/registry (:size descriptor)
+                         (:load-fn callbacks) (:unload-fn callbacks))
+      (registry/register descriptor)))
+```
+
 The loader was also verified against a third-party, non-fixture checkpoint:
 
 ```sh
@@ -839,6 +863,10 @@ embedding → decoder → norm → LM-head graph, producing `[1,32000]` finite l
 For `Hello, world! こんにちは`, it emits
 `[1,15043,29892,3186,29991,29871,30589,30389,30353,30644,30449]`, exactly the
 same IDs as Hugging Face `tokenizers` 0.21.4, and decodes them losslessly.
+The public verifier then acquires this model through the registry, prefills
+`Hi` into a real KV cache, greedily generates two tokens, releases the request,
+expires the model, and asserts `loads=1`, `unloads=1`, `loaded-models=0`, and
+`resident-bytes=0`.
 Its weights are random; this proves format/layout/runtime compatibility, not
 language quality.
 

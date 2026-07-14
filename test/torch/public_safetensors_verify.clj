@@ -2,9 +2,11 @@
   "Opt-in full-forward verification against a downloaded public HF checkpoint."
   (:require [num.array :as arr]
             [num.cpu :as cpu]
-            [torch.core :as core]
-            [torch.huggingface :as hf]
+            [torch.generate :as generate]
+            [torch.huggingface-resource :as resource]
+            [torch.model-registry :as registry]
             [torch.num-backend :as nb]
+            [torch.registry-runtime :as runtime]
             [torch.tokenizer :as tokenizer]))
 
 (defn -main [& [config-path checkpoint-path tokenizer-path tokenizer-config-path]]
@@ -13,32 +15,72 @@
             "usage: clojure -M:public-safetensors-verify config.json model.safetensors"
             {})))
   (let [backend (cpu/cpu-backend)
-        {:keys [config model weights tokenizer]}
-        (hf/load-llama-resource
-         config-path checkpoint-path backend
-         (cond-> {} tokenizer-path (assoc :tokenizer-path tokenizer-path)
-           tokenizer-config-path (assoc :tokenizer-config-path
-                                        tokenizer-config-path)))
-        prompt "Hello, world! こんにちは"
-        prompt-ids (when tokenizer (torch.tokenizer/encode tokenizer prompt))
-        input (arr/from-vec backend [1.0] [1])
-        logits (core/run (nb/num-backend backend weights) model input)
-        values (arr/->vec logits)
-        expected-shape [1 (:vocab-size config)]]
-    (when-not (and (= expected-shape (:shape logits))
-                   (= (:vocab-size config) (count values))
-                   (every? #(Double/isFinite (double %)) values)
-                   (or (nil? tokenizer)
-                       (and (seq prompt-ids)
-                            (= prompt (torch.tokenizer/decode tokenizer prompt-ids)))))
-      (throw (ex-info "public safetensors produced invalid Llama output"
-                      {:shape (:shape logits) :expected expected-shape})))
-    (println {:checkpoint checkpoint-path
-              :architecture (select-keys config
-                                         [:block-count :embed-dim :hidden-dim
-                                          :head-count :kv-head-count
-                                          :vocab-size :context-length])
-              :output-shape (:shape logits)
-              :finite-logits (count values)
-              :prompt-ids prompt-ids
-              :sample (vec (take 3 values))})))
+        descriptor (resource/descriptor
+                    "tiny-random-hf-llama" config-path checkpoint-path
+                    (cond-> {} tokenizer-path (assoc :tokenizer-path tokenizer-path)
+                      tokenizer-config-path (assoc :tokenizer-config-path
+                                                   tokenizer-config-path)))
+        callbacks (resource/callbacks backend)
+        registry* (-> (registry/registry (:size descriptor)
+                                         (:load-fn callbacks) (:unload-fn callbacks))
+                      (registry/register descriptor))
+        runtime* (runtime/runtime registry*)
+        acquired (runtime/acquire! runtime* "tiny-random-hf-llama" 0)
+        {:keys [config model weights tokenizer]} (:resource acquired)
+        parity-prompt "Hello, world! こんにちは"
+        parity-ids (when tokenizer (torch.tokenizer/encode tokenizer parity-prompt))
+        caches (nb/init-llama-caches backend model 16)
+        latest-caches (atom caches)
+        logits-count (atom nil)
+        step-fn (fn [token-id caches]
+                  (let [input (arr/from-vec backend [token-id] [1])
+                        step (nb/llama-lm-step model weights input caches)
+                        logits (arr/->vec (:logits step))]
+                    (arr/release! input)
+                    (arr/release! (:logits step))
+                    (reset! latest-caches (:caches step))
+                    (reset! logits-count (count logits))
+                    (assoc step :logits logits)))]
+    (try
+      (let [generated (generate/generate-text
+                       tokenizer step-fn caches "Hi"
+                       {:max-new-tokens 2 :temperature 0.0
+                        :eos-id (:eos-id tokenizer)})
+            stats-before-release (runtime/stats runtime*)]
+        (when-not (and (:loaded? acquired)
+                       (= (:vocab-size config) @logits-count)
+                       (seq parity-ids)
+                       (= parity-prompt (torch.tokenizer/decode tokenizer parity-ids))
+                       (seq (:generated-ids generated))
+                       (every? #(<= 0 % (dec (:vocab-size config)))
+                               (:generated-ids generated))
+                       (= 1 (:loads stats-before-release)))
+          (throw (ex-info "public safetensors registry generation failed"
+                          {:generated generated :stats stats-before-release})))
+        (nb/release-llama-caches! (:caches generated))
+        (reset! latest-caches nil)
+        (runtime/release! runtime* "tiny-random-hf-llama" 10 0)
+        (runtime/expire! runtime* 10)
+        (let [stats (runtime/stats runtime*)]
+          (when-not (and (= 1 (:unloads stats)) (zero? (:loaded-models stats)))
+            (throw (ex-info "public safetensors resource was not unloaded"
+                            {:stats stats})))
+          (println {:checkpoint checkpoint-path
+                    :file-bytes (:size descriptor)
+                    :architecture (select-keys config
+                                               [:block-count :embed-dim :hidden-dim
+                                                :head-count :kv-head-count
+                                                :vocab-size :context-length])
+                    :prompt-ids parity-ids
+                    :generated-ids (:generated-ids generated)
+                    :generated-text (:text generated)
+                    :registry stats})))
+      (finally
+        ;; If an assertion fails before the normal lifecycle path, release the
+        ;; request-owned caches and force-retire the resident resource.
+        (when @latest-caches
+          (nb/release-llama-caches! @latest-caches)
+          (reset! latest-caches nil))
+        (when (pos? (get-in (runtime/snapshot runtime*)
+                            [:loaded "tiny-random-hf-llama" :active] 0))
+          (runtime/unload! runtime* "tiny-random-hf-llama" true))))))
