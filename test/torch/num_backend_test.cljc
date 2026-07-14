@@ -7,9 +7,12 @@
   (:require [clojure.test :refer [deftest is testing]]
             [num.array :as arr]
             [num.cpu :as cpu]
+            [num.tensor :as t]
             [torch.model :as m]
             [torch.core :as core]
-            [torch.num-backend :as nb]))
+            [torch.kv-cache :as kv]
+            [torch.num-backend :as nb]
+            [torch.paged-runtime :as paged]))
 
 (def backend (cpu/cpu-backend))
 
@@ -283,6 +286,46 @@
     (is (every? #(< (Math/abs %) 1.0e-6)
                 (map - (arr/->vec full) (:outputs fixed-decoded))))))
 
+(deftest batched-fixed-kv-cache-matches-full-causal-attention
+  (let [layer (m/multihead-attention
+               4 2 {:causal? true :rope? true :position-offset 2})
+        model (m/sequential layer)
+        weights (nb/random-weights backend model 67)
+        batches [[[0.2 -0.1 0.3 0.4]
+                  [-0.2 0.1 0.5 -0.3]
+                  [0.6 0.2 -0.4 0.1]]
+                 [[-0.3 0.7 0.1 -0.2]
+                  [0.4 -0.5 0.2 0.6]
+                  [0.1 0.3 -0.7 0.2]]]
+        input (arr/from-vec backend (vec (mapcat identity (mapcat identity batches)))
+                            [2 3 4])
+        expected (arr/->vec (core/run (nb/num-backend backend weights) model input))
+        initial (nb/init-kv-cache backend 5 4 :f32 2)
+        key-handle (:handle (:key initial))
+        value-handle (:handle (:value initial))
+        decoded
+        (reduce (fn [{:keys [cache steps]} time]
+                  (let [values (vec (mapcat #(nth % time) batches))
+                        step (nb/multihead-attention-step
+                              layer (first weights)
+                              (arr/from-vec backend values [2 1 4]) cache)]
+                    {:cache (:cache step)
+                     :steps (conj steps (arr/->vec (:output step)))}))
+                {:cache initial :steps []} (range 3))
+        actual (vec (for [batch (range 2) time (range 3) feature (range 4)]
+                      (nth (nth (:steps decoded) time)
+                           (+ (* batch 4) feature))))]
+    (is (= 3 (get-in decoded [:cache :length])))
+    (is (= 2 (get-in decoded [:cache :batch])))
+    (is (= [5 2 4] (:shape (get-in decoded [:cache :key]))))
+    (is (identical? key-handle (:handle (get-in decoded [:cache :key]))))
+    (is (identical? value-handle (:handle (get-in decoded [:cache :value]))))
+    (is (every? #(< (Math/abs %) 1.0e-5) (map - expected actual)))
+    (is (thrown-with-msg?
+         #?(:clj Exception :cljs js/Error) #"batch size mismatch"
+         (nb/multihead-attention-step
+          layer (first weights) (arr/zeros backend [1 1 4]) (:cache decoded))))))
+
 (deftest multi-block-llama-decoding-matches-full-causal-model
   (let [model (m/sequential (m/llama-block 4 2 8 {:position-offset 3})
                             (m/llama-block 4 2 8 {:position-offset 3}))
@@ -307,6 +350,40 @@
     (is (every? #(< (Math/abs %) 1.0e-5)
                 (map - (arr/->vec full) (:outputs decoded))))))
 
+(deftest batched-fixed-llama-decoding-matches-full-gqa-model
+  (let [model (m/sequential
+               (m/llama-block 4 2 8 {:position-offset 2 :kv-heads 1})
+               (m/llama-block 4 2 8 {:position-offset 2 :kv-heads 1}))
+        weights (nb/random-weights backend model 73)
+        batches [[[0.2 -0.1 0.3 0.4]
+                  [-0.2 0.1 0.5 -0.3]
+                  [0.6 0.2 -0.4 0.1]]
+                 [[-0.3 0.7 0.1 -0.2]
+                  [0.4 -0.5 0.2 0.6]
+                  [0.1 0.3 -0.7 0.2]]]
+        input (arr/from-vec backend (vec (mapcat identity (mapcat identity batches)))
+                            [2 3 4])
+        expected (arr/->vec (core/run (nb/num-backend backend weights) model input))
+        initial (nb/init-llama-caches backend model 5 :f32 2)
+        handles (mapv #(-> % :key :handle) initial)
+        decoded
+        (reduce (fn [{:keys [caches steps]} time]
+                  (let [values (vec (mapcat #(nth % time) batches))
+                        step (nb/llama-model-step
+                              model weights
+                              (arr/from-vec backend values [2 1 4]) caches)]
+                    {:caches (:caches step)
+                     :steps (conj steps (arr/->vec (:output step)))}))
+                {:caches initial :steps []} (range 3))
+        actual (vec (for [batch (range 2) time (range 3) feature (range 4)]
+                      (nth (nth (:steps decoded) time)
+                           (+ (* batch 4) feature))))]
+    (is (= [3 3] (mapv :length (:caches decoded))))
+    (is (= [2 2] (mapv :batch (:caches decoded))))
+    (is (every? true? (map identical? handles
+                           (map #(-> % :key :handle) (:caches decoded)))))
+    (is (every? #(< (Math/abs %) 1.0e-5) (map - expected actual)))))
+
 (deftest cached-llama-lm-step-produces-full-vocabulary-logits
   (let [model (m/sequential (m/embedding 6 4)
                             (m/llama-block 4 2 8)
@@ -327,6 +404,91 @@
     (is (= [3 3] (mapv :length (:caches decoded))))
     (is (every? #(< (Math/abs %) 1.0e-5)
                 (map - (arr/->vec full) (:logits decoded))))))
+
+(deftest cached-llama-embedding-step-matches-final-hidden-state
+  (let [model (m/sequential (m/embedding 6 4)
+                            (m/llama-block 4 2 8)
+                            (m/llama-block 4 2 8)
+                            (m/rmsnorm 4) (m/lm-head 4 6))
+        weights (nb/random-weights backend model 74)
+        hidden-model (apply m/sequential
+                            (butlast (m/execution-layers model)))
+        token-ids [2 0 2]
+        full (core/run (nb/num-backend backend (vec (butlast weights)))
+                       hidden-model (arr/from-vec backend token-ids [3]))
+        initial (nb/init-llama-caches backend model 8)
+        decoded (reduce (fn [{:keys [caches embeddings]} token]
+                          (let [step (nb/llama-embedding-step
+                                      model weights
+                                      (arr/from-vec backend [token] [1]) caches)]
+                            {:caches (:caches step)
+                             :embeddings (into embeddings
+                                               (arr/->vec (:embedding step)))}))
+                        {:caches initial :embeddings []} token-ids)]
+    (is (= [3 4] (:shape full)))
+    (is (= [3 3] (mapv :length (:caches decoded))))
+    (is (every? #(< (Math/abs %) 1.0e-5)
+                (map - (arr/->vec full) (:embeddings decoded))))))
+
+(defn- cpu-paged-storage [block-count block-size heads kv-heads]
+  (let [keys (atom (vec (repeat block-count (vec (repeat block-size nil)))))
+        values (atom (vec (repeat block-count (vec (repeat block-size nil)))))]
+    {:write! (fn [key value block offset]
+               (swap! keys assoc-in [block offset] (arr/->vec key))
+               (swap! values assoc-in [block offset] (arr/->vec value)))
+     :copy-block! (fn [source destination tokens]
+                    (doseq [offset (range tokens)]
+                      (swap! keys assoc-in [destination offset]
+                             (get-in @keys [source offset]))
+                      (swap! values assoc-in [destination offset]
+                             (get-in @values [source offset]))))
+     :attention
+     (fn [query blocks length]
+       (let [logical (for [position (range length)]
+                       [(nth blocks (quot position block-size))
+                        (mod position block-size)])
+             key-values (vec (mapcat #(get-in @keys %) logical))
+             value-values (vec (mapcat #(get-in @values %) logical))
+             kv-width (quot (count key-values) length)]
+         (t/multi-head-attention
+          query
+          (arr/from-vec backend key-values [length kv-width])
+          (arr/from-vec backend value-values [length kv-width])
+          heads {:kv-heads kv-heads})))}))
+
+(deftest paged-llama-lm-step-matches-full-causal-model
+  (let [model (m/sequential (m/embedding 6 4)
+                            (m/llama-block 4 2 8 {:kv-heads 1})
+                            (m/llama-block 4 2 8 {:kv-heads 1})
+                            (m/rmsnorm 4) (m/lm-head 4 6))
+        weights (nb/random-weights backend model 79)
+        token-ids [2 0 2]
+        full (arr/->vec
+              (core/run (nb/num-backend backend weights) model
+                        (arr/from-vec backend token-ids [3])))
+        runtimes (mapv (fn [_]
+                         (-> (paged/runtime (kv/pool 4 2)
+                                            (cpu-paged-storage 4 2 2 1))
+                             (paged/allocate-sequence :request)))
+                       (range 2))
+        decoded
+        (reduce (fn [{:keys [runtimes logits placements]} token]
+                  (let [step (nb/llama-lm-paged-step
+                              model weights (arr/from-vec backend [token] [1])
+                              runtimes :request)]
+                    {:runtimes (:runtimes step)
+                     :logits (into logits (arr/->vec (:logits step)))
+                     :placements (conj placements (:placements step))}))
+                {:runtimes runtimes :logits [] :placements []} token-ids)]
+    (is (= [[{:block 0 :offset 0} {:block 0 :offset 0}]
+            [{:block 0 :offset 1} {:block 0 :offset 1}]
+            [{:block 1 :offset 0} {:block 1 :offset 0}]]
+           (:placements decoded)))
+    (is (= [3 3] (mapv #(get-in % [:pool :sequences :request :length])
+                       (:runtimes decoded))))
+    (is (every? #(kv/valid? (:pool %)) (:runtimes decoded)))
+    (is (every? #(< (Math/abs %) 1.0e-5)
+                (map - full (:logits decoded))))))
 
 (deftest grouped-query-llama-cache-matches-full-model
   (let [model (m/sequential (m/llama-block 4 2 8 {:kv-heads 1}))

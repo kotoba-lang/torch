@@ -98,3 +98,85 @@
               (let [step (step-fn token caches)]
                 (recur (:logits step) (:caches step) generated'
                        (next random-values))))))))))
+
+(defn generate-text-batch
+  "Generate several prompts through one statically batched model/cache.
+
+  `batch-step-fn` receives `[token-ids caches]`, where `token-ids` has one ID
+  per request, and returns `{:logits [[...vocab] ...batch] :caches ...}`.
+  Prompts must currently encode to the same length (continuous/ragged batching
+  requires per-sequence cache positions). Finished rows are advanced with
+  `:pad-id` while unfinished rows continue, keeping the fixed batch/cache
+  layout stable. `:random-values` may be one sequence per request.
+
+  Returns one result map per prompt plus the final shared caches."
+  [tokenizer* batch-step-fn initial-caches prompts
+   {:keys [max-new-tokens eos-id pad-id random-values] :as sampling-options
+    :or {max-new-tokens 32 pad-id 0}}]
+  (let [prompts (vec prompts)
+        prompt-ids (mapv #(vec (tokenizer/encode tokenizer* %)) prompts)
+        batch (count prompts)
+        lengths (mapv count prompt-ids)]
+    (when-not (pos? batch)
+      (throw (ex-info "batched generation requires at least one prompt" {})))
+    (when (some zero? lengths)
+      (throw (ex-info "batched generation prompt encoded to no tokens"
+                      {:lengths lengths})))
+    (when-not (apply = lengths)
+      (throw (ex-info "static batched generation requires equal prompt lengths"
+                      {:lengths lengths})))
+    (let [random-streams
+          (if random-values
+            (mapv #(or (seq %) (repeat 0.5)) random-values)
+            (vec (repeat batch (repeat 0.5))))
+          prefill
+          (reduce (fn [{:keys [caches]} position]
+                    (batch-step-fn (mapv #(nth % position) prompt-ids) caches))
+                  {:caches initial-caches} (range (first lengths)))]
+      (loop [logits (vec (:logits prefill)) caches (:caches prefill)
+             generated (vec (repeat batch []))
+             done (vec (repeat batch false))]
+        (when-not (= batch (count logits))
+          (throw (ex-info "batch step returned the wrong logits batch"
+                          {:expected batch :actual (count logits)})))
+        (if (every? true? done)
+          {:results
+           (mapv (fn [prompt prompt-token-ids generated-ids]
+                   (let [ids (into prompt-token-ids generated-ids)]
+                     {:prompt prompt :ids ids :generated-ids generated-ids
+                      :text (tokenizer/decode tokenizer* ids)}))
+                 prompts prompt-ids generated)
+           :caches caches}
+          (let [sampled
+                (mapv (fn [index]
+                        (when-not (nth done index)
+                          (let [previous (into (nth prompt-ids index)
+                                               (nth generated index))
+                                random-stream (nth random-streams index)]
+                            (sample-token
+                             (nth logits index)
+                             (assoc (dissoc sampling-options :max-new-tokens
+                                            :eos-id :pad-id :random-values)
+                                    :previous-tokens previous
+                                    :random-value
+                                    (or (nth random-stream (count (nth generated index))
+                                             nil)
+                                        0.5))))))
+                      (range batch))
+                generated'
+                (mapv (fn [old token finished?]
+                        (if finished? old (conj old token)))
+                      generated sampled done)
+                done'
+                (mapv (fn [finished? token ids]
+                        (or finished? (= token eos-id)
+                            (>= (count ids) max-new-tokens)))
+                      done sampled generated')]
+            (if (every? true? done')
+              (recur logits caches generated' done')
+              (let [next-ids (mapv (fn [token finished?]
+                                     (if finished? pad-id token))
+                                   sampled done')
+                    step (batch-step-fn next-ids caches)]
+                (recur (vec (:logits step)) (:caches step)
+                       generated' done')))))))))

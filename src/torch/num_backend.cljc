@@ -33,6 +33,7 @@
             [num.quantized :as quantized]
             [num.tensor :as t]
             [torch.model :as model]
+            [torch.paged-runtime :as paged]
             [torch.ports :as ports]))
 
 (defn- matmul-weight [input weight]
@@ -297,24 +298,34 @@
            key (if (:rope? merged)
                  (t/rotary-embedding key0 heads rope-options) key0)
            fixed? (:fixed-capacity? cache)
-           _ (when (and fixed? (not= rank 2))
-               (throw (ex-info "fixed-capacity KV cache currently requires batch size 1"
-                               {:shape shape})))
+           cache-batch (long (or (:batch cache) 1))
+           _ (when (and fixed? (not= batch cache-batch))
+               (throw (ex-info "fixed-capacity KV cache batch size mismatch"
+                               {:input-batch batch :cache-batch cache-batch})))
            _ (when (and fixed? (>= old-length (:capacity cache)))
                (throw (ex-info "fixed-capacity KV cache is full"
                                {:length old-length :capacity (:capacity cache)})))
            axis (if (= rank 3) 1 0)
+           active-fixed (fn [backing source]
+                          (t/copy-into! backing source
+                                        (* old-length batch embed))
+                          (if (= rank 3)
+                            ;; The backing is token-major, so each append is one
+                            ;; contiguous `[batch,embed]` device copy. Materialize
+                            ;; a batch-first view only for the attention kernel.
+                            (t/transpose
+                             (assoc backing :shape [(inc old-length) batch embed])
+                             [1 0 2])
+                            (assoc backing :shape [(inc old-length) embed])))
            all-key (if fixed?
-                     (let [backing (:key cache)]
-                       (t/copy-into! backing key (* old-length embed))
-                       (assoc backing :shape [(inc old-length) embed]))
+                     (active-fixed (:key cache) key)
                      (if-let [old (:key cache)] (t/cat [old key] axis) key))
            all-value (if fixed?
-                       (let [backing (:value cache)]
-                         (t/copy-into! backing value (* old-length embed))
-                         (assoc backing :shape [(inc old-length) embed]))
+                       (active-fixed (:value cache) value)
                        (if-let [old (:value cache)] (t/cat [old value] axis) value))
            attended (t/multi-head-attention query all-key all-value heads)
+           _ (when (and fixed? (= rank 3))
+               (arr/release-all! [all-key all-value]))
            attended-flat (if (= rank 3) (t/reshape attended [batch embed]) attended)
            output (restore (t/add (matmul-weight attended-flat (:ow weights))
                                   (:ob weights)))]
@@ -326,32 +337,48 @@
 (declare release-kv-cache!)
 
 (defn init-kv-cache
-  "Preallocate a fixed-capacity, batch-1 KV cache on `backend`. No buffer is
-  reallocated while decoding up to `capacity` tokens."
+  "Preallocate a fixed-capacity KV cache on `backend`. No backing buffer is
+  reallocated while decoding up to `capacity` tokens. For `batch > 1`, storage
+  is token-major so each decode step is one contiguous device-to-device copy."
   ([backend capacity embed]
-   (init-kv-cache backend capacity embed :f32))
+   (init-kv-cache backend capacity embed :f32 1))
   ([backend capacity embed dtype]
-   (when-not (and (pos-int? capacity) (pos-int? embed))
-     (throw (ex-info "KV cache capacity and embedding must be positive integers"
-                     {:capacity capacity :embed embed})))
-   {:key (arr/zeros backend [capacity embed] dtype)
-    :value (arr/zeros backend [capacity embed] dtype)
-    :length 0 :capacity capacity :embed embed :fixed-capacity? true}))
+   (init-kv-cache backend capacity embed dtype 1))
+  ([backend capacity embed dtype batch]
+   (when-not (and (pos-int? capacity) (pos-int? embed) (pos-int? batch))
+     (throw (ex-info "KV cache capacity, embedding, and batch must be positive integers"
+                     {:capacity capacity :embed embed :batch batch})))
+   (let [shape (if (= batch 1) [capacity embed] [capacity batch embed])]
+     {:key (arr/zeros backend shape dtype)
+      :value (arr/zeros backend shape dtype)
+      :length 0 :capacity capacity :embed embed :batch batch
+      :fixed-capacity? true})))
 
 (defn llama-block-step
-  "Incrementally execute one batch-1 Llama block with a per-layer KV cache."
+  "Incrementally execute one token per batch through a Llama block. Input is
+  `[1,embed]` for batch 1 or batch-first `[batch,1,embed]`."
   [layer weights input cache]
   (let [[embed heads _hidden opts] (model/layer-args layer)
         opts (merge {:causal? true :rope? true} opts)
         kv-heads (long (or (:kv-heads opts) heads))
         kv-embed (* kv-heads (quot embed heads))
+        shape (:shape input)
+        rank (count shape)
+        batch (if (= rank 3) (long (first shape)) 1)
         length (long (or (:length cache) 0))
         eps (or (:eps opts) 1.0e-5)]
     (when-not (and (= :llama-block (model/layer-type layer))
-                   (= [1 embed] (:shape input)))
-      (throw (ex-info "llama block step requires [1 embed] input"
-                      {:shape (:shape input) :embed embed})))
-    (let [linear #(matmul-weight %1 (get weights %2))
+                   (or (= [1 embed] shape)
+                       (and (= rank 3) (= 1 (second shape))
+                            (= embed (last shape)))))
+      (throw (ex-info "llama block step requires [1,embed] or [batch,1,embed] input"
+                      {:shape shape :embed embed})))
+    (let [linear (fn [array weight-key]
+                   (if (= rank 3)
+                     (let [flat (t/reshape array [batch (last (:shape array))])
+                           projected (matmul-weight flat (get weights weight-key))]
+                       (t/reshape projected [batch 1 (last (:shape projected))]))
+                     (matmul-weight array (get weights weight-key))))
           normalized (t/rms-norm-last input (:attn-norm weights) eps)
           q0 (linear normalized :qw) k0 (linear normalized :kw)
           value (linear normalized :vw)
@@ -360,42 +387,233 @@
           query (t/rotary-embedding q0 heads rope-opts)
           key (t/rotary-embedding k0 kv-heads rope-opts)
           fixed? (:fixed-capacity? cache)
+          cache-batch (long (or (:batch cache) 1))
+          _ (when (and fixed? (not= batch cache-batch))
+              (throw (ex-info "fixed-capacity Llama KV cache batch size mismatch"
+                              {:input-batch batch :cache-batch cache-batch})))
           _ (when (and fixed? (>= length (:capacity cache)))
               (throw (ex-info "Llama KV cache is full"
                               {:length length :capacity (:capacity cache)})))
+          active-fixed (fn [backing source]
+                         (t/copy-into! backing source (* length batch kv-embed))
+                         (if (= rank 3)
+                           (t/transpose
+                            (assoc backing :shape [(inc length) batch kv-embed])
+                            [1 0 2])
+                           (assoc backing :shape [(inc length) kv-embed])))
+          axis (if (= rank 3) 1 0)
           all-key (if fixed?
-                    (let [backing (:key cache)]
-                      (t/copy-into! backing key (* length kv-embed))
-                      (assoc backing :shape [(inc length) kv-embed]))
-                    (if-let [old (:key cache)] (t/cat [old key] 0) key))
+                    (active-fixed (:key cache) key)
+                    (if-let [old (:key cache)] (t/cat [old key] axis) key))
           all-value (if fixed?
-                      (let [backing (:value cache)]
-                        (t/copy-into! backing value (* length kv-embed))
-                        (assoc backing :shape [(inc length) kv-embed]))
-                      (if-let [old (:value cache)] (t/cat [old value] 0) value))
+                      (active-fixed (:value cache) value)
+                      (if-let [old (:value cache)] (t/cat [old value] axis) value))
           attended (t/multi-head-attention query all-key all-value heads
                                            {:kv-heads kv-heads})
-          residual (t/add input (linear attended :ow))
+          _ (when (and fixed? (= rank 3))
+              (arr/release-all! [all-key all-value]))
+          attention-output (linear attended :ow)
+          residual (t/add input attention-output)
           ffn-input (t/rms-norm-last residual (:ffn-norm weights) eps)
-          gate (t/silu (linear ffn-input :gate))
+          gate-projection (linear ffn-input :gate)
+          gate (t/silu gate-projection)
           up (linear ffn-input :up)
-          output (t/add residual (linear (nm/mul gate up) :down))]
+          gated (nm/mul gate up)
+          down (linear gated :down)
+          output (t/add residual down)
+          ;; Every command consuming these buffers has already been encoded.
+          ;; The output and cache are the only values escaping this scope.
+          _ (arr/release-all!
+             (cond-> [normalized q0 k0 query attended attention-output
+                      ffn-input gate-projection gate up gated down residual]
+               fixed? (into [key value])))]
       {:output output
        :cache (if fixed? (assoc cache :length (inc length))
-                  {:key all-key :value all-value :length (inc length)})})))
+                  {:key all-key :value all-value :length (inc length)
+                   :batch batch})})))
+
+(defn llama-block-paged-step
+  "Execute one batch-1 Llama token using a `torch.paged-runtime` physical cache.
+  The storage callback owns device payloads; the runtime owns the logical block
+  table, prefix sharing, COW, and sequence length."
+  [layer weights input runtime* sequence-id]
+  (let [[embed heads _hidden opts] (model/layer-args layer)
+        opts (merge {:causal? true :rope? true} opts)
+        kv-heads (long (or (:kv-heads opts) heads))
+        {:keys [length]} (get-in runtime* [:pool :sequences sequence-id])
+        eps (or (:eps opts) 1.0e-5)]
+    (when-not (and (= :llama-block (model/layer-type layer))
+                   (= [1 embed] (:shape input))
+                   (some? length))
+      (throw (ex-info "paged Llama step requires a registered sequence and [1,embed] input"
+                      {:shape (:shape input) :embed embed
+                       :sequence-id sequence-id})))
+    (let [linear #(matmul-weight %1 (get weights %2))
+          normalized (t/rms-norm-last input (:attn-norm weights) eps)
+          q0 (linear normalized :qw)
+          k0 (linear normalized :kw)
+          value (linear normalized :vw)
+          rope-options {:theta (or (:rope-theta opts) 10000.0)
+                        :position-offset (+ (or (:position-offset opts) 0)
+                                            length)}
+          query (t/rotary-embedding q0 heads rope-options)
+          key (t/rotary-embedding k0 kv-heads rope-options)
+          appended (paged/append-kv! runtime* sequence-id key value)
+          runtime* (:runtime appended)
+          attended (paged/attention runtime* sequence-id query)
+          attention-output (linear attended :ow)
+          residual (t/add input attention-output)
+          ffn-input (t/rms-norm-last residual (:ffn-norm weights) eps)
+          gate-projection (linear ffn-input :gate)
+          gate (t/silu gate-projection)
+          up (linear ffn-input :up)
+          gated (nm/mul gate up)
+          down (linear gated :down)
+          output (t/add residual down)
+          _ (arr/release-all!
+             [normalized q0 k0 value query key attended attention-output
+              ffn-input gate-projection gate up gated down residual])]
+      {:output output :runtime runtime* :placement (:placement appended)})))
+
+(defn llama-block-paged-batch-step
+  "Execute one token for several paged sequences. Projection/FFN tensors remain
+  batched and the storage runtime performs one fused multi-request attention."
+  [layer weights input runtime* sequence-ids]
+  (let [[embed heads _hidden opts] (model/layer-args layer)
+        opts (merge {:causal? true :rope? true} opts)
+        kv-heads (long (or (:kv-heads opts) heads))
+        shape (:shape input)
+        batch (first shape)
+        lengths (mapv #(get-in runtime* [:pool :sequences % :length]) sequence-ids)
+        eps (or (:eps opts) 1.0e-5)]
+    (when-not (and (= :llama-block (model/layer-type layer))
+                   (= [batch 1 embed] shape) (= batch (count sequence-ids))
+                   (every? some? lengths))
+      (throw (ex-info "paged batched Llama step requires registered sequences and [batch,1,embed]"
+                      {:shape shape :sequence-ids sequence-ids})))
+    (let [linear (fn [array weight-key]
+                   (let [flat (t/reshape array [batch (last (:shape array))])
+                         projected (matmul-weight flat (get weights weight-key))]
+                     (t/reshape projected [batch 1 (last (:shape projected))])))
+          normalized (t/rms-norm-last input (:attn-norm weights) eps)
+          q0 (linear normalized :qw)
+          k0 (linear normalized :kw)
+          value (linear normalized :vw)
+          ;; RoPE offsets differ per request. Apply it row-wise, then concatenate;
+          ;; the expensive attention itself remains one fused dispatch.
+          rotate-rows
+          (fn [array head-count]
+            (let [source-rows (mapv #(t/slice-axis array 0 % (inc %))
+                                    (range batch))
+                  rotated (mapv (fn [index row]
+                                  (t/rotary-embedding
+                                   row head-count
+                                   {:theta (or (:rope-theta opts) 10000.0)
+                                    :position-offset
+                                    (+ (or (:position-offset opts) 0)
+                                       (nth lengths index))}))
+                                (range batch) source-rows)
+                  output (t/cat rotated 0)]
+              (arr/release-all! (concat source-rows rotated))
+              output))
+          query (rotate-rows q0 heads)
+          key (rotate-rows k0 kv-heads)
+          key-rows (mapv #(t/slice-axis key 0 % (inc %)) (range batch))
+          value-rows (mapv #(t/slice-axis value 0 % (inc %)) (range batch))
+          appended (paged/append-kv-many! runtime* sequence-ids
+                                            key-rows value-rows)
+          _ (arr/release-all! (concat key-rows value-rows))
+          runtime* (:runtime appended)
+          attended (paged/attention-many runtime* sequence-ids query)
+          attention-output (linear attended :ow)
+          residual (t/add input attention-output)
+          ffn-input (t/rms-norm-last residual (:ffn-norm weights) eps)
+          gate-projection (linear ffn-input :gate)
+          gate (t/silu gate-projection)
+          up (linear ffn-input :up)
+          gated (nm/mul gate up)
+          down (linear gated :down)
+          output (t/add residual down)
+          _ (arr/release-all!
+             [normalized q0 k0 value query key attended attention-output
+              ffn-input gate-projection gate up gated down residual])]
+      {:output output :runtime runtime* :placements (:placements appended)})))
+
+(defn llama-lm-paged-step
+  "Execute one token ID through Embedding, paged Llama blocks, final norm, and
+  LM head. `runtimes` contains one independently backed paged runtime per block."
+  [model* weights token runtimes sequence-id]
+  (let [layers (model/execution-layers model*)]
+    (when-not (= (count layers) (count weights))
+      (throw (ex-info "Llama LM layers and weights must align" {})))
+    (loop [remaining (seq (map vector layers weights))
+           value token value-owned? false runtime-index 0 updated [] placements []]
+      (if-let [[layer weight] (first remaining)]
+        (if (= :llama-block (model/layer-type layer))
+          (let [runtime* (nth runtimes runtime-index nil)
+                _ (when-not runtime*
+                    (throw (ex-info "missing per-block paged runtime"
+                                    {:runtime-index runtime-index})))
+                step (llama-block-paged-step layer weight value runtime*
+                                              sequence-id)
+                _ (when value-owned? (arr/release! value))]
+            (recur (next remaining) (:output step) true (inc runtime-index)
+                   (conj updated (:runtime step))
+                   (conj placements (:placement step))))
+          (let [output (layer-forward layer weight value nil)
+                _ (when value-owned? (arr/release! value))]
+            (recur (next remaining) output true runtime-index updated placements)))
+        (do
+          (when-not (= runtime-index (count runtimes))
+            (throw (ex-info "unused paged Llama runtimes"
+                            {:used runtime-index :provided (count runtimes)})))
+          {:logits value :runtimes updated :placements placements})))))
+
+(defn llama-lm-paged-batch-step
+  "Batched twin of `llama-lm-paged-step`. `token` is `[batch,1]`; each block
+  consumes one shared runtime and performs one multi-request paged attention."
+  [model* weights token runtimes sequence-ids]
+  (let [layers (model/execution-layers model*)]
+    (when-not (and (= (count layers) (count weights))
+                   (= (first (:shape token)) (count sequence-ids)))
+      (throw (ex-info "batched paged Llama inputs do not align" {})))
+    (loop [remaining (seq (map vector layers weights))
+           value token value-owned? false runtime-index 0 updated [] placements []]
+      (if-let [[layer weight] (first remaining)]
+        (if (= :llama-block (model/layer-type layer))
+          (let [runtime* (nth runtimes runtime-index nil)
+                _ (when-not runtime*
+                    (throw (ex-info "missing per-block paged runtime"
+                                    {:runtime-index runtime-index})))
+                step (llama-block-paged-batch-step
+                      layer weight value runtime* sequence-ids)
+                _ (when value-owned? (arr/release! value))]
+            (recur (next remaining) (:output step) true (inc runtime-index)
+                   (conj updated (:runtime step))
+                   (conj placements (:placements step))))
+          (let [output (layer-forward layer weight value nil)
+                _ (when value-owned? (arr/release! value))]
+            (recur (next remaining) output true runtime-index updated placements)))
+        (do
+          (when-not (= runtime-index (count runtimes))
+            (throw (ex-info "unused paged Llama runtimes"
+                            {:used runtime-index :provided (count runtimes)})))
+          {:logits value :runtimes updated :placements placements})))))
 
 (defn init-llama-caches
   "Preallocate one fixed KV cache per Llama block in `model*`."
   ([backend model* capacity]
-   (init-llama-caches backend model* capacity :f32))
+   (init-llama-caches backend model* capacity :f32 1))
   ([backend model* capacity dtype]
+   (init-llama-caches backend model* capacity dtype 1))
+  ([backend model* capacity dtype batch]
    (->> (model/execution-layers model*)
         (filter #(= :llama-block (model/layer-type %)))
         (mapv (fn [layer]
                 (let [[embed heads _hidden opts] (model/layer-args layer)
                       kv-heads (long (or (:kv-heads opts) heads))]
                   (init-kv-cache backend capacity
-                                 (* kv-heads (quot embed heads)) dtype)))))))
+                                 (* kv-heads (quot embed heads)) dtype batch)))))))
 
 (defn llama-model-step
   "Run one token through every Llama block and update each layer's KV cache."
@@ -425,23 +643,59 @@
     (when-not (= (count layers) (count weights))
       (throw (ex-info "Llama LM layers and weights must align" {})))
     (loop [remaining (seq (map vector layers weights))
-           value token cache-index 0 updated []]
+           value token value-owned? false cache-index 0 updated []]
       (if-let [[layer weight] (first remaining)]
         (if (= :llama-block (model/layer-type layer))
           (let [cache (nth caches cache-index nil)
                 _ (when-not cache
                     (throw (ex-info "missing per-block KV cache"
                                     {:cache-index cache-index})))
-                step (llama-block-step layer weight value cache)]
-            (recur (next remaining) (:output step) (inc cache-index)
+                step (llama-block-step layer weight value cache)
+                _ (when value-owned? (arr/release! value))]
+            (recur (next remaining) (:output step) true (inc cache-index)
                    (conj updated (:cache step))))
-          (recur (next remaining) (layer-forward layer weight value nil)
-                 cache-index updated))
+          (let [output (layer-forward layer weight value nil)
+                _ (when value-owned? (arr/release! value))]
+            (recur (next remaining) output true cache-index updated)))
         (do
           (when-not (= cache-index (count caches))
             (throw (ex-info "unused Llama KV caches"
                             {:used cache-index :provided (count caches)})))
           {:logits value :caches updated})))))
+
+(defn llama-embedding-step
+  "Execute one token through the embedding, Llama blocks, and final norm,
+  stopping before the LM head. Returns the final hidden row and updated caches."
+  [model* weights token caches]
+  (let [layers (model/execution-layers model*)]
+    (when-not (= (count layers) (count weights))
+      (throw (ex-info "Llama embedding layers and weights must align" {})))
+    (loop [remaining (seq (map vector layers weights))
+           value token value-owned? false cache-index 0 updated []]
+      (if-let [[layer weight] (first remaining)]
+        (cond
+          (= :lm-head (model/layer-type layer))
+          (do
+            (when-not (= cache-index (count caches))
+              (throw (ex-info "unused Llama embedding caches"
+                              {:used cache-index :provided (count caches)})))
+            {:embedding value :caches updated})
+
+          (= :llama-block (model/layer-type layer))
+          (let [cache (nth caches cache-index nil)
+                _ (when-not cache
+                    (throw (ex-info "missing per-block embedding KV cache"
+                                    {:cache-index cache-index})))
+                step (llama-block-step layer weight value cache)
+                _ (when value-owned? (arr/release! value))]
+            (recur (next remaining) (:output step) true (inc cache-index)
+                   (conj updated (:cache step))))
+
+          :else
+          (let [output (layer-forward layer weight value nil)
+                _ (when value-owned? (arr/release! value))]
+            (recur (next remaining) output true cache-index updated)))
+        (throw (ex-info "Llama embedding model has no LM-head boundary" {}))))))
 
 (defn release-kv-cache!
   "Explicitly release the two device arrays in a superseded KV cache."

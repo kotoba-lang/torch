@@ -12,7 +12,15 @@
         io.github.kotoba-lang/num
         {:git/sha "a03c9dbfcf056cff21dfef9fc67012f3fc97444f"}}
  :aliases
- {:test {:extra-paths ["test"]
+ {:public-gguf-verify
+       {:extra-paths ["test"]
+        :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
+        :main-opts ["-m" "torch.public-gguf-verify"]}
+  :gguf-bundle-export
+       {:extra-paths ["test"]
+        :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
+        :main-opts ["-m" "torch.gguf-bundle-export"]}
+  :test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner
                       {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
          :main-opts ["-m" "cognitect.test-runner"]
@@ -53,12 +61,76 @@
         :main-opts ["-m" "cljs.main"
                     "-co" "{:optimizations :simple :target :nodejs :main torch.deno-kv-cache-verify :output-to \"target/deno-kv-cache-verify.cjs\"}"
                     "-c" "torch.deno-kv-cache-verify"]}
+       :deno-paged-llama-verify
+       {:extra-paths ["test"]
+        ;; The paged Metal primitives are intentionally verified against the
+        ;; sibling num checkout until that revision is published and pinned.
+        :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-paged-llama-verify :output-to \"target/deno-paged-llama-verify.cjs\"}"
+                    "-c" "torch.deno-paged-llama-verify"]}
+       :deno-continuous-verify
+       {:extra-paths ["test"]
+        :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-continuous-verify :output-to \"target/deno-continuous-verify.cjs\"}"
+                    "-c" "torch.deno-continuous-verify"]}
+       :deno-paged-batch-llama-verify
+       {:extra-paths ["test"]
+        :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-paged-batch-llama-verify :output-to \"target/deno-paged-batch-llama-verify.cjs\"}"
+                    "-c" "torch.deno-paged-batch-llama-verify"]}
+       :deno-ollama-http-verify
+       {:extra-paths ["test"]
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-ollama-http-verify :output-to \"target/deno-ollama-http-verify.cjs\"}"
+                    "-c" "torch.deno-ollama-http-verify"]}
        :deno-quantized-llama-benchmark
        {:extra-paths ["test"]
         :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
         :main-opts ["-m" "cljs.main"
                     "-co" "{:optimizations :simple :target :nodejs :main torch.deno-quantized-llama-benchmark :output-to \"target/deno-quantized-llama-benchmark.cjs\"}"
                     "-c" "torch.deno-quantized-llama-benchmark"]}
+       :deno-public-gguf-metal-verify
+       {:extra-paths ["test"]
+        :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-public-gguf-metal-verify :output-to \"target/deno-public-gguf-metal-verify.cjs\"}"
+                    "-c" "torch.deno-public-gguf-metal-verify"]}
+       :deno-public-gguf-ollama-verify
+       {:extra-paths ["test"]
+        :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-public-gguf-ollama-verify :output-to \"target/deno-public-gguf-ollama-verify.cjs\"}"
+                    "-c" "torch.deno-public-gguf-ollama-verify"]}
+       :deno-public-gguf-continuous-verify
+       {:extra-paths ["test"]
+        :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-public-gguf-continuous-verify :output-to \"target/deno-public-gguf-continuous-verify.cjs\"}"
+                    "-c" "torch.deno-public-gguf-continuous-verify"]}
+       :deno-public-gguf-continuous-http-verify
+       {:extra-paths ["test"]
+        :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-public-gguf-continuous-http-verify :output-to \"target/deno-public-gguf-continuous-http-verify.cjs\"}"
+                    "-c" "torch.deno-public-gguf-continuous-http-verify"]}
+       :deno-public-gguf-registry-verify
+       {:extra-paths ["test"]
+        :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-public-gguf-registry-verify :output-to \"target/deno-public-gguf-registry-verify.cjs\"}"
+                    "-c" "torch.deno-public-gguf-registry-verify"]}
        ;; clj-kondo as a Clojars lib (no Homebrew/system install needed).
        :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
          :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"

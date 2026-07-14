@@ -99,9 +99,10 @@ values without a host readback:
 The step accepts `[1 embed]` or `[batch 1 embed]`; its output matches the same
 layer's full causal pass token-for-token, verified on Apple Metal. A cache from
 `init-kv-cache` preallocates K/V once and appends device-to-device without changing
-either GPUBuffer handle. The older nil-start immutable cache remains supported.
-Fixed-capacity cache currently targets the common batch-1 generation path; batched
-serving and Ollama-style paged/block cache allocation remain future work.
+either GPUBuffer handle. Pass the batch size as the fifth argument, for example
+`(init-kv-cache backend 4096 embed-dim :f32 8)`. Its token-major backing makes
+each batched append contiguous while attention receives a batch-first view. The
+older nil-start immutable cache remains supported.
 
 `(m/llama-block embed heads hidden)` is a bias-free pre-normalized decoder
 block: RMSNorm → RoPE causal attention → residual → RMSNorm → SwiGLU → residual.
@@ -160,6 +161,303 @@ through a zero-copy matrix view. Llama
 grouped-query attention is supported when
 `head_count_kv` evenly divides `head_count`, including training and fixed-capacity
 KV-cache decoding on Metal; K/V projections and caches use the reduced KV width.
+Both general attention and complete Embedding → multi-block GQA Llama → LM-head
+decode have full/cached parity tests for batch 2 on Apple Metal, with stable
+GPUBuffer handles across every token.
+
+Host-side static batching is available through `generate-text-batch`. A single
+step callback receives one token per request and shared per-layer caches; rows
+that reach EOS early are padded so unfinished rows continue without changing the
+fixed GPU batch layout. Prompts currently need equal encoded lengths. Ragged
+prefill and device-executed continuous batching remain future work.
+
+`torch.kv-cache` provides the ownership layer for that next serving mode. It
+maintains a bounded physical-block free list, per-sequence block tables and
+refcounts, lazily reserves prompt/decode positions, shares forked prefix blocks,
+and emits explicit copy-on-write commands when two forks would write the same
+partial block. Its FIFO scheduler admits work up to a configured running batch,
+leaves an oversized head request queued transactionally when memory is exhausted,
+and immediately admits waiting work after a completed sequence releases blocks.
+Allocator invariants are executable through `valid?` and covered on JVM and by
+CLJS compilation. `torch.paged-runtime` consumes allocator placements and submits
+prefix-copy before token-write on the storage queue, then passes each sequence's
+logical block table to its attention callback. The corresponding physical
+write/copy/paged-GQA kernels are implemented and independently live-verified in
+`num.deno-gpu`; publishing that new num revision and wiring the complete Llama
+step to this bridge are still required. Request cancellation/timeouts and a
+production concurrent HTTP server also remain before claiming Ollama-equivalent
+continuous serving.
+
+The bridge now executes a complete Embedding → two GQA Llama blocks → RMSNorm →
+LM-head decode against those physical kernels. The live verifier compares every
+token's vocabulary logits with the ordinary full causal CPU model, checks the
+allocator/device placements, and releases both layers' physical pools:
+
+```sh
+clojure -M:deno-paged-llama-verify
+deno run --allow-all target/deno-paged-llama-verify.cjs
+# Apple M4: full two-block paged Llama parity: passed
+#           allocator/device placement alignment: passed
+#           physical paged pools release: passed
+```
+
+That verifier temporarily overrides the pinned `num` dependency with the sibling
+`../num` checkout. Normal consumers still use the published SHA; the override can
+be removed after the paged Metal revision is merged and pinned.
+
+`torch.continuous` adds request turnover on top of the shared layer pools. It
+supports different prompt lengths, FIFO admission under both batch and block
+limits, synchronous CPU and Promise-based WebGPU stepping, per-request sampling,
+pause-on-block-exhaustion, EOS/length eviction, and immediate admission after
+blocks are released. The live fixture fills every block with two ragged requests,
+finishes one, reuses its block to prefill a waiting third request, and completes
+all three through the same two physical Metal layer pools:
+
+```sh
+clojure -M:deno-continuous-verify
+deno run --allow-all target/deno-continuous-verify.cjs
+# Apple M4: ragged continuous request turnover: passed
+#           paged blocks fully reusable: passed
+#           shared physical pools release: passed
+```
+
+`tick-batched` and `tick-batched-async` classify EOS/length completions first,
+release their blocks, pause rows that cannot grow, and group every remaining
+runnable request into one Llama batch call in stable order. Ragged prefill is still
+request-local.
+
+Serving lifecycle controls now include bounded waiting queues with explicit
+backpressure rejection, cancellation of queued or running requests, absolute
+deadlines, timeout eviction, immediate block release, and counter/gauge snapshots
+for submissions, admissions, rejections, completions, prompt/decode tokens,
+microbatches, active queues, peaks, and free blocks per layer.
+
+Submission rejects a prompt that can never fit the physical paged-KV capacity.
+If decode reaches the per-sequence capacity, it completes with `length` and
+releases every block instead of remaining permanently paused. This invariant was
+also exercised by the longer ChatML control-token prompt on real Metal.
+
+The lower execution API also provides `llama-lm-paged-batch-step`: QKV and FFN
+projections remain batch tensors while each layer resolves request-specific RoPE
+positions and performs one fused ragged paged-attention dispatch. A length-1 and
+length-2 prefix advanced together match both ordinary full causal sequences on
+CPU and Apple Metal:
+
+```sh
+clojure -M:deno-paged-batch-llama-verify
+deno run --allow-all target/deno-paged-batch-llama-verify.cjs
+# Apple M4: ragged fused paged Llama parity: passed
+#           batched physical pools release: passed
+```
+
+The continuous Metal verifier configures both callbacks and proves that `[:a :b]`
+is selected automatically into one fused decode call before their blocks are
+released and reused to prefill request `:c`.
+
+`torch.ollama` translates `/api/generate` options and deadlines into continuous
+engine submissions and emits Ollama-shaped token/final payloads.
+`torch.ollama-http/handler` is a standard Fetch handler suitable for `Deno.serve`;
+it implements `GET /api/version`, `GET /api/tags`, `GET /api/ps`,
+`POST /api/show`, `POST /api/embed`, and streaming NDJSON or
+non-streaming `POST /api/generate` and `POST /api/chat`, including JSON 400/404
+errors. Chat validates ordered system/user/assistant text history, renders a
+model-specific prompt from GGUF `tokenizer.chat_template`, and returns Ollama
+`message.role/content` chunks. The renderer recognizes Llama 2 `[INST]`, Llama 3
+header tokens, and ChatML; an unknown Jinja family fails explicitly instead of
+silently applying the wrong prompt. Models without template metadata retain the
+deterministic portable prompt.
+Images, thinking, structured output, and tool calls remain explicit unsupported
+boundaries rather than being silently ignored. Its live
+Request/Response verifier checks headers, status codes, three NDJSON records, and
+the assembled non-stream response:
+
+`/api/embed` accepts one string or a batch, runs the real Llama embedding and
+decoder blocks through the resident model, stops before the LM head, takes the
+last causal hidden row, and returns L2-normalized vectors. Context overflow obeys
+`truncate`; unsupported output dimensions fail explicitly. The cached step is
+checked against full-sequence CPU hidden states, while the registry verifier runs
+two inputs through the public GGUF on Apple Metal and checks dimensions, unit
+norms, lifecycle refcounts, and final GPU cleanup.
+
+```sh
+clojure -M:deno-ollama-http-verify
+deno run --allow-all target/deno-ollama-http-verify.cjs
+# version/tags, generate/chat, batched embed, invalid request: passed
+```
+
+`serve!` starts a real Deno listener (default `127.0.0.1:11434`) and exposes its
+graceful `.shutdown()` lifecycle. Every generate request receives a stable request
+ID and AbortSignal context; a client disconnect invokes the injected `cancel!`
+callback exactly once and response completion removes the listener. The verifier
+also starts an ephemeral TCP port, reaches it with `fetch`, aborts a separate
+in-flight request, and shuts the server down.
+
+When the service provides `generate-stream!`, each generated chunk is encoded and
+enqueued as one NDJSON record through a byte `ReadableStream`; the handler does not
+wait for generation completion. Stream close/error/reader-cancel each run cleanup
+once, while TCP reader cancellation propagates to `Request.signal` and `cancel!`.
+The live test emits chunks at 0/60/120 ms, proves the first bytes arrive before
+100 ms, cancels the reader, and confirms producer timers and generation are
+cancelled. The HTTP layer still receives injected generation callbacks; model
+loading can be supplied through the registry below; authentication and production
+observability remain.
+
+`torch.model-registry` bounds loaded resources by byte budget. Catalog models are
+loaded lazily, acquire/release references prevent active eviction, Ollama
+`keep_alive` values (`5m`, seconds, `0`, or `-1`) set expiry, and inactive models
+are evicted in deterministic LRU order until a new model fits. Explicit unload,
+forced administrative unload, live catalog/tag snapshots, and residency/load/
+eviction metrics are included. The unload callback is where GGUF weights, paged
+K/V pools, and device resources are released. `/api/tags` accepts a snapshot
+function, so loaded/active registry state is visible without rebuilding the HTTP
+handler. A production host still needs to connect its GGUF loader callback to
+model-specific continuous engines.
+
+`torch.registry-runtime` supplies that serialization without `swap!` retries:
+JVM mutations run under one lock, while CLJS mutations execute without an event-
+loop yield. This matters because loader/unloader callbacks have GPU side effects
+and must never be repeated by a failed CAS. A 24-thread acquire/release test loads
+and unloads exactly once, and the Deno HTTP verifier reads dynamic tags from the
+same runtime before expiry unloads the resource. Failed budget admission loads and
+retires only the new candidate; existing LRU resources are planned first and are
+not physically evicted unless the complete capacity plan succeeds.
+
+`torch.gguf-resource` is the concrete JVM registry factory: a filesystem
+descriptor uses the real byte size, then `load-file`, `llama-model`,
+`gguf-tokenizer`, and `load-llama-weights` construct the resource. Optional
+`engine-fn` builds its continuous serving engine, and unload calls
+`release-weights!`, which deduplicates tied/aliased dense and packed handles.
+Factory composition and cleanup are tested; a public full GGUF checkpoint is not
+downloaded as part of the default test suite. An opt-in verifier now exercises a
+real public checkpoint without mocks: it parses GGUF v3, decodes legacy Q5_0
+blocks (including tensors whose 32-value blocks span narrow logical rows), keeps
+all 13 Q5_0 weights packed through matrix multiplication and embedding, builds
+the Llama graph and SentencePiece tokenizer, runs cached greedy decode, validates
+finite logits/token bounds, and releases the KV cache and all weights.
+
+```sh
+curl -L --fail -o /tmp/tiny-random-llama.Q4_K_M.gguf \
+  https://huggingface.co/ybelkada/tiny-random-llama-Q4_K_M-GGUF/resolve/main/tiny-random-llama.Q4_K_M.gguf
+shasum -a 256 /tmp/tiny-random-llama.Q4_K_M.gguf
+# f06746ef9696d552d3746516558d5e9f338e581fd969158a90824e24f244169c
+clojure -M:public-gguf-verify /tmp/tiny-random-llama.Q4_K_M.gguf
+# Apple M4 JVM reference run: 1,627,808 bytes, 21 tensors, load 6.39 s,
+# four cached decode tokens 0.40 s; 13 packed Q5_0 weights; status :passed.
+```
+
+This checkpoint has random weights and proves compatibility/lifecycle, not text
+quality. The verifier is CPU-hosted because the current GGUF parser is JVM-only;
+an explicit portable bundle now joins that parser to the Deno/Metal host and
+proves the same real checkpoint through the full Llama graph:
+
+```sh
+clojure -M:gguf-bundle-export /tmp/tiny-random-llama.Q4_K_M.gguf \
+  target/tiny-random-llama-metal.tgb
+clojure -M:deno-public-gguf-metal-verify && \
+  deno run --allow-all target/deno-public-gguf-metal-verify.cjs \
+  target/tiny-random-llama-metal.tgb
+# Apple M4: CPU expected = Metal generated = [30821 25334 12729 26193]
+# full Embedding → 2 Llama blocks → RMSNorm → 32k LM head: 1.01 s
+# released: 25 weight/cache buffers, 2,415,376 bytes
+# remaining transient GPU buffers: 0
+```
+
+`TGBNDL1` is a bounded manifest + binary-payload container: packed tensors stay
+raw U8, dense fallback tensors use little-endian F32, and tokenizer/config/test
+metadata remains readable EDN. The public fixture shrinks from 12,656,318-byte
+text EDN to 2,993,475 bytes (76.3% smaller). The Deno reader validates magic,
+manifest/payload bounds, F32 alignment, and dense shape size before GPU upload.
+Apple M4 reads and decodes this fixture in 192 ms. It is an inference
+interchange, not yet direct JVM↔Deno IPC.
+
+The same real bundle is also exercised through the actual `Deno.serve` Ollama
+surface rather than a fake generation callback. Both streamed NDJSON and
+non-stream `/api/generate` contexts match the CPU reference IDs, cancellation is
+delivered after a live client disconnect, and all request caches plus resident
+weights return GPU live storage to baseline:
+
+```sh
+clojure -M:deno-public-gguf-ollama-verify && \
+  deno run --allow-all target/deno-public-gguf-ollama-verify.cjs \
+  target/tiny-random-llama-metal.tgb
+# Apple M4 warm run: first NDJSON byte 373 ms; complete four-token stream 1090 ms
+# stream/non-stream parity, incremental delivery, disconnect cancel: passed
+# GPU baseline restored: passed
+```
+
+This concrete server adapter currently gives each request a fixed KV cache. The
+portable paged continuous scheduler is verified separately; connecting this
+real async Metal adapter to its ragged microbatch loop remains the next serving
+step, along with production admission control.
+
+The real checkpoint now also runs through that paged scheduler itself. Three
+different public-tokenizer prompts are admitted two at a time, prefilled at
+their independent lengths, decoded through fused ragged Metal microbatches, and
+compared with CPU greedy reference IDs. All logical blocks return to the pool,
+and all physical pools, weights, and transient tensors return to GPU baseline:
+
+```sh
+clojure -M:deno-public-gguf-continuous-verify && \
+  deno run --allow-all target/deno-public-gguf-continuous-verify.cjs \
+  target/tiny-random-llama-metal.tgb
+# Apple M4: CPU/continuous Metal token parity: passed
+# ragged real prompts in fused microbatch: passed
+# 4 ticks; 15 prefill single calls; 2 fused batch calls
+# paged blocks reusable / GPU baseline restored: passed
+```
+
+Both single-request and batched paged Llama blocks now release projection,
+RoPE, attention, residual, and SwiGLU intermediates at their ownership boundary;
+the verifier's created/destroyed byte and buffer deltas must balance exactly.
+The final serving boundary in this sequence was routing live Ollama callbacks
+through the shared engine instead of per-request fixed caches.
+
+`torch.continuous-ollama` now closes that boundary. It serializes submit,
+admission, async GPU ticks, timeout expiry, and cancellation through one Promise
+lane; coalesces concurrently arriving HTTP requests before admission; publishes
+only each request's newly generated token delta; and supports both live NDJSON
+and collected non-stream responses. A real-socket verifier submits a streamed
+`Hello` and non-streamed `Hi there` concurrently, then disconnects a third live
+request after its first chunk:
+
+```sh
+clojure -M:deno-public-gguf-continuous-http-verify && \
+  deno run --allow-all target/deno-public-gguf-continuous-http-verify.cjs \
+  target/tiny-random-llama-metal.tgb
+# Apple M4: concurrent stream/non-stream CPU parity: passed
+# HTTP requests shared fused microbatch: passed
+# completed reasons: length, length, cancelled
+# paged blocks reusable / GPU baseline restored: passed
+```
+
+This is now an actual shared paged Metal Ollama path, not parallel isolated
+fixed caches. The next boundary was multi-model routing through the registry.
+
+`torch.metal-resource` and `torch.registry-ollama` add real multi-model routing.
+A catalog descriptor lazily reads `TGBNDL1`, uploads weights, constructs physical
+paged pools and a continuous host, while unload refuses active work and releases
+all pools/weights. Each HTTP request acquires the named resource and releases it
+with Ollama `keep_alive`; stream close/cancel is exactly-once. `/api/tags` reads
+the catalog plus residency flags, `/api/ps` lists only currently resident Metal
+resources, and `/api/show` reads model/configuration details from the compact
+bundle manifest without uploading its tensor payload.
+
+```sh
+clojure -M:deno-public-gguf-registry-verify && \
+  deno run --allow-all target/deno-public-gguf-registry-verify.cjs \
+  target/tiny-random-llama-metal.tgb
+# Apple M4: model-name routed CPU parity / dynamic residency tags: passed
+# Ollama ps/show follow real Metal residency: passed
+# Ollama chat runs through the resident public-GGUF Metal model: passed
+# Ollama normalized batched embeddings run on Metal: passed
+# inactive model-a LRU-evicted when model-b loads under a 1.5-model budget
+# each model loaded/unloaded exactly once; resident bytes: 0
+# GPU baseline restored: passed
+```
+
+The remaining production work is now operational scale rather than a missing
+model route: long-context soak/load tests, durable catalog configuration,
+authentication, telemetry, and deployment hardening.
 
 A whole-graph Metal benchmark covers more than an isolated kernel: two Llama
 blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding

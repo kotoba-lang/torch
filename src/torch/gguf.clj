@@ -16,7 +16,7 @@
   {0 :uint8 1 :int8 2 :uint16 3 :int16 4 :uint32 5 :int32
    6 :float32 7 :bool 8 :string 9 :array 10 :uint64 11 :int64 12 :float64})
 
-(def tensor-types {0 :f32 1 :f16 8 :q8-0 12 :q4-k 14 :q6-k})
+(def tensor-types {0 :f32 1 :f16 6 :q5-0 8 :q8-0 12 :q4-k 14 :q6-k})
 
 (defn- source-size [{:keys [bytes path]}]
   (if bytes (alength ^bytes bytes) (Files/size ^Path path)))
@@ -151,7 +151,17 @@
     (case type
       :f32 (* 4 n)
       :f16 (* 2 n)
-      :q8-0 (do (require-row-block! 32 "Q8_0")
+      ;; Legacy Q5_0 is encoded as consecutive 32-value blocks across the
+      ;; complete tensor. Small GGUF matrices can therefore have logical rows
+      ;; narrower than a block (the public tiny-random Llama uses width 16).
+      :q5-0 (do (when-not (zero? (mod n 32))
+                  (throw (ex-info "Q5_0 tensor size must be divisible by 32"
+                                  {:shape shape :elements n :block 32})))
+                ;; fp16 scale + 32 high bits + 32 packed low nibbles
+                (* 22 (quot n 32)))
+      :q8-0 (do (when-not (zero? (mod n 32))
+                  (throw (ex-info "Q8_0 tensor size must be divisible by 32"
+                                  {:shape shape :elements n :block 32})))
                 (* 34 (quot n 32)))
       :q4-k (do (require-row-block! 256 "Q4_K")
                 ;; fp16 d + fp16 dmin + 12 packed scale/min bytes + 128 quants
@@ -232,6 +242,27 @@
     (case type
       :f32 (mapv (fn [_] (double (.getFloat buffer))) (range n))
       :f16 (mapv (fn [_] (dtype/f16-bits->f32 (.getShort buffer))) (range n))
+      :q5-0
+      (vec
+       (mapcat
+        (fn [_]
+          (let [scale (dtype/f16-bits->f32 (.getShort buffer))
+                high (bit-and 0xffffffff (.getInt buffer))
+                low (mapv (fn [_] (bit-and 0xff (int (.get buffer)))) (range 16))]
+            (concat
+             (map-indexed
+              (fn [index byte]
+                (* scale (- (bit-or (bit-and byte 0x0f)
+                                    (bit-shift-left (bit-and (unsigned-bit-shift-right high index) 1) 4))
+                            16)))
+              low)
+             (map-indexed
+              (fn [index byte]
+                (* scale (- (bit-or (bit-shift-right byte 4)
+                                    (bit-shift-left (bit-and (unsigned-bit-shift-right high (+ index 16)) 1) 4))
+                            16)))
+              low))))
+        (range (quot n 32))))
       :q8-0
       (vec (mapcat (fn [_]
                      (let [scale (dtype/f16-bits->f32 (.getShort buffer))]
@@ -243,7 +274,7 @@
                          (range (quot n 256)))))))
 
 (defn read-tensor
-  "Decode a named F32/F16/Q8_0/Q4_K/Q6_K tensor to `{:shape :values :type}`."
+  "Decode a named F32/F16/Q5_0/Q8_0/Q4_K/Q6_K tensor to `{:shape :values :type}`."
   [gguf name]
   (let [tensor (get-in gguf [:tensor-map name])]
     (when-not tensor
@@ -256,7 +287,7 @@
   (let [tensor (get-in gguf [:tensor-map name])]
     (when-not tensor
       (throw (ex-info "GGUF tensor not found" {:name name})))
-    (when-not (#{:q4-k :q6-k :q8-0} (:type tensor))
+    (when-not (#{:q5-0 :q4-k :q6-k :q8-0} (:type tensor))
       (throw (ex-info "GGUF tensor is not packed quantized data"
                       {:name name :type (:type tensor)})))
     (assoc tensor :bytes
@@ -307,10 +338,14 @@
   [gguf]
   (let [m (:metadata gguf)
         tokens (vec (get m "tokenizer.ggml.tokens"))
+        tokenizer-model (get m "tokenizer.ggml.model")
         merges (mapv #(vec (str/split % #" " 2))
                      (get m "tokenizer.ggml.merges" []))]
     (tokenizer/tokenizer
      {:tokens tokens :merges merges
+      :scores (vec (get m "tokenizer.ggml.scores" []))
+      :model (when (= tokenizer-model "llama") :sentencepiece)
+      :space-prefix (when (= tokenizer-model "llama") "▁")
       :unk-id (get m "tokenizer.ggml.unknown_token_id")
       :bos-id (get m "tokenizer.ggml.bos_token_id")
       :eos-id (get m "tokenizer.ggml.eos_token_id")
@@ -320,9 +355,21 @@
 (defn- upload-vector [gguf backend name]
   (let [tensor (get-in gguf [:tensor-map name])]
     (if (and (= 2 (count (:shape tensor)))
-             (#{:q4-k :q6-k :q8-0} (:type tensor)))
+             (#{:q5-0 :q4-k :q6-k :q8-0} (:type tensor))
+             (or (= :q5-0 (:type tensor))
+                 (zero? (mod (last (:shape tensor))
+                             (if (= :q8-0 (:type tensor)) 32 256)))))
       (let [{:keys [shape bytes]} (read-packed-tensor gguf name)]
-        (quantized/table backend bytes shape (:type tensor)))
+        (try
+          (quantized/table backend bytes shape (:type tensor))
+          (catch clojure.lang.ExceptionInfo error
+            ;; Allows torch to remain usable with an older pinned num while a
+            ;; newly added packed format rolls forward; only Q5_0 has a dense
+            ;; compatibility path here.
+            (if (= :q5-0 (:type tensor))
+              (let [{:keys [shape values]} (read-tensor gguf name)]
+                (arr/from-vec backend values shape))
+              (throw error)))))
       (let [{:keys [shape values]} (read-tensor gguf name)]
         (arr/from-vec backend values shape)))))
 
@@ -330,9 +377,24 @@
   "GGUF linear matrices are `[out in]`; torch.num-backend uses `[in out]`."
   [gguf backend name]
   (let [tensor (get-in gguf [:tensor-map name])]
-    (if (#{:q4-k :q6-k :q8-0} (:type tensor))
+    (if (and (#{:q5-0 :q4-k :q6-k :q8-0} (:type tensor))
+             (or (= :q5-0 (:type tensor))
+                 (zero? (mod (last (:shape tensor))
+                             (if (= :q8-0 (:type tensor)) 32 256)))))
       (let [{:keys [shape bytes]} (read-packed-tensor gguf name)]
-        (quantized/matrix backend bytes shape (:type tensor)))
+        (try
+          (quantized/matrix backend bytes shape (:type tensor))
+          (catch clojure.lang.ExceptionInfo error
+            (if (= :q5-0 (:type tensor))
+              (let [{[out in] :shape values :values} (read-tensor gguf name)
+                    transposed (mapv (fn [i]
+                                       (let [input-index (quot i out)
+                                             output-index (mod i out)]
+                                         (nth values (+ (* output-index in)
+                                                        input-index))))
+                                     (range (* in out)))]
+                (arr/from-vec backend transposed [in out]))
+              (throw error)))))
       (let [{[out in] :shape values :values} (read-tensor gguf name)
             transposed (mapv (fn [i]
                                (let [input-index (quot i out) output-index (mod i out)]
@@ -342,7 +404,8 @@
 
 (defn load-llama-weights
   "Decode and upload standard Llama GGUF tensors into the weights vector used
-  by `torch.num-backend`. Quantized tensors are currently dequantized to f32."
+  by `torch.num-backend`. Supported row-addressable and cross-row Q5_0 tensors
+  remain packed; incompatible legacy layouts fall back to decoded f32."
   [gguf backend]
   (let [{:keys [block-count]} (llama-config gguf)
         embedding (upload-vector gguf backend "token_embd.weight")

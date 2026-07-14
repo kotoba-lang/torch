@@ -37,3 +37,13 @@
 (deftest missing-byte-fallback-is-explicit
   (let [small (tokenizer/tokenizer {:tokens ["<unk>" "a"] :merges [] :unk-id 0})]
     (is (= [0] (tokenizer/encode small "猫")))))
+
+(deftest sentencepiece-selects-the-highest-scoring-complete-path
+  (let [sp (tokenizer/tokenizer
+            {:tokens ["<unk>" "<s>" "</s>" "▁" "h" "i" "▁h" "hi" "▁hi"]
+             :scores [0 0 0 -3 -2 -2 -1 -1 2]
+             :model :sentencepiece :space-prefix "▁"
+             :unk-id 0 :bos-id 1 :eos-id 2 :add-bos? true})]
+    (is (= [1 8] (tokenizer/encode sp "hi")))
+    (is (= [1 8 8] (tokenizer/encode sp "hi hi")))
+    (is (= " hi hi" (tokenizer/decode sp [1 8 8])))))

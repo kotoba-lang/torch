@@ -36,3 +36,33 @@
     (is (= [4 2] (:generated-ids result)))
     (is (= "ab" (:text result)))
     (is (= [1 3 4] (:caches result)))))
+
+(deftest static-batched-generation-keeps-finished-cache-rows-aligned
+  (let [t (tokenizer/tokenizer
+           {:tokens ["<pad>" "<bos>" "<eos>" "a" "b"] :merges []
+            :unk-id 0 :bos-id 1 :eos-id 2 :add-bos? true
+            :special-ids [0]})
+        logits-for (fn [token]
+                     (case token
+                       3 [0.0 0.0 0.1 0.2 3.0]
+                       4 [0.0 0.0 3.0 0.2 0.1]
+                       [3.0 0.0 0.0 0.0 0.0]))
+        step (fn [tokens caches]
+               {:logits (mapv logits-for tokens)
+                :caches (conj (vec caches) tokens)})
+        result (generate/generate-text-batch
+                t step [] ["a" "b"]
+                {:temperature 0.0 :eos-id 2 :pad-id 0 :max-new-tokens 4})]
+    (is (= [[4 2] [2]] (mapv :generated-ids (:results result))))
+    (is (= ["ab" "b"] (mapv :text (:results result))))
+    ;; Row 1 finishes first; padding advances its fixed cache while row 0
+    ;; consumes token 4 and generates its own EOS.
+    (is (= [[1 1] [3 4] [4 0]] (:caches result)))))
+
+(deftest static-batched-generation-rejects-ragged-prefill
+  (let [t (tokenizer/tokenizer
+           {:tokens ["<unk>" "a" "b"] :merges [] :unk-id 0})]
+    (is (thrown-with-msg?
+         #?(:clj Exception :cljs js/Error) #"equal prompt lengths"
+         (generate/generate-text-batch
+          t (fn [_ caches] {:logits [] :caches caches}) nil ["a" "ab"] {})))))
