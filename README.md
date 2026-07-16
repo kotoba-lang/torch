@@ -17,8 +17,8 @@ kotoba) exactly like any other EDN value.
 - **Data-first.** The model is plain EDN; host-specific layer types arrive
   through `torch.ports/ILayer`, not by editing the kernel.
 
-Sibling libs: [jsonlogic-clj](../jsonlogic-clj) (rules-as-data),
-[dmn-clj](../dmn-clj) (decision tables), [vllm-clj](../vllm-clj) (LLM inference
+Sibling libs: [jsonlogic-clj](../jsonlogic) (rules-as-data),
+[dmn-clj](../org-omg-dmn) (decision tables), [vllm-clj](../vllm) (LLM inference
 requests-as-data).
 
 ## Why a shared library (org placement)
