@@ -85,6 +85,17 @@
                (number? random-value) (<= 0.0 random-value) (< random-value 1.0))
       {:k k :repetition-penalty repetition-penalty})))
 
+(defn- device-full-softmax? [logits options]
+  (let [{:keys [temperature top-k top-p repetition-penalty random-value]
+         :or {temperature 1.0 top-p 1.0 repetition-penalty 1.0
+              random-value 0.5}} options]
+    (and (number? temperature) (pos? temperature)
+         (nil? top-k)
+         (number? top-p) (= 1.0 top-p)
+         (number? repetition-penalty) (<= 1.0 repetition-penalty)
+         (number? random-value) (<= 0.0 random-value) (< random-value 1.0)
+         (pos-int? (:cols logits)))))
+
 (defn- shared-promise! [slot create]
   (or @slot
       (let [promise (create)]
@@ -99,6 +110,8 @@
       (let [greedy? (simple-greedy? logits options)
             candidate-options (when-not greedy?
                                 (device-candidate-options logits options))
+            full-softmax? (and (not greedy?) (nil? candidate-options)
+                               (device-full-softmax? logits options))
             promise
             (cond
               greedy?
@@ -122,6 +135,18 @@
                     :top-p (:top-p options 1.0)
                     :random-value (:random-value options 0.5)})
 
+              full-softmax?
+              (arr/sample-softmax-row
+               (assoc (:tensor logits)
+                      :shape [(:rows logits) (:cols logits)])
+               (:row logits)
+               {:previous-tokens
+                (filter #(and (int? %) (<= 0 %) (< % (:cols logits)))
+                        (:previous-tokens options))
+                :repetition-penalty (:repetition-penalty options 1.0)
+                :temperature (:temperature options 1.0)
+                :random-value (:random-value options 0.5)})
+
               :else
               (-> (shared-promise! (:host-promise logits)
                                    #(arr/->vec (:tensor logits)))
@@ -134,7 +159,8 @@
             (.then (fn [token]
                      (swap! sampling-stats update
                             (cond greedy? :device-greedy-tokens
-                                  candidate-options :device-sampled-tokens
+                                  (or candidate-options full-softmax?)
+                                  :device-sampled-tokens
                                   :else :host-sampled-tokens)
                             (fnil inc 0))
                      token))

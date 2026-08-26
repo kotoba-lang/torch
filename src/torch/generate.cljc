@@ -32,6 +32,20 @@
             token
             (recur more cumulative')))))))
 
+(defn- sample-full-softmax
+  "Sample an untruncated softmax in token-ID order. Sorting is distributionally
+  unnecessary when top-p is one; token order makes the explicit random-value
+  mapping portable across host and device implementations."
+  [adjusted temperature random-value]
+  (let [maximum (reduce max adjusted)
+        weights (mapv #(Math/exp (/ (- % maximum) temperature)) adjusted)
+        threshold (* random-value (reduce + weights))]
+    (loop [token 0 cumulative 0.0]
+      (let [cumulative' (+ cumulative (nth weights token))]
+        (if (or (> cumulative' threshold) (= token (dec (count weights))))
+          token
+          (recur (inc token) cumulative'))))))
+
 (defn sample-candidates
   "Sample from bounded `[token adjusted-logit]` candidates already selected by
   device top-k. Re-sorting makes tie behavior identical to `sample-token`.
@@ -79,12 +93,15 @@
                               (penalize (double logit) repetition-penalty)
                               (double logit)))
                           (range vocab) logits)
-           ranked (vec (sort-by (fn [[token logit]] [(- logit) token])
-                                (map vector (range vocab) adjusted)))]
-       (sample-ranked (if (and (not (zero? temperature)) top-k)
-                        (subvec ranked 0 top-k)
-                        ranked)
-                      temperature top-p random-value)))))
+           full-softmax? (and (pos? temperature) (nil? top-k) (= 1.0 top-p))]
+       (if full-softmax?
+         (sample-full-softmax adjusted temperature random-value)
+         (let [ranked (vec (sort-by (fn [[token logit]] [(- logit) token])
+                                    (map vector (range vocab) adjusted)))]
+           (sample-ranked (if (and (not (zero? temperature)) top-k)
+                            (subvec ranked 0 top-k)
+                            ranked)
+                          temperature top-p random-value)))))))
 
 (defn generate-text
   "Encode `prompt`, prefill one token at a time through `step-fn`, then sample.
