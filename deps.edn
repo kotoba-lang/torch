@@ -13,6 +13,12 @@
         {:git/sha "a03c9dbfcf056cff21dfef9fc67012f3fc97444f"}}
  :aliases
  {:dev {:override-deps {io.github.kotoba-lang/num {:local/root "../num"}}}
+  :native-server-build
+       {:override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.native-server :output-to \"target/native-server.cjs\"}"
+                    "-c" "torch.native-server"]}
   :hf-bundle-export
        {:extra-paths ["test"]
         :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}

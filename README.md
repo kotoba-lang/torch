@@ -946,6 +946,56 @@ registry resident bytes and GPU live bytes back at baseline. The historical
 verifier alias names contain `gguf`, but the verifier itself is now portable and
 driven by the v2/v3 bundle manifest.
 
+### Native distributed inference and Intel Arc Pro B70
+
+The serving runtime is no longer tied to Apple Metal. `torch.device-profile`
+admits Intel Arc Pro B70 only after identifying PCI device `8086:e223`, rejects
+software adapters such as llvmpipe, and selects the existing WGSL tensor kernels
+through WebGPU/Vulkan. B70 collectives deliberately use host-staged transfer;
+peer-to-peer GPU access is not assumed.
+
+`torch.parallel` defines deterministic tensor- and pipeline-parallel rank/layer
+plans, column/row sharding, gather/reduce semantics, and GPipe microbatch order.
+`torch.parallel-tcp` carries bounded, versioned activation envelopes over a real
+TCP rank boundary. This is the transport/execution contract for multiple nodes;
+it does not yet overlap communication with compute or provide a production
+failure/rejoin protocol.
+
+`torch.speculative` implements greedy verification, stochastic rejection
+sampling, and MTP-head drafting. A continuous engine configured with
+`:speculative-step-fn` commits multiple verified tokens per scheduler turn on
+both synchronous and Promise/WebGPU hosts while tracking drafted/accepted-token
+metrics. The model-specific draft/target callback owns KV writes; no unverified
+token is published.
+
+The server builds as one self-contained x86-64 Linux executable. Build-time uses
+ClojureScript and Deno, but the resulting process needs neither a JVM, Node, nor
+a separately installed Deno runtime:
+
+```sh
+scripts/build-native-server.sh target/kotoba-infer
+target/kotoba-infer --bundle model.tgb --model model:latest \
+  --device intel-b70 --host 127.0.0.1 --port 11434
+```
+
+The narrow admission policy in `kotoba/infer_schedule_core.kotoba` compiles with
+Amu to sealed KEXE (`scripts/build-native-policy.sh`). It currently owns bounded
+concurrency/draft width and the B70 PCI identity. General rank division remains
+in the portable checked layer because integer division is not yet admitted by
+the current Amu native subset; claiming otherwise would make KEXE and host
+semantics diverge.
+
+For a small JVM-free B70 qualification independent of model files:
+
+```sh
+scripts/build-native-b70-probe.sh target/kotoba-b70-probe
+target/kotoba-b70-probe
+```
+
+The probe verifies PCI identity and executes an actual WGSL compute dispatch,
+including GPU readback, rather than treating Vulkan enumeration as inference
+readiness.
+
 ## Test
 
 ```
