@@ -226,6 +226,38 @@
         (is (= {:submitted 2 :admitted 2 :rejected 1 :completed 2
                 :cancelled 1 :timed-out 1 :prompt-tokens 2
                 :generated-tokens 0 :decode-batches 0 :decode-requests 0
+                :speculative-steps 0 :drafted-tokens 0
+                :accepted-draft-tokens 0
                 :peak-running 1 :peak-waiting 2 :running 0 :waiting 0
                 :completed-retained 2 :free-blocks-per-layer [1]}
                snapshot))))))
+
+(deftest speculative-tick-commits-multiple-verified-tokens-and-releases
+  (let [storage {:write! (fn [& _]) :copy-block! (fn [& _])
+                 :attention (fn [& _] [0.0])}
+        runtime (paged/runtime (kv/pool 4 2) storage)
+        step-fn (fn [_ [runtime*] request-id]
+                  (let [write (paged/append-kv! runtime* request-id [] [])]
+                    {:logits [0.0 1.0] :runtimes [(:runtime write)]}))
+        speculative-step
+        (fn [_ [runtime*] request-id max-tokens]
+          (let [tokens (subvec [1 2 3] 0 (min 3 max-tokens))
+                runtime* (reduce (fn [r _]
+                                   (:runtime (paged/append-kv! r request-id [] [])))
+                                 runtime* tokens)]
+            {:tokens tokens :logits [1.0 0.0] :runtimes [runtime*]
+             :drafted 3 :accepted 2}))
+        admitted (-> (continuous/engine [runtime] step-fn nil 1
+                                        {:speculative-step-fn speculative-step})
+                     (continuous/enqueue :spec [0]
+                                         {:temperature 0.0 :max-new-tokens 3
+                                          :eos-id -1})
+                     continuous/admit)
+        finished (continuous/tick-speculative admitted)
+        snapshot (continuous/metrics finished)]
+    (is (= [1 2 3] (get-in finished [:completed :spec :generated-ids])))
+    (is (= :length (get-in finished [:completed :spec :reason])))
+    (is (= 1 (:speculative-steps snapshot)))
+    (is (= 3 (:drafted-tokens snapshot)))
+    (is (= 2 (:accepted-draft-tokens snapshot)))
+    (is (= #{0 1 2 3} (set (get-in finished [:runtimes 0 :pool :free]))))))

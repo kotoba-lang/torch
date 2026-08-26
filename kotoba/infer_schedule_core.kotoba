@@ -1,0 +1,12 @@
+(ns infer-schedule-core
+  (:export [max-running max-draft-tokens intel-b70?]))
+
+;; Host-independent admission/rank policy compiled by Amu into sealed KEXE.
+(defn max-running [requested :i64] :i64
+  (if (< requested 1) 1 (if (> requested 64) 64 requested)))
+
+(defn max-draft-tokens [requested :i64] :i64
+  (if (< requested 1) 1 (if (> requested 8) 8 requested)))
+
+(defn intel-b70? [pci-device-id :i64] :bool
+  (= pci-device-id 57891))

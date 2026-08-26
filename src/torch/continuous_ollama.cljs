@@ -72,7 +72,9 @@
              (-> (continuous/admit-async engine*)
                  (.then (fn [admitted]
                           (if (seq (:running admitted))
-                            (continuous/tick-batched-async admitted)
+                            (if (fn? (:speculative-step-fn admitted))
+                              (continuous/tick-speculative-async admitted)
+                              (continuous/tick-batched-async admitted))
                             admitted)))
                  (.then #(publish! host* %))))))
         (.then (fn [engine*]

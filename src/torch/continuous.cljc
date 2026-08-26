@@ -17,20 +17,24 @@
   ([runtimes step-fn batch-step-fn max-running]
    (engine runtimes step-fn batch-step-fn max-running {}))
   ([runtimes step-fn batch-step-fn max-running
-    {:keys [max-waiting] :or {max-waiting 1024}}]
+    {:keys [max-waiting speculative-step-fn] :or {max-waiting 1024}}]
    (when-not (and (seq runtimes) (fn? step-fn)
                   (or (nil? batch-step-fn) (fn? batch-step-fn))
+                  (or (nil? speculative-step-fn) (fn? speculative-step-fn))
                   (pos-int? max-running) (pos-int? max-waiting))
      (throw (ex-info "continuous engine requires runtimes, step-fn, and positive max-running"
                      {:runtime-count (count runtimes) :max-running max-running})))
    {:runtimes (vec runtimes) :step-fn step-fn
-    :batch-step-fn batch-step-fn :max-running max-running
+    :batch-step-fn batch-step-fn :speculative-step-fn speculative-step-fn
+    :max-running max-running
     :max-waiting max-waiting
     :waiting empty-queue :running {} :order [] :completed {}
     :metrics {:submitted 0 :admitted 0 :rejected 0 :completed 0
               :cancelled 0 :timed-out 0 :prompt-tokens 0
               :generated-tokens 0 :decode-batches 0
-              :decode-requests 0 :peak-running 0 :peak-waiting 0}}))
+              :decode-requests 0 :speculative-steps 0
+              :drafted-tokens 0 :accepted-draft-tokens 0
+              :peak-running 0 :peak-waiting 0}}))
 
 (defn enqueue
   "Queue one tokenized request. Options are sample-token options plus
@@ -257,6 +261,73 @@
         prepared ((:batch-step-fn engine) tokens (:runtimes engine) ids))
        engine))))
 
+(defn- remaining-context [runtimes request-id]
+  (apply min
+         (map (fn [runtime*]
+                (let [{:keys [block-count block-size]} (:pool runtime*)
+                      {:keys [length]} (kv/block-table (:pool runtime*) request-id)]
+                  (- (* block-count block-size) length)))
+              runtimes)))
+
+(defn- through-eos [tokens eos-id]
+  (if-let [i (first (keep-indexed #(when (= %2 eos-id) %1) tokens))]
+    (subvec (vec tokens) 0 (inc i))
+    (vec tokens)))
+
+(defn- apply-speculative-result
+  [state request-id request max-tokens result]
+  (let [{:keys [tokens logits runtimes drafted accepted]} result
+        {:keys [max-new-tokens eos-id]} (:options request)
+        tokens (through-eos (vec tokens) eos-id)]
+    (when (or (empty? tokens) (> (count tokens) max-tokens)
+              (not (vector? runtimes)) (nil? logits))
+      (throw (ex-info "invalid speculative step result"
+                      {:request-id request-id :max-tokens max-tokens
+                       :result (dissoc result :runtimes :logits)})))
+    (let [generated (into (:generated request) tokens)
+          reason (cond
+                   (= eos-id (peek tokens)) :eos
+                   (>= (count generated) max-new-tokens) :length
+                   :else nil)
+          state (-> state
+                    (assoc :runtimes runtimes)
+                    (update-in [:metrics :speculative-steps] inc)
+                    (update-in [:metrics :drafted-tokens] + (or drafted 0))
+                    (update-in [:metrics :accepted-draft-tokens] + (or accepted 0)))]
+      (if reason
+        (finish-request state request-id generated reason)
+        (-> state
+            (assoc-in [:running request-id :generated] generated)
+            (assoc-in [:running request-id :logits] logits)
+            (update-in [:running request-id] dissoc :paused?))))))
+
+(defn tick-speculative
+  "Advance each request by a verified token block. `speculative-step-fn`
+  receives `[request runtimes request-id max-tokens]` and returns
+  `{:tokens [...], :logits next-logits, :runtimes updated, :drafted n,
+  :accepted n}`. It owns draft/target execution and KV writes, and must return
+  only verified tokens (never more than max-tokens)."
+  [engine*]
+  (when-not (fn? (:speculative-step-fn engine*))
+    (throw (ex-info "continuous engine has no speculative-step-fn" {})))
+  (let [advanced
+        (reduce
+         (fn [state request-id]
+           (if-let [request (get-in state [:running request-id])]
+             (let [{:keys [max-new-tokens]} (:options request)
+                   remaining-generation (- max-new-tokens (count (:generated request)))
+                   max-tokens (min remaining-generation
+                                   (remaining-context (:runtimes state) request-id))]
+               (if (zero? max-tokens)
+                 (finish-request state request-id (:generated request) :length)
+                 (apply-speculative-result
+                  state request-id request max-tokens
+                  ((:speculative-step-fn state) request (:runtimes state)
+                   request-id max-tokens))))
+             state))
+         engine* (:order engine*))]
+    (admit advanced)))
+
 (defn- waiting-request [engine* request-id]
   (some #(when (= request-id (:id %)) %) (:waiting engine*)))
 
@@ -410,6 +481,33 @@
                (.then #(apply-batch-result prepared %))
                (.then admit-async))
            (admit-async engine))))
+
+     (defn tick-speculative-async
+       "Promise-returning speculative/MTP tick for native WebGPU serving."
+       [engine*]
+       (when-not (fn? (:speculative-step-fn engine*))
+         (throw (ex-info "continuous engine has no speculative-step-fn" {})))
+       (letfn [(advance-one [state request-id]
+                 (if-let [request (get-in state [:running request-id])]
+                   (let [max-new-tokens (get-in request [:options :max-new-tokens])
+                         remaining-generation (- max-new-tokens
+                                                 (count (:generated request)))
+                         max-tokens (min remaining-generation
+                                         (remaining-context (:runtimes state)
+                                                            request-id))]
+                     (if (zero? max-tokens)
+                       (js/Promise.resolve
+                        (finish-request state request-id (:generated request) :length))
+                       (-> (js/Promise.resolve
+                            ((:speculative-step-fn state) request (:runtimes state)
+                             request-id max-tokens))
+                           (.then #(apply-speculative-result
+                                   state request-id request max-tokens %)))))
+                   (js/Promise.resolve state)))]
+         (-> (reduce (fn [promise request-id]
+                       (.then promise #(advance-one % request-id)))
+                     (js/Promise.resolve engine*) (:order engine*))
+             (.then admit-async))))
      )
 
    :clj
@@ -419,4 +517,6 @@
      (defn tick-async [& _]
        (throw (ex-info "tick-async requires a ClojureScript Promise host" {})))
      (defn tick-batched-async [& _]
-       (throw (ex-info "tick-batched-async requires a ClojureScript Promise host" {})))))
+       (throw (ex-info "tick-batched-async requires a ClojureScript Promise host" {})))
+     (defn tick-speculative-async [& _]
+       (throw (ex-info "tick-speculative-async requires a ClojureScript Promise host" {})))))
