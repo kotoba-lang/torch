@@ -1,5 +1,5 @@
 (ns torch.deno-device-sampling-verify
-  "End-to-end native WebGPU top-k sampling with bounded logits readback."
+  "End-to-end native WebGPU bounded and full-softmax sampling verification."
   (:require [num.deno-gpu :as gpu]
             [torch.continuous :as continuous]
             [torch.continuous-ollama :as continuous-ollama]
@@ -26,6 +26,12 @@
                 {:model "tiny:latest" :prompt "Hello" :stream false
                  :options {:temperature 0.7 :top_k 8 :top_p 0.9
                            :repeat_penalty 1.2
+                           :num_predict 4}})
+               normalized-full
+               (ollama/normalize-generate-request
+                {:model "tiny:latest" :prompt "Hello" :stream false
+                 :options {:temperature 0.7 :top_p 1.0
+                           :repeat_penalty 1.2
                            :num_predict 4}})]
            (-> (continuous/admit-async
                 (:engine
@@ -48,9 +54,16 @@
                                                {:request-id :device-top-k}))))
                (.then
                 (fn [_]
+                  (continuous-ollama/submit! host* normalized-full
+                                             {:request-id :device-full-softmax})))
+               (.then
+                (fn [_]
                   (let [generated (get-in @(:engine host*)
                                           [:completed :device-top-k
                                            :generated-ids])
+                        generated-full
+                        (get-in @(:engine host*)
+                                [:completed :device-full-softmax :generated-ids])
                         sampling @(:sampling-stats loaded)
                         selected (gpu/backend-stats backend)
                         selection-bytes
@@ -65,6 +78,8 @@
                           {:adapter (gpu/adapter-description request)
                            :generated-ids generated
                            :expected-ids [23639 27919 26381 7335]
+                           :full-softmax-generated-ids generated-full
+                           :full-softmax-expected-ids [15988 16001 16005 16009]
                            :sampling sampling
                            :selection-readbacks selection-calls
                            :selection-readback-bytes selection-bytes
@@ -78,12 +93,14 @@
                       (println (js/JSON.stringify (clj->js result)))
                       (when-not (and (= (:generated-ids result)
                                         (:expected-ids result))
+                                     (= (:full-softmax-generated-ids result)
+                                        (:full-softmax-expected-ids result))
                                      (= {:device-greedy-tokens 0
-                                         :device-sampled-tokens 4
+                                         :device-sampled-tokens 8
                                          :host-sampled-tokens 0}
                                         sampling)
-                                     (= 4 selection-calls)
-                                     (= 16 selection-bytes)
+                                     (= 8 selection-calls)
+                                     (= 32 selection-bytes)
                                      (:cancel-before-sample-quiescent? result)
                                      (:buffers-quiescent? result))
                         (throw (ex-info "device sampling verification failed"

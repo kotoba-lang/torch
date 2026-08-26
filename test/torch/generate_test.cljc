@@ -8,6 +8,10 @@
     (is (= 1 (generate/sample-token [0.1 2.0 1.5 -0.2] {:temperature 0.0})))
     (is (= 2 (generate/sample-token [0.1 2.0 1.5 -0.2]
                                     {:top-k 2 :random-value 0.99})))
+    (is (= 1 (generate/sample-token [(Math/log 0.1) (Math/log 0.2)
+                                     (Math/log 0.7)]
+                                    {:temperature 1.0 :top-p 1.0
+                                     :random-value 0.25})))
     (is (= 1 (generate/sample-token [0.1 2.0 1.5 -0.2]
                                     {:top-p 0.5 :random-value 0.99})))
     (is (= 2 (generate/sample-token [0.1 2.0 1.5 -0.2]

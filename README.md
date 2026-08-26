@@ -134,10 +134,11 @@ A complete decoder can be described as ordinary layers:
 temperature, top-k, nucleus/top-p, and repetition-penalty policies. Randomness is
 passed explicitly as `:random-value`, keeping sampling reproducible and allowing a
 server to own its RNG stream. Native WebGPU serving now keeps logits device-resident:
-simple greedy requests use `num.array/argmax-rows` and return one u32 per request,
-while temperature/top-p or repetition-penalty requests retain the compatible full-
-logits host policy. Shared batch ownership releases the logits buffer exactly once
-across completion, cancellation, and ragged rows.
+simple greedy requests use `num.array/argmax-rows` and return one u32 per request.
+Untruncated temperature-softmax (`top-k=nil`, `top-p=1`) uses a token-ID-order CDF
+on both host and device, preserving explicit-random-value reproducibility while
+returning only one u32. Shared batch ownership releases the logits buffer exactly
+once across completion, cancellation, and ragged rows.
 
 `torch.tokenizer/tokenizer` builds a portable BPE tokenizer from ID-ordered
 tokens and merge pairs. It supports BOS/EOS, SentencePiece-style space prefixes,
@@ -1012,9 +1013,10 @@ For `temperature=0` with repetition penalty 1, the continuous scheduler samples
 through `num` row argmax. Greedy requests with repetition penalty and stochastic
 requests with explicit `top-k <= 256` use device repetition penalty plus exact
 top-k, followed by device temperature/top-p sampling. The limit is now 256 and
-only the final 4-byte token ID crosses to the host. Policies without a bounded
-candidate set deliberately fall back to the host sampler rather than changing
-request semantics.
+only the final 4-byte token ID crosses to the host. Requests without top-k and
+with `top-p=1` now use the full-softmax device kernel with the same 4-byte
+boundary. Exact unbounded nucleus policies with `top-p < 1` deliberately fall
+back to the host rather than approximating request semantics.
 Intermediate prefill logits, finished rows, and cancelled rows share explicit
 reference-counted ownership.
 
@@ -1033,8 +1035,15 @@ measured 0.6394 seconds cold and 0.1256–0.1326 seconds warm for four tokens
 large-model throughput claim; it also does not prove that top-k selection is the
 bottleneck at realistic model sizes.
 
-Remaining sampling maturity is explicit: unbounded temperature/top-p still uses
-host logits, top-k above 256 is not admitted, and stochastic speculative
+The same fixture without top-k (`temperature=0.7`, `top-p=1`, repetition penalty
+1.2) produced `[15988,16001,16005,16009]` on both adapters. The combined bounded
+and full-softmax verification made eight 4-byte readbacks and no full-logits
+readback. At vocabulary 262,144 the isolated full-softmax kernel median was
+14.26 ms on M4 and 11.95 ms on B70. The final B70 native HTTP build measured
+0.6291 seconds cold and 0.1231–0.1257 seconds warm for four tokens.
+
+Remaining sampling maturity is explicit: unbounded nucleus `top-p < 1` still
+uses host logits, top-k above 256 is not admitted, and stochastic speculative
 rejection currently models temperature-softmax distributions without top-k,
 top-p, or repetition transforms. The current device MTP surface covers bounded
 draft selection and target verification, not a model-specific fused multi-head
