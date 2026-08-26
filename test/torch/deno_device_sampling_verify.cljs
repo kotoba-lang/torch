@@ -79,11 +79,11 @@
                       (when-not (and (= (:generated-ids result)
                                         (:expected-ids result))
                                      (= {:device-greedy-tokens 0
-                                         :device-candidate-tokens 4
+                                         :device-sampled-tokens 4
                                          :host-sampled-tokens 0}
                                         sampling)
                                      (= 4 selection-calls)
-                                     (= 256 selection-bytes)
+                                     (= 16 selection-bytes)
                                      (:cancel-before-sample-quiescent? result)
                                      (:buffers-quiescent? result))
                         (throw (ex-info "device sampling verification failed"
