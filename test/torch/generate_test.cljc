@@ -13,7 +13,13 @@
     (is (= 2 (generate/sample-token [0.1 2.0 1.5 -0.2]
                                     {:temperature 0.0
                                      :previous-tokens [1]
-                                     :repetition-penalty 2.0}))))
+                                     :repetition-penalty 2.0})))
+    (is (= (generate/sample-token [0.1 2.0 1.5 -0.2]
+                                  {:temperature 0.7 :top-k 3 :top-p 0.8
+                                   :random-value 0.72})
+           (generate/sample-candidates [[1 2.0] [2 1.5] [0 0.1]]
+                                       {:temperature 0.7 :top-p 0.8
+                                        :random-value 0.72}))))
   (testing "bad policy values fail instead of silently changing semantics"
     (is (thrown? #?(:clj Exception :cljs js/Error)
                  (generate/sample-token [1.0 2.0] {:top-p 0.0})))

@@ -1,5 +1,6 @@
 (ns torch.speculative
-  "Speculative decoding and multi-token-prediction (MTP) verification.")
+  "Speculative decoding and multi-token-prediction (MTP) verification."
+  (:require [torch.generate :as generate]))
 
 (defn argmax [xs]
   (first (apply max-key second (map-indexed vector xs))))
@@ -15,8 +16,19 @@
   [head-logits]
   (mapv argmax head-logits))
 
-(defn verify-greedy [draft-tokens target-logits]
-  (let [target-tokens (mapv argmax target-logits)
+(defn mtp-draft-candidates
+  "Select one proposal from each bounded device candidate set. `options` may be
+  one shared sampling map or one map per MTP head. This keeps MTP logits on the
+  device when each head has already produced exact top-k candidates."
+  [head-candidates options]
+  (let [options (if (map? options) (repeat options) options)]
+    (mapv generate/sample-candidates head-candidates options)))
+
+(defn verify-greedy-tokens
+  "Verify a draft against target argmax token IDs. Target runtimes can produce
+  these IDs with device row argmax, without materializing target logits."
+  [draft-tokens target-tokens]
+  (let [target-tokens (vec target-tokens)
         accepted (count (take-while true? (map = draft-tokens target-tokens)))
         all-accepted? (= accepted (count draft-tokens))
         correction (nth target-tokens accepted nil)]
@@ -24,6 +36,9 @@
                correction (conj correction))
      :drafted (count draft-tokens) :accepted accepted
      :all-accepted? all-accepted?}))
+
+(defn verify-greedy [draft-tokens target-logits]
+  (verify-greedy-tokens draft-tokens (mapv argmax target-logits)))
 
 (defn- sample-index [probs random-value]
   (loop [i 0 cumulative 0.0]

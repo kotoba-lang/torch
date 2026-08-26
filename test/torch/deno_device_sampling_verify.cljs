@@ -1,5 +1,5 @@
 (ns torch.deno-device-sampling-verify
-  "End-to-end native WebGPU greedy decode with scalar-only logits readback."
+  "End-to-end native WebGPU top-k sampling with bounded logits readback."
   (:require [num.deno-gpu :as gpu]
             [torch.continuous :as continuous]
             [torch.continuous-ollama :as continuous-ollama]
@@ -24,7 +24,8 @@
                normalized
                (ollama/normalize-generate-request
                 {:model "tiny:latest" :prompt "Hello" :stream false
-                 :options {:temperature 0.0 :repeat_penalty 1.0
+                 :options {:temperature 0.7 :top_k 8 :top_p 0.9
+                           :repeat_penalty 1.2
                            :num_predict 4}})]
            (-> (continuous/admit-async
                 (:engine
@@ -44,11 +45,11 @@
                                  (= (:live-bytes resource-baseline)
                                     (:live-bytes after-cancel))))
                     (continuous-ollama/submit! host* normalized
-                                               {:request-id :device-greedy}))))
+                                               {:request-id :device-top-k}))))
                (.then
                 (fn [_]
                   (let [generated (get-in @(:engine host*)
-                                          [:completed :device-greedy
+                                          [:completed :device-top-k
                                            :generated-ids])
                         sampling @(:sampling-stats loaded)
                         selected (gpu/backend-stats backend)
@@ -63,7 +64,7 @@
                           result
                           {:adapter (gpu/adapter-description request)
                            :generated-ids generated
-                           :expected-ids [30821 25334 12729 26193]
+                           :expected-ids [23639 27919 26381 7335]
                            :sampling sampling
                            :selection-readbacks selection-calls
                            :selection-readback-bytes selection-bytes
@@ -77,11 +78,12 @@
                       (println (js/JSON.stringify (clj->js result)))
                       (when-not (and (= (:generated-ids result)
                                         (:expected-ids result))
-                                     (= {:device-greedy-tokens 4
+                                     (= {:device-greedy-tokens 0
+                                         :device-candidate-tokens 4
                                          :host-sampled-tokens 0}
                                         sampling)
                                      (= 4 selection-calls)
-                                     (= 16 selection-bytes)
+                                     (= 256 selection-bytes)
                                      (:cancel-before-sample-quiescent? result)
                                      (:buffers-quiescent? result))
                         (throw (ex-info "device sampling verification failed"
