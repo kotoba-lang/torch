@@ -972,9 +972,10 @@ both synchronous and Promise/WebGPU hosts while tracking drafted/accepted-token
 metrics. The model-specific draft/target callback owns KV writes; no unverified
 token is published. Greedy target verification also accepts device-selected
 argmax token IDs, and MTP heads can draft directly from bounded device candidate
-sets. Exact stochastic rejection still requires the target and draft
-probability vectors; it does not silently approximate a full distribution from
-top-k candidates.
+sets. `verify-stochastic-device` now consumes device-resident target/draft logits
+and delegates full-distribution temperature-softmax acceptance plus positive-
+residual sampling to `num`, returning one verified token decision in 8 bytes.
+The model-specific callback still owns draft/target forward passes and KV writes.
 
 The server builds as one self-contained x86-64 Linux executable. Build-time uses
 ClojureScript and Deno, but the resulting process needs neither a JVM, Node, nor
@@ -1009,10 +1010,11 @@ readiness.
 The native resource keeps each single or fused-batch logits tensor on the GPU.
 For `temperature=0` with repetition penalty 1, the continuous scheduler samples
 through `num` row argmax. Greedy requests with repetition penalty and stochastic
-requests with explicit `top-k <= 64` use device repetition penalty plus exact
-top-k, then transfer only `[token-id, adjusted-logit]` candidates for the existing
-temperature/top-p sampler. Policies without a bounded candidate set deliberately
-fall back to the host sampler rather than changing request semantics.
+requests with explicit `top-k <= 256` use device repetition penalty plus exact
+top-k, followed by device temperature/top-p sampling. The limit is now 256 and
+only the final 4-byte token ID crosses to the host. Policies without a bounded
+candidate set deliberately fall back to the host sampler rather than changing
+request semantics.
 Intermediate prefill logits, finished rows, and cancelled rows share explicit
 reference-counted ownership.
 
@@ -1024,18 +1026,19 @@ deno run --allow-all target/deno-device-sampling-verify.cjs model.tgb
 With `temperature=0.7`, `top-k=8`, `top-p=0.9`, and repetition penalty 1.2,
 the public tiny Llama fixture produced the same IDs on Apple M4 and Intel Arc Pro
 B70 (`[23639,27919,26381,7335]`). Four decode selections caused four readbacks
-totaling 256 bytes, zero full-logits readback, and returned live GPU buffers to
+totaling 16 bytes, zero full-logits readback, and returned live GPU buffers to
 baseline, including cancel-before-sample. On the B70, five native HTTP requests
-measured 0.6594 seconds cold and 0.1261–0.1351 seconds warm for four tokens
-(about 29.6–31.7 tok/s warm). This is a tiny public correctness fixture, not a
+measured 0.6394 seconds cold and 0.1256–0.1326 seconds warm for four tokens
+(about 30.2–31.8 tok/s warm). This is a tiny public correctness fixture, not a
 large-model throughput claim; it also does not prove that top-k selection is the
 bottleneck at realistic model sizes.
 
 Remaining sampling maturity is explicit: unbounded temperature/top-p still uses
-host logits, top-k above 64 is not admitted, and exact stochastic speculative
-rejection still needs full target/draft distributions. The current device MTP
-surface covers bounded draft selection and greedy target verification, not a
-model-specific fused multi-head kernel.
+host logits, top-k above 256 is not admitted, and stochastic speculative
+rejection currently models temperature-softmax distributions without top-k,
+top-p, or repetition transforms. The current device MTP surface covers bounded
+draft selection and target verification, not a model-specific fused multi-head
+forward kernel.
 
 ## Test
 

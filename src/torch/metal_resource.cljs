@@ -79,7 +79,7 @@
         vocab (:cols logits)
         k (if (zero? temperature) 1 top-k)]
     (when (and (number? temperature) (<= 0.0 temperature)
-               (pos-int? k) (<= k vocab) (<= k 64)
+               (pos-int? k) (<= k vocab) (<= k 256)
                (number? top-p) (< 0.0 top-p) (<= top-p 1.0)
                (number? repetition-penalty) (<= 1.0 repetition-penalty)
                (number? random-value) (<= 0.0 random-value) (< random-value 1.0))
@@ -109,14 +109,18 @@
                   (.then #(nth % (:row logits))))
 
               candidate-options
-              (-> (arr/top-k-row
+              (arr/sample-top-k-row
                    (assoc (:tensor logits)
                           :shape [(:rows logits) (:cols logits)])
-                   (:row logits) (:k candidate-options)
-                   (filter #(and (int? %) (<= 0 %) (< % (:cols logits)))
-                           (:previous-tokens options))
-                   (:repetition-penalty candidate-options))
-                  (.then #(generate/sample-candidates % options)))
+                   (:row logits)
+                   {:top-k (:k candidate-options)
+                    :previous-tokens
+                    (filter #(and (int? %) (<= 0 %) (< % (:cols logits)))
+                            (:previous-tokens options))
+                    :repetition-penalty (:repetition-penalty candidate-options)
+                    :temperature (:temperature options 1.0)
+                    :top-p (:top-p options 1.0)
+                    :random-value (:random-value options 0.5)})
 
               :else
               (-> (shared-promise! (:host-promise logits)
@@ -130,7 +134,7 @@
             (.then (fn [token]
                      (swap! sampling-stats update
                             (cond greedy? :device-greedy-tokens
-                                  candidate-options :device-candidate-tokens
+                                  candidate-options :device-sampled-tokens
                                   :else :host-sampled-tokens)
                             (fnil inc 0))
                      token))
@@ -200,7 +204,7 @@
          runtimes (mapv #(paged/runtime (kv/pool pool-blocks block-size) %)
                         storages)
          sampling-stats (atom {:device-greedy-tokens 0
-                               :device-candidate-tokens 0
+                               :device-sampled-tokens 0
                                :host-sampled-tokens 0})
          finish-logits (if device-sampling? device-logits-result host-logits-result)
          step-fn

@@ -1,6 +1,7 @@
 (ns torch.speculative
   "Speculative decoding and multi-token-prediction (MTP) verification."
-  (:require [torch.generate :as generate]))
+  (:require [num.array :as arr]
+            [torch.generate :as generate]))
 
 (defn argmax [xs]
   (first (apply max-key second (map-indexed vector xs))))
@@ -69,6 +70,21 @@
             {:tokens (conj accepted (sample-index residual (double (second draws))))
              :drafted (count draft-tokens) :accepted i
              :all-accepted? false}))))))
+
+(defn verify-stochastic-device
+  "Verify one speculative proposal directly from device-resident target and
+  draft logits. The backend performs full-distribution temperature softmax,
+  acceptance, and positive-residual sampling and returns only 8 bytes. This
+  intentionally does not approximate top-k/top-p filtered distributions."
+  [target-logits draft-logits row draft-token options]
+  (let [result (arr/speculative-rejection-row
+                target-logits draft-logits row draft-token options)
+        finish (fn [{:keys [accepted? token]}]
+                 {:tokens [token] :drafted 1
+                  :accepted (if accepted? 1 0)
+                  :all-accepted? accepted?})]
+    #?(:cljs (.then (js/Promise.resolve result) finish)
+       :clj (finish result))))
 
 (defn metrics [results]
   (let [drafted (reduce + 0 (map :drafted results))
