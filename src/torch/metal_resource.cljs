@@ -72,6 +72,19 @@
          (= 1.0 repetition-penalty)
          (number? random-value) (<= 0.0 random-value) (< random-value 1.0))))
 
+(defn- device-candidate-options [logits options]
+  (let [{:keys [temperature top-k top-p repetition-penalty random-value]
+         :or {temperature 1.0 top-p 1.0 repetition-penalty 1.0
+              random-value 0.5}} options
+        vocab (:cols logits)
+        k (if (zero? temperature) 1 top-k)]
+    (when (and (number? temperature) (<= 0.0 temperature)
+               (pos-int? k) (<= k vocab) (<= k 64)
+               (number? top-p) (< 0.0 top-p) (<= top-p 1.0)
+               (number? repetition-penalty) (<= 1.0 repetition-penalty)
+               (number? random-value) (<= 0.0 random-value) (< random-value 1.0))
+      {:k k :repetition-penalty repetition-penalty})))
+
 (defn- shared-promise! [slot create]
   (or @slot
       (let [promise (create)]
@@ -84,13 +97,28 @@
     (if-not (::device-logits logits)
       (generate/sample-token logits options)
       (let [greedy? (simple-greedy? logits options)
+            candidate-options (when-not greedy?
+                                (device-candidate-options logits options))
             promise
-            (if greedy?
+            (cond
+              greedy?
               (-> (shared-promise! (:argmax-promise logits)
                                    #(arr/argmax-rows
                                      (assoc (:tensor logits)
                                             :shape [(:rows logits) (:cols logits)])))
                   (.then #(nth % (:row logits))))
+
+              candidate-options
+              (-> (arr/top-k-row
+                   (assoc (:tensor logits)
+                          :shape [(:rows logits) (:cols logits)])
+                   (:row logits) (:k candidate-options)
+                   (filter #(and (int? %) (<= 0 %) (< % (:cols logits)))
+                           (:previous-tokens options))
+                   (:repetition-penalty candidate-options))
+                  (.then #(generate/sample-candidates % options)))
+
+              :else
               (-> (shared-promise! (:host-promise logits)
                                    #(arr/->vec (:tensor logits)))
                   (.then
@@ -101,7 +129,9 @@
         (-> promise
             (.then (fn [token]
                      (swap! sampling-stats update
-                            (if greedy? :device-greedy-tokens :host-sampled-tokens)
+                            (cond greedy? :device-greedy-tokens
+                                  candidate-options :device-candidate-tokens
+                                  :else :host-sampled-tokens)
                             (fnil inc 0))
                      token))
             (.finally #(release-device-logits! logits)))))))
@@ -169,7 +199,9 @@
                         (range block-count))
          runtimes (mapv #(paged/runtime (kv/pool pool-blocks block-size) %)
                         storages)
-         sampling-stats (atom {:device-greedy-tokens 0 :host-sampled-tokens 0})
+         sampling-stats (atom {:device-greedy-tokens 0
+                               :device-candidate-tokens 0
+                               :host-sampled-tokens 0})
          finish-logits (if device-sampling? device-logits-result host-logits-result)
          step-fn
          (fn [token runtimes request-id]
