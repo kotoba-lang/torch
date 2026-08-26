@@ -10,7 +10,7 @@
         ;; multi-head attention, typed Metal tensors, UNet autograd, and a
         ;; real-Metal async twin of multi-head attention (num.tensor-async).
         io.github.kotoba-lang/num
-        {:git/sha "a03c9dbfcf056cff21dfef9fc67012f3fc97444f"}}
+        {:git/sha "97b7bb72fa3b58d40abc0e013d9ae4fc51d6dd35"}}
  :aliases
  {:dev {:override-deps {io.github.kotoba-lang/num {:local/root "../num"}}}
   :native-server-build
@@ -148,6 +148,13 @@
         :main-opts ["-m" "cljs.main"
                     "-co" "{:optimizations :simple :target :nodejs :main torch.deno-public-gguf-continuous-http-verify :output-to \"target/deno-public-gguf-continuous-http-verify.cjs\"}"
                     "-c" "torch.deno-public-gguf-continuous-http-verify"]}
+       :deno-device-sampling-verify
+       {:extra-paths ["test"]
+        :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}
+        :extra-deps {org.clojure/clojurescript {:mvn/version "1.11.132"}}
+        :main-opts ["-m" "cljs.main"
+                    "-co" "{:optimizations :simple :target :nodejs :main torch.deno-device-sampling-verify :output-to \"target/deno-device-sampling-verify.cjs\"}"
+                    "-c" "torch.deno-device-sampling-verify"]}
        :deno-public-gguf-registry-verify
        {:extra-paths ["test"]
         :override-deps {io.github.kotoba-lang/num {:local/root "../num"}}

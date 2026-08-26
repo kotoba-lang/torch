@@ -6,6 +6,7 @@
             [torch.kv-cache :as kv]
             [torch.metal-bundle :as bundle]
             [torch.metal-paged :as metal-paged]
+            [torch.generate :as generate]
             [torch.num-backend :as nb]
             [torch.paged-runtime :as paged]
             [torch.tokenizer :as tokenizer]))
@@ -24,13 +25,86 @@
             :license (:license manifest "")
             :capabilities (:capabilities manifest ["completion"])}}))
 
-(defn- logits-result [logits step vocab]
+(defn- host-logits-result [logits step vocab]
   (-> (arr/->vec logits)
       (.then (fn [values]
                (arr/release! logits)
                (assoc step :logits
                       (if vocab (mapv vec (partition vocab values))
                           (vec values)))))))
+
+(defn- device-logits-result [logits step vocab]
+  (let [rows (if vocab (quot (arr/nelems (:shape logits)) vocab) 1)
+        cols (or vocab (arr/nelems (:shape logits)))
+        shared {:tensor logits :rows rows :cols cols
+                :argmax-promise (atom nil) :host-promise (atom nil)
+                :remaining (atom rows) :released? (atom false)}
+        refs (mapv #(assoc shared ::device-logits true :row %)
+                   (range rows))]
+    (assoc step :logits (if vocab refs (first refs)))))
+
+(defn- release-device-logits! [logits]
+  (when (::device-logits logits)
+    (let [remaining (swap! (:remaining logits) dec)]
+      (when (neg? remaining)
+        (throw (ex-info "device logits released more than once" {})))
+      (when (and (zero? remaining)
+                 (compare-and-set! (:released? logits) false true))
+        (arr/release! (:tensor logits)))))
+  nil)
+
+(defn- request-sampling-options
+  [{:keys [prompt-tokens generated options]}]
+  (let [index (count generated)
+        random-values (:random-values options)]
+    (assoc (dissoc options :max-new-tokens :eos-id :random-values)
+           :previous-tokens (into prompt-tokens generated)
+           :random-value (or (nth random-values index nil) 0.5))))
+
+(defn- simple-greedy? [logits options]
+  (let [{:keys [temperature top-k top-p repetition-penalty random-value]
+         :or {temperature 1.0 top-p 1.0 repetition-penalty 1.0
+              random-value 0.5}} options
+        vocab (:cols logits)]
+    (and (number? temperature) (zero? temperature)
+         (or (nil? top-k) (and (pos-int? top-k) (<= top-k vocab)))
+         (number? top-p) (< 0.0 top-p) (<= top-p 1.0)
+         (= 1.0 repetition-penalty)
+         (number? random-value) (<= 0.0 random-value) (< random-value 1.0))))
+
+(defn- shared-promise! [slot create]
+  (or @slot
+      (let [promise (create)]
+        (reset! slot promise)
+        promise)))
+
+(defn- sample-device-logits [sampling-stats request]
+  (let [logits (:logits request)
+        options (request-sampling-options request)]
+    (if-not (::device-logits logits)
+      (generate/sample-token logits options)
+      (let [greedy? (simple-greedy? logits options)
+            promise
+            (if greedy?
+              (-> (shared-promise! (:argmax-promise logits)
+                                   #(arr/argmax-rows
+                                     (assoc (:tensor logits)
+                                            :shape [(:rows logits) (:cols logits)])))
+                  (.then #(nth % (:row logits))))
+              (-> (shared-promise! (:host-promise logits)
+                                   #(arr/->vec (:tensor logits)))
+                  (.then
+                   (fn [values]
+                     (let [start (* (:row logits) (:cols logits))
+                           row (subvec (vec values) start (+ start (:cols logits)))]
+                       (generate/sample-token row options))))))]
+        (-> promise
+            (.then (fn [token]
+                     (swap! sampling-stats update
+                            (if greedy? :device-greedy-tokens :host-sampled-tokens)
+                            (fnil inc 0))
+                     token))
+            (.finally #(release-device-logits! logits)))))))
 
 (defn- l2-normalize [values]
   (let [norm (js/Math.sqrt (reduce + (map #(* % %) values)))]
@@ -79,9 +153,10 @@
 
 (defn load-resource
   ([backend descriptor*] (load-resource backend descriptor* {}))
-  ([backend descriptor* {:keys [pool-blocks block-size max-running max-waiting]
+  ([backend descriptor* {:keys [pool-blocks block-size max-running max-waiting
+                                device-sampling?]
                          :or {pool-blocks 64 block-size 16 max-running 4
-                              max-waiting 128}}]
+                              max-waiting 128 device-sampling? true}}]
    (let [manifest (bundle/load-bundle (:path descriptor*))
          {:keys [model weights tokenizer] :as instance}
          (bundle/instantiate backend manifest)
@@ -94,13 +169,15 @@
                         (range block-count))
          runtimes (mapv #(paged/runtime (kv/pool pool-blocks block-size) %)
                         storages)
+         sampling-stats (atom {:device-greedy-tokens 0 :host-sampled-tokens 0})
+         finish-logits (if device-sampling? device-logits-result host-logits-result)
          step-fn
          (fn [token runtimes request-id]
            (let [token* (arr/from-vec backend [token] [1])
                  step (nb/llama-lm-paged-step model weights token* runtimes request-id)
                  logits (:logits step)]
              (arr/release! token*)
-             (logits-result logits step nil)))
+             (finish-logits logits step nil)))
          batch-step-fn
          (fn [tokens runtimes request-ids]
            (let [tokens* (arr/from-vec backend tokens [(count tokens) 1])
@@ -108,9 +185,14 @@
                        model weights tokens* runtimes request-ids)
                  logits (:logits step)]
              (arr/release! tokens*)
-             (logits-result logits step vocab)))
+             (finish-logits logits step vocab)))
          engine (continuous/engine runtimes step-fn batch-step-fn max-running
-                                   {:max-waiting max-waiting})
+                                   (cond-> {:max-waiting max-waiting}
+                                     device-sampling?
+                                     (assoc :sample-token-fn
+                                            #(sample-device-logits sampling-stats %)
+                                            :release-logits-fn
+                                            release-device-logits!)))
          host* (continuous-ollama/host engine tokenizer)]
      (merge instance
             {:descriptor descriptor* :storages storages :host host*
@@ -120,7 +202,9 @@
                                    {:embeddings (mapv :embedding rows)
                                     :prompt-eval-count
                                     (reduce + (map :tokens rows))})))
-             :pool-blocks pool-blocks :block-size block-size}))))
+             :pool-blocks pool-blocks :block-size block-size
+             :device-sampling? device-sampling?
+             :sampling-stats sampling-stats}))))
 
 (defn unload-resource! [resource]
   (let [host* (:host resource)
