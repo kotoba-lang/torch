@@ -17,15 +17,19 @@
   ([runtimes step-fn batch-step-fn max-running]
    (engine runtimes step-fn batch-step-fn max-running {}))
   ([runtimes step-fn batch-step-fn max-running
-    {:keys [max-waiting speculative-step-fn] :or {max-waiting 1024}}]
+    {:keys [max-waiting speculative-step-fn sample-token-fn release-logits-fn]
+     :or {max-waiting 1024}}]
    (when-not (and (seq runtimes) (fn? step-fn)
                   (or (nil? batch-step-fn) (fn? batch-step-fn))
                   (or (nil? speculative-step-fn) (fn? speculative-step-fn))
+                  (or (nil? sample-token-fn) (fn? sample-token-fn))
+                  (or (nil? release-logits-fn) (fn? release-logits-fn))
                   (pos-int? max-running) (pos-int? max-waiting))
      (throw (ex-info "continuous engine requires runtimes, step-fn, and positive max-running"
                      {:runtime-count (count runtimes) :max-running max-running})))
    {:runtimes (vec runtimes) :step-fn step-fn
     :batch-step-fn batch-step-fn :speculative-step-fn speculative-step-fn
+    :sample-token-fn sample-token-fn :release-logits-fn release-logits-fn
     :max-running max-running
     :max-waiting max-waiting
     :waiting empty-queue :running {} :order [] :completed {}
@@ -149,6 +153,11 @@
      (assoc (dissoc options :max-new-tokens :eos-id :random-values)
             :previous-tokens (into prompt-tokens generated)
             :random-value (or (nth random-values index nil) 0.5)))))
+
+(defn- release-request-logits! [engine* request]
+  (when (and (:logits request) (fn? (:release-logits-fn engine*)))
+    ((:release-logits-fn engine*) (:logits request)))
+  nil)
 
 (defn- finish-request [engine* request-id generated reason]
   (let [request (get-in engine* [:running request-id])]
@@ -336,7 +345,8 @@
 
 (defn- terminate [engine* request-id reason]
   (if-let [request (get-in engine* [:running request-id])]
-    (let [generated (:generated request)
+    (let [_ (release-request-logits! engine* request)
+          generated (:generated request)
           engine* (finish-request engine* request-id generated reason)]
       (update-in engine* [:metrics (if (= reason :timeout)
                                     :timed-out :cancelled)] inc))
@@ -388,6 +398,12 @@
 
 #?(:cljs
    (do
+     (defn- choose-token-async [engine* request]
+       (js/Promise.resolve
+        (if (fn? (:sample-token-fn engine*))
+          ((:sample-token-fn engine*) request)
+          (choose-token request))))
+
      (defn- prefill-async [engine* request]
        (let [request-id (:id request)
              initial (allocate-all (:runtimes engine*) request-id)]
@@ -395,6 +411,9 @@
               (fn [promise token]
                 (.then promise
                        (fn [state]
+                         (when-let [logits (:logits state)]
+                           (when (fn? (:release-logits-fn engine*))
+                             ((:release-logits-fn engine*) logits)))
                          (js/Promise.resolve
                           ((:step-fn engine*) token (:runtimes state) request-id)))))
               (js/Promise.resolve {:runtimes initial})
@@ -434,35 +453,39 @@
        the next request. Completed rows release blocks before final admission."
        [engine*]
        (letfn [(advance-one [state request-id]
-                 (if-let [request (get-in state [:running request-id])]
-                   (let [token (choose-token request)
-                         generated (conj (:generated request) token)
-                         {:keys [max-new-tokens eos-id]} (:options request)
-                         finished? (or (= token eos-id)
-                                       (>= (count generated) max-new-tokens))]
-                     (cond
-                       finished?
-                       (js/Promise.resolve
-                        (finish-request state request-id generated
-                                        (if (= token eos-id) :eos :length)))
+               (if-let [request (get-in state [:running request-id])]
+                   (-> (choose-token-async state request)
+                       (.then
+                        (fn [token]
+                          (let [state (update-in state [:running request-id]
+                                                 dissoc :logits)
+                                generated (conj (:generated request) token)
+                                {:keys [max-new-tokens eos-id]} (:options request)
+                                finished? (or (= token eos-id)
+                                              (>= (count generated) max-new-tokens))]
+                            (cond
+                              finished?
+                              (finish-request state request-id generated
+                                              (if (= token eos-id) :eos :length))
 
-                       (can-append? (:runtimes state) request-id)
-                       (-> (js/Promise.resolve
-                            ((:step-fn state) token (:runtimes state) request-id))
-                           (.then
-                            (fn [step]
-                              (-> state
-                                  (assoc :runtimes (:runtimes step))
-                                  (assoc-in [:running request-id :generated]
-                                            generated)
-                                  (assoc-in [:running request-id :logits]
-                                            (:logits step))
-                                  (update-in [:running request-id]
-                                             dissoc :paused?)))))
+                              (can-append? (:runtimes state) request-id)
+                              (-> (js/Promise.resolve
+                                   ((:step-fn state) token (:runtimes state)
+                                    request-id))
+                                  (.then
+                                   (fn [step]
+                                     (-> state
+                                         (assoc :runtimes (:runtimes step))
+                                         (assoc-in [:running request-id :generated]
+                                                   generated)
+                                         (assoc-in [:running request-id :logits]
+                                                   (:logits step))
+                                         (update-in [:running request-id]
+                                                    dissoc :paused?)))))
 
-                       :else
-                       (js/Promise.resolve
-                        (assoc-in state [:running request-id :paused?] true))))
+                              :else
+                              (assoc-in state [:running request-id :paused?]
+                                        true))))))
                    (js/Promise.resolve state)))]
          (-> (reduce (fn [promise request-id]
                        (.then promise #(advance-one % request-id)))
@@ -474,13 +497,57 @@
        [engine*]
        (when-not (fn? (:batch-step-fn engine*))
          (throw (ex-info "continuous engine has no batch-step-fn" {})))
-       (let [{:keys [engine ids tokens] :as prepared} (prepare-batch engine*)]
-         (if (seq ids)
-           (-> (js/Promise.resolve
-                ((:batch-step-fn engine) tokens (:runtimes engine) ids))
-               (.then #(apply-batch-result prepared %))
-               (.then admit-async))
-           (admit-async engine))))
+       (letfn [(prepare-one [prepared request-id]
+                 (let [engine (:engine prepared)]
+                   (if-let [request (get-in engine [:running request-id])]
+                     (-> (choose-token-async engine request)
+                         (.then
+                          (fn [token]
+                            (let [engine (update-in engine [:running request-id]
+                                                    dissoc :logits)
+                                  generated (conj (:generated request) token)
+                                  {:keys [max-new-tokens eos-id]} (:options request)
+                                  finished? (or (= token eos-id)
+                                                (>= (count generated)
+                                                    max-new-tokens))]
+                              (cond
+                                finished?
+                                (assoc prepared :engine
+                                       (finish-request
+                                        engine request-id generated
+                                        (if (= token eos-id) :eos :length)))
+
+                                (at-context-capacity? (:runtimes engine) request-id)
+                                (assoc prepared :engine
+                                       (finish-request engine request-id generated
+                                                       :length))
+
+                                (can-append? (:runtimes engine) request-id)
+                                (-> prepared
+                                    (assoc :engine engine)
+                                    (update :ids conj request-id)
+                                    (update :tokens conj token)
+                                    (update :generated conj generated))
+
+                                :else
+                                (assoc prepared :engine
+                                       (assoc-in engine
+                                                 [:running request-id :paused?]
+                                                 true)))))))
+                     (js/Promise.resolve prepared))))]
+         (-> (reduce (fn [promise request-id]
+                       (.then promise #(prepare-one % request-id)))
+                     (js/Promise.resolve
+                      {:engine engine* :ids [] :tokens [] :generated []})
+                     (:order engine*))
+             (.then
+              (fn [{:keys [engine ids tokens] :as prepared}]
+                (if (seq ids)
+                  (-> (js/Promise.resolve
+                       ((:batch-step-fn engine) tokens (:runtimes engine) ids))
+                      (.then #(apply-batch-result prepared %))
+                      (.then admit-async))
+                  (admit-async engine)))))))
 
      (defn tick-speculative-async
        "Promise-returning speculative/MTP tick for native WebGPU serving."

@@ -130,18 +130,22 @@ A complete decoder can be described as ordinary layers:
 ```
 
 `llama-lm-step` accepts one token ID and returns `{:logits [1 vocab] :caches ...}`.
-After reading the final logits, `torch.generate/sample-token` supports greedy,
+`torch.generate/sample-token` supports greedy,
 temperature, top-k, nucleus/top-p, and repetition-penalty policies. Randomness is
 passed explicitly as `:random-value`, keeping sampling reproducible and allowing a
-server to own the RNG stream.
+server to own its RNG stream. Native WebGPU serving now keeps logits device-resident:
+simple greedy requests use `num.array/argmax-rows` and return one u32 per request,
+while temperature/top-p or repetition-penalty requests retain the compatible full-
+logits host policy. Shared batch ownership releases the logits buffer exactly once
+across completion, cancellation, and ragged rows.
 
 `torch.tokenizer/tokenizer` builds a portable BPE tokenizer from ID-ordered
 tokens and merge pairs. It supports BOS/EOS, SentencePiece-style space prefixes,
 Unicode codepoints, and GGUF-style `<0xHH>` UTF-8 byte fallback. The same `.cljc`
 implementation is verified on JVM and Node. `torch.generate/generate-text` joins
 tokenization, prompt prefill, cached token steps, sampling, EOS termination, and
-decoding for synchronous runtimes; GPU callers use the same sampling policy after
-their asynchronous logits readback.
+decoding for synchronous runtimes; GPU callers use the same sampling policy through
+the asynchronous device-selection boundary.
 
 ### GGUF model loading
 
@@ -995,6 +999,31 @@ target/kotoba-b70-probe
 The probe verifies PCI identity and executes an actual WGSL compute dispatch,
 including GPU readback, rather than treating Vulkan enumeration as inference
 readiness.
+
+### Device-resident greedy sampling evidence
+
+The native resource keeps each single or fused-batch logits tensor on the GPU.
+For `temperature=0` with repetition penalty 1, the continuous scheduler samples
+through `num` row argmax; other policies deliberately fall back to the existing
+host sampler rather than changing request semantics. Intermediate prefill logits,
+finished rows, and cancelled rows share explicit reference-counted ownership.
+
+```sh
+clojure -M:deno-device-sampling-verify
+deno run --allow-all target/deno-device-sampling-verify.cjs model.tgb
+```
+
+The public tiny Llama fixture produced identical greedy IDs on Apple M4 and Intel
+Arc Pro B70 (`[30821,25334,12729,26193]`). Four decode selections caused four
+readbacks totaling 16 bytes, zero full-logits readback, and returned live GPU
+buffers to baseline. On the B70, the same warmed native HTTP request measured
+0.1289–0.1377 seconds for four tokens (about 29.0–31.0 tok/s); the first request,
+which includes lazy pipeline compilation, was 0.6488 seconds. This is a tiny
+public correctness fixture, not a large-model throughput claim.
+
+Remaining sampling maturity is explicit: GPU top-k/top-p, device-side repetition
+penalty, and fused sampling integrated into speculative/MTP verification are not
+implemented yet. Those requests still preserve correctness through host logits.
 
 ## Test
 
