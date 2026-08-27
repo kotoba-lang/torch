@@ -32,6 +32,12 @@
                 {:model "tiny:latest" :prompt "Hello" :stream false
                  :options {:temperature 0.7 :top_p 1.0
                            :repeat_penalty 1.2
+                           :num_predict 4}})
+               normalized-nucleus
+               (ollama/normalize-generate-request
+                {:model "tiny:latest" :prompt "Hello" :stream false
+                 :options {:temperature 0.7 :top_p 0.9
+                           :repeat_penalty 1.2
                            :num_predict 4}})]
            (-> (continuous/admit-async
                 (:engine
@@ -58,12 +64,19 @@
                                              {:request-id :device-full-softmax})))
                (.then
                 (fn [_]
+                  (continuous-ollama/submit! host* normalized-nucleus
+                                             {:request-id :device-nucleus})))
+               (.then
+                (fn [_]
                   (let [generated (get-in @(:engine host*)
                                           [:completed :device-top-k
                                            :generated-ids])
                         generated-full
                         (get-in @(:engine host*)
                                 [:completed :device-full-softmax :generated-ids])
+                        generated-nucleus
+                        (get-in @(:engine host*)
+                                [:completed :device-nucleus :generated-ids])
                         sampling @(:sampling-stats loaded)
                         selected (gpu/backend-stats backend)
                         selection-bytes
@@ -80,6 +93,8 @@
                            :expected-ids [23639 27919 26381 7335]
                            :full-softmax-generated-ids generated-full
                            :full-softmax-expected-ids [15988 16001 16005 16009]
+                           :nucleus-generated-ids generated-nucleus
+                           :nucleus-expected-ids [7119 2862 22514 30876]
                            :sampling sampling
                            :selection-readbacks selection-calls
                            :selection-readback-bytes selection-bytes
@@ -95,12 +110,14 @@
                                         (:expected-ids result))
                                      (= (:full-softmax-generated-ids result)
                                         (:full-softmax-expected-ids result))
+                                     (= (:nucleus-generated-ids result)
+                                        (:nucleus-expected-ids result))
                                      (= {:device-greedy-tokens 0
-                                         :device-sampled-tokens 8
+                                         :device-sampled-tokens 12
                                          :host-sampled-tokens 0}
                                         sampling)
-                                     (= 8 selection-calls)
-                                     (= 32 selection-bytes)
+                                     (= 12 selection-calls)
+                                     (= 48 selection-bytes)
                                      (:cancel-before-sample-quiescent? result)
                                      (:buffers-quiescent? result))
                         (throw (ex-info "device sampling verification failed"
