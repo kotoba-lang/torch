@@ -1015,8 +1015,9 @@ requests with explicit `top-k <= 256` use device repetition penalty plus exact
 top-k, followed by device temperature/top-p sampling. The limit is now 256 and
 only the final 4-byte token ID crosses to the host. Requests without top-k and
 with `top-p=1` now use the full-softmax device kernel with the same 4-byte
-boundary. Exact unbounded nucleus policies with `top-p < 1` deliberately fall
-back to the host rather than approximating request semantics.
+boundary. Exact unbounded nucleus policies with `top-p < 1` stable-sort the
+complete vocabulary on device and retain the same 4-byte boundary for
+vocabularies through 1,048,576.
 Intermediate prefill logits, finished rows, and cancelled rows share explicit
 reference-counted ownership.
 
@@ -1042,8 +1043,15 @@ readback. At vocabulary 262,144 the isolated full-softmax kernel median was
 14.26 ms on M4 and 11.95 ms on B70. The final B70 native HTTP build measured
 0.6291 seconds cold and 0.1231–0.1257 seconds warm for four tokens.
 
-Remaining sampling maturity is explicit: unbounded nucleus `top-p < 1` still
-uses host logits, top-k above 256 is not admitted, and stochastic speculative
+With exact unbounded nucleus (`top-k=nil`, `top-p=0.9`), the fixture produced
+`[7119,2862,22514,30876]` on both adapters. At vocabulary 262,144 the isolated
+stable-sort/nucleus median was 26.9 ms on M4 and 25.1 ms on B70, and the
+production-size selected token matched an independent host sorting oracle. The
+B70 native HTTP path measured 0.6616 seconds cold and 0.1625–0.1695 seconds warm
+for four tokens (about 23.6–24.6 tok/s warm).
+
+Remaining sampling maturity is explicit: exact nucleus above vocabulary
+1,048,576 and top-k above 256 are not admitted, and stochastic speculative
 rejection currently models temperature-softmax distributions without top-k,
 top-p, or repetition transforms. The current device MTP surface covers bounded
 draft selection and target verification, not a model-specific fused multi-head
