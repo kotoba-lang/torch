@@ -86,6 +86,68 @@
     #?(:cljs (.then (js/Promise.resolve result) finish)
        :clj (finish result))))
 
+(defn make-mtp-step-fn
+  "Build a `torch.continuous` compatible MTP step from injected model forwards.
+
+  `draft-fn` receives `[request runtimes request-id draft-limit]` and returns
+  `{:tokens [...], :logits draft-logits}`. `target-fn` receives
+  `[request runtimes request-id draft-tokens]` and returns aligned
+  `{:logits target-logits, :next-logits logits, :runtimes committed-runtimes}`.
+  The target forward owns KV commit/rollback and must return runtimes containing
+  exactly the verified prefix plus correction token.
+
+  Target and draft distributions stay on their num backend. Verification uses
+  `num.array/speculative-rejection-rows`, transferring only one 8-byte decision
+  per attempted draft token. Both injected forwards may be synchronous on the
+  JVM or Promise-returning on a CLJS/WebGPU host."
+  [{:keys [draft-fn target-fn draft-token-count verify-options]
+    :or {draft-token-count 4 verify-options {:temperature 1.0}}}]
+  (when-not (and (fn? draft-fn) (fn? target-fn)
+                 (pos-int? draft-token-count))
+    (throw (ex-info "MTP execution requires draft/target forwards and a positive draft count"
+                    {:draft-fn? (fn? draft-fn) :target-fn? (fn? target-fn)
+                     :draft-token-count draft-token-count})))
+  (fn [request runtimes request-id max-tokens]
+    (let [limit (min draft-token-count max-tokens)
+          verify-result
+          (fn [draft-result target-result]
+            (let [draft-tokens (vec (:tokens draft-result))]
+              (when-not (and (pos? (count draft-tokens))
+                             (<= (count draft-tokens) limit)
+                             (:logits draft-result)
+                             (:logits target-result)
+                             (:next-logits target-result)
+                             (vector? (:runtimes target-result)))
+                (throw (ex-info "invalid MTP forward result"
+                                {:draft-limit limit
+                                 :draft-token-count (count draft-tokens)
+                                 :draft-logits? (boolean (:logits draft-result))
+                                 :target-logits? (boolean (:logits target-result))
+                                 :next-logits? (boolean (:next-logits target-result))
+                                 :target-runtimes? (vector? (:runtimes target-result))})))
+              (let [verified (arr/speculative-rejection-rows
+                              (:logits target-result) (:logits draft-result)
+                              draft-tokens verify-options)
+                    finish (fn [result]
+                             (assoc result
+                                    :logits (:next-logits target-result)
+                                    :runtimes (:runtimes target-result)))]
+                #?(:cljs (.then (js/Promise.resolve verified) finish)
+                   :clj (finish verified)))))
+          draft-result (draft-fn request runtimes request-id limit)]
+      #?(:clj
+         (let [draft-tokens (vec (:tokens draft-result))
+               target-result (target-fn request runtimes request-id draft-tokens)]
+           (verify-result draft-result target-result))
+         :cljs
+         (-> (js/Promise.resolve draft-result)
+             (.then
+              (fn [draft-result]
+                (let [draft-tokens (vec (:tokens draft-result))]
+                  (-> (js/Promise.resolve
+                       (target-fn request runtimes request-id draft-tokens))
+                      (.then #(verify-result draft-result %)))))))))))
+
 (defn metrics [results]
   (let [drafted (reduce + 0 (map :drafted results))
         accepted (reduce + 0 (map :accepted results))]
