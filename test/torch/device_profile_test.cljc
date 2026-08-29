@@ -16,3 +16,20 @@
   (testing "explicit B70 selection is fail closed"
     (is (thrown? #?(:clj Exception :cljs js/Error)
                  (device/validate! "Apple M4 Metal" :intel-arc-b70-vulkan)))))
+
+(deftest serving-profiles-preserve-measured-fleet-tuning
+  (testing "B70 latency uses one slot and native MTP"
+    (let [p (device/serving-profile "Intel Arc Pro B70 8086:e223" :latency)]
+      (is (= 1 (:torch/max-running p)))
+      (is (= 4096 (:torch/batch-size p)))
+      (is (= {:type :mtp :draft-token-count 3}
+             (:torch/speculative p)))))
+  (testing "Strix throughput uses both qualified slots"
+    (is (= 2 (:torch/max-running
+              (device/serving-profile "Radeon 8060S gfx1151" :throughput)))))
+  (testing "Xavier remains a one-slot fallback with explicit power prerequisites"
+    (let [p (device/serving-profile "Jetson AGX Xavier tegra194" :fallback)]
+      (is (= :cuda (get-in p [:torch/device :backend])))
+      (is (= 1 (:torch/max-running p)))
+      (is (= #{:max-performance-power-mode :locked-clocks}
+             (:torch/host-prerequisites p))))))
