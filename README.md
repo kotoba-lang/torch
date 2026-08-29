@@ -989,8 +989,10 @@ target/kotoba-infer --bundle model.tgb --model model:latest \
 ```
 
 The narrow admission policy in `kotoba/infer_schedule_core.kotoba` compiles with
-Amu to sealed KEXE (`scripts/build-native-policy.sh`). It currently owns bounded
-concurrency/draft width and the B70 PCI identity. General rank division remains
+Amu to sealed KEXE (`scripts/build-native-policy.sh`). It owns bounded
+concurrency/draft width, MTP head/full-offload admission, and the B70 PCI
+identity; the build extracts both the scheduler and MTP admission symbols as
+standalone native slices. General rank division remains
 in the portable checked layer because integer division is not yet admitted by
 the current Amu native subset; claiming otherwise would make KEXE and host
 semantics diverge.
