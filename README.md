@@ -1057,6 +1057,20 @@ top-p, or repetition transforms. The current device MTP surface covers bounded
 draft selection and target verification, not a model-specific fused multi-head
 forward kernel.
 
+## Expert-aware NVMe streaming
+
+`torch.expert-stream` opens an indexed model artifact once and serves
+positional expert slices into direct buffers under `num.expert-cache`'s exact
+byte ceiling. `prefetch!` uses a bounded executor and returns joinable futures,
+so a Qwen4Exp decoder can overlap routing/attention with next-layer reads while
+joining at the expert matmul boundary. The implementation is file-format
+neutral: inference owns the tensor/expert index; torch owns file resources;
+num owns cache policy.
+
+```sh
+clojure -M:test -n torch.expert-stream-test
+```
+
 ## Test
 
 ```
