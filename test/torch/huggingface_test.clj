@@ -1,5 +1,5 @@
 (ns torch.huggingface-test
-  (:require [clojure.data.json :as json]
+  (:require [json.data-json :as json]
             [clojure.test :refer [deftest is]]
             [num.array :as arr]
             [num.cpu :as cpu]

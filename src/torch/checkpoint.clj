@@ -1,6 +1,6 @@
 (ns torch.checkpoint
   "Restartable training checkpoints backed by one atomic safetensors file."
-  (:require [clojure.data.json :as json]
+  (:require [json.data-json :as json]
             [clojure.set :as set]
             [torch.safetensors :as safe]
             [torch.state-dict :as state]))

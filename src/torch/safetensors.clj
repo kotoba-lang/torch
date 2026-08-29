@@ -1,6 +1,6 @@
 (ns torch.safetensors
   "Validated safetensors reader/writer and torch state-dict loader."
-  (:require [clojure.data.json :as json]
+  (:require [json.data-json :as json]
             [clojure.set :as set]
             [num.array :as arr]
             [torch.state-dict :as state])
