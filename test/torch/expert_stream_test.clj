@@ -44,3 +44,14 @@
           (is (= 1 (get-in (stream/stats s) [:metrics :hits])))
           (is (= 16 (get-in (stream/stats s) [:metrics :bytes-loaded])))))
       (finally (Files/deleteIfExists path)))))
+
+(deftest streamed-experts-and-ple-remain-cpu-backed
+  (is (= {:torch/gpu-layers 0
+          :torch/expert-buffer :cpu
+          :torch/ple-buffer :cpu
+          :torch/non-expert-buffer :cpu}
+         (stream/split-placement {})))
+  (is (= :metal (:torch/non-expert-buffer
+                 (stream/split-placement {:gpu-layers 4}))))
+  (is (thrown? clojure.lang.ExceptionInfo
+               (stream/split-placement {:expert-buffer :metal}))))

@@ -129,3 +129,25 @@
      :resident-slices (count (:entries state))
      :hit-rate (cache/hit-rate state)
      :metrics (:metrics state)}))
+
+(defn split-placement
+  "Return the execution placement required by pointer-rebound expert streams.
+
+  Expert and PLE tensors must remain CPU-backed; only non-expert tensors are
+  accelerator eligible. The runtime-specific layer count stays explicit and
+  defaults to zero so a unified-memory host cannot opt in accidentally."
+  [{:keys [gpu-layers expert-buffer ple-buffer]
+    :or {gpu-layers 0 expert-buffer :cpu ple-buffer :cpu}}]
+  (when-not (and (integer? gpu-layers) (not (neg? gpu-layers)))
+    (throw (ex-info "gpu-layers must be a non-negative integer"
+                    {:gpu-layers gpu-layers})))
+  (when-not (= :cpu expert-buffer)
+    (throw (ex-info "streamed expert tensors must remain CPU-backed"
+                    {:expert-buffer expert-buffer})))
+  (when-not (= :cpu ple-buffer)
+    (throw (ex-info "streamed PLE table must remain CPU-backed"
+                    {:ple-buffer ple-buffer})))
+  {:torch/gpu-layers gpu-layers
+   :torch/expert-buffer :cpu
+   :torch/ple-buffer :cpu
+   :torch/non-expert-buffer (if (pos? gpu-layers) :metal :cpu)})
