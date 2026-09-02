@@ -953,6 +953,12 @@ driven by the v2/v3 bundle manifest.
 
 ### Native distributed inference and Intel Arc Pro B70
 
+`torch.device-profile/serving-profile` now consumes num's measured physical
+device hints and produces scheduler settings for latency, throughput, or
+fallback service. This keeps B70 on one MTP-assisted latency slot, admits two
+qualified Strix Halo throughput slots, and keeps Xavier as a one-slot CUDA
+fallback whose maximum-power and locked-clock prerequisites remain explicit.
+
 The serving runtime is no longer tied to Apple Metal. `torch.device-profile`
 admits Intel Arc Pro B70 only after identifying PCI device `8086:e223`, rejects
 software adapters such as llvmpipe, and selects the existing WGSL tensor kernels
