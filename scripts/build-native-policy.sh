@@ -14,4 +14,7 @@ cd "$amu_dir"
 ./bin/amu extract-native "$output_dir/infer-schedule-core.kexe" \
   --symbol max-running --output "$output_dir/infer-schedule-core.bin" \
   | tee "$output_dir/extract-report.edn"
+./bin/amu extract-native "$output_dir/infer-schedule-core.kexe" \
+  --symbol mtp-admitted? --output "$output_dir/infer-schedule-mtp-admitted.bin" \
+  | tee "$output_dir/extract-mtp-report.edn"
 printf '{:ok true :output "%s" :target %s :format :kexe}\n' "$output_dir" "$target"

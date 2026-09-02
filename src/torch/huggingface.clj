@@ -1,6 +1,6 @@
 (ns torch.huggingface
   "JVM loader for standard Hugging Face Llama config + safetensors checkpoints."
-  (:require [clojure.data.json :as json]
+  (:require [json.data-json :as json]
             [clojure.set :as set]
             [clojure.string :as str]
             [num.array :as arr]
