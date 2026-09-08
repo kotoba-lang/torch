@@ -2,7 +2,7 @@
   "JVM loader for standard Hugging Face Llama config + safetensors checkpoints."
   (:require [json.data-json :as json]
             [clojure.set :as set]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [num.array :as arr]
             [torch.model :as model]
             [torch.safetensors :as safe]

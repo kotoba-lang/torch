@@ -5,7 +5,7 @@
   PyTorch checkpoints store Linear weights as `[out,in]`. This namespace owns
   that boundary and transposes only matrix weights, never biases/Conv/Norm."
   (:require [clojure.set :as set]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [num.tensor :as t]
             [torch.model :as model]))
 

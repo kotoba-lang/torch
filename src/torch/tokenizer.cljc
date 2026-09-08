@@ -1,6 +1,6 @@
 (ns torch.tokenizer
   "Portable BPE tokenizer with GGUF-style `<0xHH>` UTF-8 byte fallback."
-  (:require [clojure.string :as str])
+  (:require [kotoba.lang.text :as str])
   #?(:clj (:import [java.nio.charset StandardCharsets])))
 
 (defn- utf8-bytes [s]
@@ -15,7 +15,7 @@
                     (js/Uint8Array. (clj->js bytes)))))
 
 (defn- byte-token [byte]
-  (str "<0x" (str/upper-case
+  (str "<0x" (str/upper
                 #?(:clj (format "%02x" (int byte))
                    :cljs (.padStart (.toString byte 16) 2 "0"))) ">"))
 
