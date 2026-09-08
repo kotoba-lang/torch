@@ -1,6 +1,6 @@
 (ns torch.ollama
   "Ollama-compatible `/api/generate` request and streaming response contract."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [torch.continuous :as continuous]
             [torch.tokenizer :as tokenizer]))
 

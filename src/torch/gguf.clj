@@ -1,7 +1,7 @@
 (ns torch.gguf
   "GGUF v2/v3 metadata and tensor loader with long file offsets."
   (:refer-clojure :exclude [load-file])
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [num.array :as arr]
             [num.dtype :as dtype]
             [num.quantized :as quantized]

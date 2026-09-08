@@ -1,12 +1,12 @@
 (ns torch.device-profile
   "Validated accelerator profiles used by native and distributed inference."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [num.device-profile :as num-profile]))
 
 (defn classify
   "Classify a WebGPU adapter from its public information map/string."
   [adapter]
-  (let [s (str/lower-case (str adapter))
+  (let [s (str/lower (str adapter))
         num-kind (num-profile/classify adapter)]
     (cond
       (or (str/includes? s "llvmpipe") (str/includes? s "software")) :software

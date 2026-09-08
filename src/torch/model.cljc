@@ -20,7 +20,7 @@
   `torch.ports`, and the top-level ops in `torch.core`. No tensor math runs
   here — the model is a description, not an execution."
   (:refer-clojure :exclude [flatten])
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 ;; ---------------------------------------------------------------------------
 ;; layer constructors — each returns a one-key {type args} map.
