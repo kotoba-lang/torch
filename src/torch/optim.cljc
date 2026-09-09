@@ -22,6 +22,46 @@
       :backoff-factor backoff-factor :growth-interval growth-interval
       :growth-tracker 0})))
 
+(def scaler-float-keys
+  "The GradScaler fields that are FLOATS, as data rather than as a list
+  repeated at each caller.
+
+  This exists because of a boundary, not because of a preference. A checkpoint
+  descriptor crosses JSON, and JSON has one number type: `32.0` is written
+  `32` and read back an integer, so a scaler that round-trips through a
+  checkpoint comes back with `:scale 32` where it saved `32.0`. Nothing is
+  numerically wrong at that instant, and everything downstream then does
+  integer arithmetic where it did float arithmetic.
+
+  The fix belongs HERE and not in the JSON writer: JSON cannot carry the
+  distinction, so the layer that KNOWS the schema has to restore it."
+  #{:scale :growth-factor :backoff-factor})
+
+(def scaler-integer-keys
+  "And the fields that are integers. Listed rather than derived as the rest,
+  so a field added to the scaler has to be classified deliberately instead of
+  inheriting whichever branch happens to be the default."
+  #{:growth-interval :growth-tracker})
+
+(defn restore-scaler
+  "Restore SCALER's declared numeric types after a round trip that could not
+  carry them. nil for nil, so a checkpoint without a scaler stays without one.
+
+  Refuses an unknown shape rather than passing it through: a field this
+  namespace does not classify is a field whose type nobody decided, and
+  silently keeping whatever JSON returned is how the defect this function
+  exists for got in."
+  [scaler]
+  (when scaler
+    (when-not (= (set (keys scaler))
+                 (into scaler-float-keys scaler-integer-keys))
+      (fail "unknown GradScaler shape" {:keys (vec (sort (keys scaler)))}))
+    (reduce-kv (fn [out k v]
+                 (assoc out k (if (contains? scaler-float-keys k)
+                                (double v)
+                                (long v))))
+               {} scaler)))
+
 (defn- finite-number? [x]
   #?(:clj (Double/isFinite (double x))
      :cljs (js/isFinite x)))

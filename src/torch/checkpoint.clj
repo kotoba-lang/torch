@@ -2,6 +2,7 @@
   "Restartable training checkpoints backed by one atomic safetensors file."
   (:require [json.data-json :as json]
             [clojure.set :as set]
+            [torch.optim :as optim]
             [torch.safetensors :as safe]
             [torch.state-dict :as state]))
 
@@ -118,7 +119,13 @@
            {:weights weights
             :optimizer-state optimizer-state
             :optimizer-options (:options optimizer)
-            :scaler scaler
+            ;; JSON has one number type, so a whole-valued float is written
+            ;; without its fraction and read back an integer: a scaler saved
+            ;; with `:scale 32.0` came back `:scale 32`, and every later
+            ;; multiply was integer arithmetic where it had been float. The
+            ;; descriptor cannot carry the distinction, so the layer that knows
+            ;; the schema restores it.
+            :scaler (optim/restore-scaler scaler)
             :training-state training-state
             :format-version version
             :metadata descriptor}))))))
