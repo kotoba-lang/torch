@@ -8,7 +8,7 @@
   [{:keys [model-id model-path mmproj-path port context parallel
            memory-bytes os-reserve-bytes headroom-bytes
            runtime-bytes speculative-bytes context-bytes api-key-file llama-server
-           mtp? draft-token-count]
+           mtp? draft-token-count batch ubatch]
     :or {parallel 1 mtp? false draft-token-count 3 speculative-bytes 0}}]
   (when-not (and (string? model-id) (seq model-id)
                  (string? model-path) (seq model-path)
@@ -17,7 +17,13 @@
                  (boolean? mtp?)
                  (or (not mtp?)
                      (and (pos-int? draft-token-count)
-                          (<= draft-token-count 8))))
+                          (<= draft-token-count 8)))
+                 ;; Batch sizing is optional, but a half-specified pair is not
+                 ;; a smaller batch -- it is llama.cpp's default silently
+                 ;; overriding the one value that was measured, on a node that
+                 ;; was given that value because the default did not fit.
+                 (or (and (nil? batch) (nil? ubatch))
+                     (and (pos-int? batch) (pos-int? ubatch) (<= ubatch batch))))
     (throw (ex-info "invalid edge replica plan" {:model model-id :port port})))
   (let [capacity (residency/admission
                   {:memory-bytes memory-bytes
@@ -42,6 +48,14 @@
                           "--cache-type-v" "q8_0"
                           "--jinja"
                           "--no-webui"]
+                   ;; Physical and micro batch. Absent, llama.cpp uses 2048/512,
+                   ;; which is the right default for a model with room to spare
+                   ;; and the wrong one for a model that fills the machine: the
+                   ;; compute buffer for a batch is charged on top of weights
+                   ;; and KV, so on a node admitted with single-digit-percent
+                   ;; free memory the batch is what pushes it into swap.
+                   batch (into ["--batch-size" (str batch)
+                                "--ubatch-size" (str ubatch)])
                    mtp? (into ["--n-gpu-layers" "99"
                                "-fit" "off"
                                "--spec-type" "draft-mtp"

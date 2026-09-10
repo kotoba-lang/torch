@@ -43,3 +43,37 @@
                  :context 4096 :memory-bytes 100 :os-reserve-bytes 10
                  :headroom-bytes 10 :runtime-bytes 20 :context-bytes 20
                  :mtp? true :draft-token-count 9}))))
+
+(deftest batch-sizing-is-carried-into-argv
+  (let [plan (edge/replica-plan
+              {:model-id "murakumo-27b" :model-path "/m/27b.gguf"
+               :llama-server "/bin/llama-server" :port 8093
+               :context 8192 :memory-bytes 100 :os-reserve-bytes 10
+               :headroom-bytes 10 :runtime-bytes 20 :context-bytes 20
+               :batch 128 :ubatch 32})]
+    (is (= ["--batch-size" "128" "--ubatch-size" "32"]
+           (->> (:argv plan) (drop-while #(not= "--batch-size" %)) (take 4) vec)))))
+
+(deftest without-batch-sizing-llama-cpp-keeps-its-own-defaults
+  ;; The absence has to be a real absence: emitting "--batch-size" with a
+  ;; default value here would make every existing replica's argv change.
+  (let [plan (edge/replica-plan
+              {:model-id "plain" :model-path "/m/model.gguf"
+               :llama-server "/bin/llama-server" :port 8093
+               :context 4096 :memory-bytes 100 :os-reserve-bytes 10
+               :headroom-bytes 10 :runtime-bytes 20 :context-bytes 20})]
+    (is (not-any? #{"--batch-size" "--ubatch-size"} (:argv plan)))))
+
+(deftest a-half-specified-batch-pair-is-refused
+  ;; Not cosmetic. `:batch 128` alone leaves ubatch at llama.cpp's 512, which
+  ;; is larger than the batch that was measured to fit -- the caller would get
+  ;; the default it was trying to avoid, and the plan would report success.
+  (doseq [half [{:batch 128} {:ubatch 32} {:batch 32 :ubatch 128}]]
+    (is (thrown? Exception
+                 (edge/replica-plan
+                  (merge {:model-id "bad" :model-path "/m/model.gguf"
+                          :llama-server "/bin/llama-server" :port 8093
+                          :context 4096 :memory-bytes 100 :os-reserve-bytes 10
+                          :headroom-bytes 10 :runtime-bytes 20 :context-bytes 20}
+                         half)))
+        (str "expected refusal for " (pr-str half)))))
