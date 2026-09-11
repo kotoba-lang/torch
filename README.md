@@ -199,7 +199,7 @@ token's vocabulary logits with the ordinary full causal CPU model, checks the
 allocator/device placements, and releases both layers' physical pools:
 
 ```sh
-clojure -M:deno-paged-llama-verify
+kbb -M:deno-paged-llama-verify
 deno run --allow-all target/deno-paged-llama-verify.cjs
 # Apple M4: full two-block paged Llama parity: passed
 #           allocator/device placement alignment: passed
@@ -219,7 +219,7 @@ finishes one, reuses its block to prefill a waiting third request, and completes
 all three through the same two physical Metal layer pools:
 
 ```sh
-clojure -M:deno-continuous-verify
+kbb -M:deno-continuous-verify
 deno run --allow-all target/deno-continuous-verify.cjs
 # Apple M4: ragged continuous request turnover: passed
 #           paged blocks fully reusable: passed
@@ -249,7 +249,7 @@ length-2 prefix advanced together match both ordinary full causal sequences on
 CPU and Apple Metal:
 
 ```sh
-clojure -M:deno-paged-batch-llama-verify
+kbb -M:deno-paged-batch-llama-verify
 deno run --allow-all target/deno-paged-batch-llama-verify.cjs
 # Apple M4: ragged fused paged Llama parity: passed
 #           batched physical pools release: passed
@@ -295,7 +295,7 @@ stop sequences, and non-float embedding encodings fail explicitly with an
 OpenAI-shaped error instead of being silently ignored.
 
 ```sh
-clojure -M:deno-ollama-http-verify
+kbb -M:deno-ollama-http-verify
 deno run --allow-all target/deno-ollama-http-verify.cjs
 # native Ollama plus OpenAI models/chat/embeddings, SSE cancellation: passed
 ```
@@ -358,7 +358,7 @@ curl -L --fail -o /tmp/tiny-random-llama.Q4_K_M.gguf \
   https://huggingface.co/ybelkada/tiny-random-llama-Q4_K_M-GGUF/resolve/main/tiny-random-llama.Q4_K_M.gguf
 shasum -a 256 /tmp/tiny-random-llama.Q4_K_M.gguf
 # f06746ef9696d552d3746516558d5e9f338e581fd969158a90824e24f244169c
-clojure -M:public-gguf-verify /tmp/tiny-random-llama.Q4_K_M.gguf
+kbb -M:public-gguf-verify /tmp/tiny-random-llama.Q4_K_M.gguf
 # Apple M4 JVM reference run: 1,627,808 bytes, 21 tensors, load 6.39 s,
 # four cached decode tokens 0.40 s; 13 packed Q5_0 weights; status :passed.
 ```
@@ -369,9 +369,9 @@ an explicit portable bundle now joins that parser to the Deno/Metal host and
 proves the same real checkpoint through the full Llama graph:
 
 ```sh
-clojure -M:gguf-bundle-export /tmp/tiny-random-llama.Q4_K_M.gguf \
+kbb -M:gguf-bundle-export /tmp/tiny-random-llama.Q4_K_M.gguf \
   target/tiny-random-llama-metal.tgb
-clojure -M:deno-public-gguf-metal-verify && \
+kbb -M:deno-public-gguf-metal-verify && \
   deno run --allow-all target/deno-public-gguf-metal-verify.cjs \
   target/tiny-random-llama-metal.tgb
 # Apple M4: CPU expected = Metal generated = [30821 25334 12729 26193]
@@ -395,7 +395,7 @@ delivered after a live client disconnect, and all request caches plus resident
 weights return GPU live storage to baseline:
 
 ```sh
-clojure -M:deno-public-gguf-ollama-verify && \
+kbb -M:deno-public-gguf-ollama-verify && \
   deno run --allow-all target/deno-public-gguf-ollama-verify.cjs \
   target/tiny-random-llama-metal.tgb
 # Apple M4 warm run: first NDJSON byte 373 ms; complete four-token stream 1090 ms
@@ -415,7 +415,7 @@ compared with CPU greedy reference IDs. All logical blocks return to the pool,
 and all physical pools, weights, and transient tensors return to GPU baseline:
 
 ```sh
-clojure -M:deno-public-gguf-continuous-verify && \
+kbb -M:deno-public-gguf-continuous-verify && \
   deno run --allow-all target/deno-public-gguf-continuous-verify.cjs \
   target/tiny-random-llama-metal.tgb
 # Apple M4: CPU/continuous Metal token parity: passed
@@ -439,7 +439,7 @@ and collected non-stream responses. A real-socket verifier submits a streamed
 request after its first chunk:
 
 ```sh
-clojure -M:deno-public-gguf-continuous-http-verify && \
+kbb -M:deno-public-gguf-continuous-http-verify && \
   deno run --allow-all target/deno-public-gguf-continuous-http-verify.cjs \
   target/tiny-random-llama-metal.tgb
 # Apple M4: concurrent stream/non-stream CPU parity: passed
@@ -461,7 +461,7 @@ resources, and `/api/show` reads model/configuration details from the compact
 bundle manifest without uploading its tensor payload.
 
 ```sh
-clojure -M:deno-public-gguf-registry-verify && \
+kbb -M:deno-public-gguf-registry-verify && \
   deno run --allow-all target/deno-public-gguf-registry-verify.cjs \
   target/tiny-random-llama-metal.tgb
 # Apple M4: model-name routed CPU parity / dynamic residency tags: passed
@@ -489,7 +489,7 @@ blocks, 256 hidden width, 4 query/2 KV heads, every linear and token embedding
 Q4_K-packed, tied LM head, causal prefill, and fixed-capacity KV-cache decode.
 
 ```sh
-clojure -Sdeps '{:deps {io.github.kotoba-lang/num {:local/root "../num"}}}' \
+kbb -Sdeps '{:deps {io.github.kotoba-lang/num {:local/root "../num"}}}' \
   -M:deno-quantized-llama-benchmark && \
 deno run --allow-all target/deno-quantized-llama-benchmark.cjs
 # Apple M4, 16 tokens:
@@ -596,7 +596,7 @@ device→host→device cast; existing typed weights are reused without copying.
 The full torch model dispatch is verified on Apple M4 Metal:
 
 ```sh
-clojure -M:deno-autocast-verify
+kbb -M:deno-autocast-verify
 deno run --allow-all target/deno-autocast-verify.cjs
 # torch conv→GroupNorm→SiLU f16: passed
 ```
@@ -780,7 +780,7 @@ central finite difference, identity projections match parameter-free attention,
 and SGD lowers the deterministic fixture loss. Run the portable verifier with:
 
 ```sh
-clojure -M:cljs-learned-attention-verify
+kbb -M:cljs-learned-attention-verify
 node target/learned-attention-verify.cjs
 ```
 
@@ -797,7 +797,7 @@ weights against CPU, and confirms loss decreases from `0.09691` to `0.06289`
 while the independent `torch.core/run` inference result also matches (32/32 checks):
 
 ```sh
-clojure -M:deno-metal-attention-verify
+kbb -M:deno-metal-attention-verify
 deno run --allow-all target/deno-metal-attention-verify.cjs
 ```
 
@@ -886,7 +886,7 @@ curl -L --fail -o /tmp/tiny-random-hf-llama-tokenizer-config.json \
   'https://huggingface.co/dacorvo/tiny-random-llama/resolve/main/tokenizer_config.json?download=true'
 
 # model SHA-256: f2862981ba362b49503e463b4969a1d87496953a98858f4b0e1110bd13ab0a1c
-clojure -M:public-safetensors-verify \
+kbb -M:public-safetensors-verify \
   /tmp/tiny-random-hf-llama-config.json \
   /tmp/tiny-random-hf-llama.safetensors \
   /tmp/tiny-random-hf-llama-tokenizer.json \
@@ -916,7 +916,7 @@ runtime's execution layout; tokenizer normalization/decoder options travel in
 the manifest with the weights:
 
 ```sh
-clojure -M:hf-bundle-export \
+kbb -M:hf-bundle-export \
   /tmp/tiny-random-hf-llama-config.json \
   /tmp/tiny-random-hf-llama.safetensors \
   /tmp/tiny-random-hf-llama-tokenizer.json \
@@ -924,17 +924,17 @@ clojure -M:hf-bundle-export \
   target/tiny-random-hf-llama-metal.tgb
 
 # Full Llama CPU/Metal greedy parity and buffer release
-clojure -M:deno-public-gguf-metal-verify
+kbb -M:deno-public-gguf-metal-verify
 deno run --allow-all target/deno-public-gguf-metal-verify.cjs \
   target/tiny-random-hf-llama-metal.tgb
 
 # Real Ollama streaming/non-streaming HTTP and cancellation
-clojure -M:deno-public-gguf-ollama-verify
+kbb -M:deno-public-gguf-ollama-verify
 deno run --allow-all target/deno-public-gguf-ollama-verify.cjs \
   target/tiny-random-hf-llama-metal.tgb
 
 # Resident registry, Ollama management/chat/embed, and OpenAI APIs
-clojure -M:deno-public-gguf-registry-verify
+kbb -M:deno-public-gguf-registry-verify
 deno run --allow-all target/deno-public-gguf-registry-verify.cjs \
   target/tiny-random-hf-llama-metal.tgb
 ```
@@ -1030,7 +1030,7 @@ Intermediate prefill logits, finished rows, and cancelled rows share explicit
 reference-counted ownership.
 
 ```sh
-clojure -M:deno-device-sampling-verify
+kbb -M:deno-device-sampling-verify
 deno run --allow-all target/deno-device-sampling-verify.cjs model.tgb
 ```
 
@@ -1076,11 +1076,11 @@ neutral: inference owns the tensor/expert index; torch owns file resources;
 num owns cache policy.
 
 ```sh
-clojure -M:test -n torch.expert-stream-test
+kbb -M:test -n torch.expert-stream-test
 ```
 
 ## Test
 
 ```
-clojure -X:test
+kbb -X:test
 ```
