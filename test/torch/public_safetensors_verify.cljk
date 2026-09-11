@@ -12,7 +12,7 @@
 (defn -main [& [config-path checkpoint-path tokenizer-path tokenizer-config-path]]
   (when-not (and config-path checkpoint-path)
     (throw (ex-info
-            "usage: clojure -M:public-safetensors-verify config.json model.safetensors"
+            "usage: kbb -M:public-safetensors-verify config.json model.safetensors"
             {})))
   (let [backend (cpu/cpu-backend)
         descriptor (resource/descriptor

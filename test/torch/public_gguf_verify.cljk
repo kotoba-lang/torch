@@ -13,7 +13,7 @@
 
 (defn -main [& [path]]
   (when-not path
-    (throw (ex-info "usage: clojure -M:public-gguf-verify /path/model.gguf" {})))
+    (throw (ex-info "usage: kbb -M:public-gguf-verify /path/model.gguf" {})))
   (let [backend (cpu/cpu-backend)
         load-start (System/nanoTime)
         loaded (resource/load-resource
