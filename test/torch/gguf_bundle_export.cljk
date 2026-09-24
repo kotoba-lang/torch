@@ -1,6 +1,6 @@
 (ns torch.gguf-bundle-export
   "Export a compact manifest + binary-weight bundle for Deno/Metal."
-  (:require [num.array :as arr]
+  (:require [kotoba.io :as kio] [num.array :as arr]
             [num.cpu :as cpu]
             [torch.generate :as generate]
             [torch.gguf :as gguf]
@@ -73,7 +73,7 @@
                     :continuous-fixtures continuous-fixtures}
             bundle (export/export! output-path bundle (:weights loaded))]
         (prn {:status :exported :path output-path
-              :bytes (.length (java.io.File. output-path))
+              :bytes (kio/length (kio/file output-path))
               :weights (reduce + (map count (:weights bundle)))
               :generated-ids generated-ids}))
       (finally (resource/unload-resource! loaded)))))

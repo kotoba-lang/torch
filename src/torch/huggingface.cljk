@@ -1,13 +1,13 @@
 (ns torch.huggingface
   "JVM loader for standard Hugging Face Llama config + safetensors checkpoints."
-  (:require [json.data-json :as json]
-            [clojure.set :as set]
+  (:require [kotoba.bytes :as kbytes] [json.data-json :as json]
+            [kotoba.lang.coll :as set]
             [kotoba.lang.text :as str]
             [num.array :as arr]
             [torch.model :as model]
             [torch.safetensors :as safe]
             [torch.tokenizer :as tokenizer])
-  (:import [java.nio.charset StandardCharsets]
+  (:import
            [java.nio.file Files Path]))
 
 (defn- path [value]
@@ -20,8 +20,7 @@
     (when (> length limit)
       (throw (ex-info (str "torch.huggingface: " kind " is too large")
                       {:path (str source) :bytes length :limit limit})))
-    (let [document (json/read-str (String. (Files/readAllBytes source)
-                                           StandardCharsets/UTF_8))]
+    (let [document (json/read-str (kbytes/utf8-string (Files/readAllBytes source)))]
       (when-not (map? document)
         (throw (ex-info (str "torch.huggingface: " kind " must be an object")
                         {:path (str source)})))
