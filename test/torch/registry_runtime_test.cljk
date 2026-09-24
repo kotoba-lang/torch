@@ -1,5 +1,5 @@
 (ns torch.registry-runtime-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [torch.gguf :as gguf]
             [torch.gguf-resource :as resource]
             [torch.model-registry :as registry]

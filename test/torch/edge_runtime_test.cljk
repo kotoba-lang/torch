@@ -1,5 +1,5 @@
 (ns torch.edge-runtime-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [torch.edge-runtime :as edge]))
 
 (deftest ornith-replica-plan

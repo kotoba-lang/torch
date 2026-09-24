@@ -1,5 +1,5 @@
 (ns torch.paged-runtime-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [torch.kv-cache :as kv]
             [torch.paged-runtime :as paged]))
 

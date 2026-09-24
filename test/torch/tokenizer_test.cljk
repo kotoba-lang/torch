@@ -1,5 +1,5 @@
 (ns torch.tokenizer-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [torch.tokenizer :as tokenizer]))
 
 (defn- byte-token [n]

@@ -1,5 +1,5 @@
 (ns torch.ollama-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [torch.continuous :as continuous]
             [torch.kv-cache :as kv]
             [torch.ollama :as ollama]

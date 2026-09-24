@@ -1,5 +1,5 @@
 (ns torch.generate-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [torch.generate :as generate]
             [torch.tokenizer :as tokenizer]))
 

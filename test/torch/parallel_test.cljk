@@ -1,5 +1,5 @@
 (ns torch.parallel-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [torch.parallel :as parallel]))
 
 (deftest tensor-parallel-projections-equal-unsharded-linear

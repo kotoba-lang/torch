@@ -1,5 +1,5 @@
 (ns torch.expert-stream-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [torch.expert-stream :as stream])
   (:import [java.nio ByteBuffer]
            [java.nio.file Files OpenOption]

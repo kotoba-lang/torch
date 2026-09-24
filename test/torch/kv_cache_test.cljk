@@ -1,5 +1,5 @@
 (ns torch.kv-cache-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [torch.kv-cache :as kv]))
 
 (deftest paged-pool-allocates-reuses-and-checks-capacity

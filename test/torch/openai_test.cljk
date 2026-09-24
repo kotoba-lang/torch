@@ -1,5 +1,5 @@
 (ns torch.openai-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [torch.openai :as openai]))
 
 (deftest chat-request-maps-openai-defaults-and-sampling

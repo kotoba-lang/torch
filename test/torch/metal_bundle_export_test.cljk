@@ -1,6 +1,6 @@
 (ns torch.metal-bundle-export-test
   (:require [clojure.edn :as edn]
-            [clojure.test :refer [deftest is]]
+            [kotoba.test :refer [deftest is]]
             [num.array :as arr]
             [num.cpu :as cpu]
             [torch.metal-bundle-export :as export])
