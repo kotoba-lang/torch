@@ -1,5 +1,5 @@
 (ns torch.safetensors-test
-  (:require [json.data-json :as json]
+  (:require [kotoba.bytes :as kbytes] [json.data-json :as json]
             [kotoba.test :refer [deftest is]]
             [num.array :as arr]
             [num.cpu :as cpu]
@@ -9,7 +9,6 @@
             [torch.safetensors :as safe]
             [torch.state-dict :as state])
   (:import [java.nio ByteBuffer ByteOrder]
-           [java.nio.charset StandardCharsets]
            [java.nio.file Files OpenOption]))
 
 (def backend (cpu/cpu-backend))
@@ -30,7 +29,7 @@
                      (conj chunks bytes) end]))
                 [{"__metadata__" {"format" "pt"}} [] 0]
                 (sort-by key tensors))
-        header-bytes (.getBytes (json/write-str header) StandardCharsets/UTF_8)
+        header-bytes (kbytes/utf8-bytes (json/write-str header))
         total (+ 8 (alength header-bytes) (reduce + (map alength payload)))
         buffer (doto (ByteBuffer/allocate total) (.order ByteOrder/LITTLE_ENDIAN))
         path (Files/createTempFile "torch-state-" ".safetensors"
@@ -45,7 +44,7 @@
   (let [header {"f32" {"dtype" "F32" "shape" [1] "data_offsets" [0 4]}
                 "f16" {"dtype" "F16" "shape" [1] "data_offsets" [4 6]}
                 "bf16" {"dtype" "BF16" "shape" [1] "data_offsets" [6 8]}}
-        header-bytes (.getBytes (json/write-str header) StandardCharsets/UTF_8)
+        header-bytes (kbytes/utf8-bytes (json/write-str header))
         buffer (doto (ByteBuffer/allocate (+ 8 (alength header-bytes) 8))
                  (.order ByteOrder/LITTLE_ENDIAN))
         path (Files/createTempFile "torch-mixed-" ".safetensors"
@@ -66,7 +65,7 @@
   (doseq [path paths] (Files/deleteIfExists path)))
 
 (defn- write-raw-checkpoint [header payload]
-  (let [header-bytes (.getBytes (json/write-str header) StandardCharsets/UTF_8)
+  (let [header-bytes (kbytes/utf8-bytes (json/write-str header))
         buffer (doto (ByteBuffer/allocate (+ 8 (alength header-bytes)
                                              (alength ^bytes payload)))
                  (.order ByteOrder/LITTLE_ENDIAN))

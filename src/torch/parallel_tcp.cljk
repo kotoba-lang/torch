@@ -1,9 +1,8 @@
 (ns torch.parallel-tcp
   "Bounded length-prefixed activation transport for tailnet/LAN ranks."
-  (:require [kotoba.lang.edn :as edn])
+  (:require [kotoba.bytes :as kbytes] [kotoba.lang.edn :as edn])
   (:import [java.io DataInputStream DataOutputStream]
-           [java.net InetAddress ServerSocket Socket]
-           [java.nio.charset StandardCharsets]))
+           [java.net InetAddress ServerSocket Socket]))
 
 (def max-envelope-bytes (* 64 1024 1024))
 
@@ -16,7 +15,7 @@
 (defn write-envelope! [stream envelope]
   (when-not (valid-envelope? envelope)
     (throw (ex-info "invalid activation envelope" {:envelope envelope})))
-  (let [bytes (.getBytes (pr-str envelope) StandardCharsets/UTF_8)]
+  (let [bytes (kbytes/utf8-bytes (pr-str envelope))]
     (when (> (alength bytes) max-envelope-bytes)
       (throw (ex-info "activation envelope exceeds wire limit"
                       {:bytes (alength bytes) :limit max-envelope-bytes})))
@@ -30,7 +29,7 @@
       (throw (ex-info "invalid activation envelope length" {:bytes length})))
     (let [bytes (byte-array length)]
       (.readFully in bytes)
-      (let [envelope (edn/read-string (String. bytes StandardCharsets/UTF_8))]
+      (let [envelope (edn/read-string (kbytes/utf8-string bytes))]
         (when-not (valid-envelope? envelope)
           (throw (ex-info "invalid activation envelope" {})))
         envelope))))

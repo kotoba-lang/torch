@@ -1,6 +1,6 @@
 (ns torch.hf-bundle-export
   "Export Hugging Face Llama safetensors/tokenizer artifacts for Deno Metal."
-  (:require [num.array :as arr]
+  (:require [kotoba.io :as kio] [num.array :as arr]
             [num.cpu :as cpu]
             [torch.generate :as generate]
             [torch.huggingface-resource :as resource]
@@ -79,7 +79,7 @@
              :prompt-ids prompt-ids :generated-ids generated-ids}
             manifest (export/export! output-path manifest (:weights loaded))]
         (prn {:status :exported :path output-path
-              :bytes (.length (java.io.File. output-path))
+              :bytes (kio/length (kio/file output-path))
               :weights (reduce + (map count (:weights manifest)))
               :prompt-ids prompt-ids :generated-ids generated-ids}))
       (finally (resource/unload-resource! loaded)))))

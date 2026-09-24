@@ -1,13 +1,12 @@
 (ns torch.safetensors
   "Validated safetensors reader/writer and torch state-dict loader."
-  (:require [json.data-json :as json]
-            [clojure.set :as set]
+  (:require [kotoba.bytes :as kbytes] [json.data-json :as json]
+            [kotoba.lang.coll :as set]
             [num.array :as arr]
             [torch.state-dict :as state])
   (:import [java.io Closeable RandomAccessFile]
            [java.nio ByteBuffer ByteOrder]
            [java.nio.channels FileChannel]
-           [java.nio.charset StandardCharsets]
            [java.nio.file Files Path StandardCopyOption StandardOpenOption]
            [java.nio.file.attribute FileAttribute]))
 
@@ -55,7 +54,7 @@
         (let [header-buffer (ByteBuffer/allocate (int header-length))
               _ (read-fully-at! channel header-buffer 8)
               header (json/read-str
-                      (String. (.array header-buffer) StandardCharsets/UTF_8))
+                      (kbytes/utf8-string (.array header-buffer)))
               _ (when-not (map? header)
                   (throw (ex-info "torch.safetensors: header must be an object"
                                   {:path (str path)})))
@@ -137,8 +136,7 @@
     (when (> length max-header-bytes)
       (throw (ex-info "torch.safetensors: index is too large"
                       {:bytes length :limit max-header-bytes})))
-    (let [document (json/read-str (String. (Files/readAllBytes index-path)
-                                           StandardCharsets/UTF_8))
+    (let [document (json/read-str (kbytes/utf8-string (Files/readAllBytes index-path)))
           weight-map (get document "weight_map")
           metadata (get document "metadata" {})]
       (when-not (and (map? document) (map? metadata)
@@ -208,7 +206,7 @@
   (while (.hasRemaining buffer) (.write channel buffer)))
 
 (defn- padded-header-bytes [header]
-  (let [raw (.getBytes (json/write-str header) StandardCharsets/UTF_8)
+  (let [raw (kbytes/utf8-bytes (json/write-str header))
         padded-length (* 8 (quot (+ (alength raw) 7) 8))
         padded (byte-array padded-length)]
     (java.util.Arrays/fill padded (byte 0x20))

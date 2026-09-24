@@ -1,7 +1,7 @@
 (ns torch.checkpoint
   "Restartable training checkpoints backed by one atomic safetensors file."
   (:require [json.data-json :as json]
-            [clojure.set :as set]
+            [kotoba.lang.coll :as set]
             [torch.optim :as optim]
             [torch.safetensors :as safe]
             [torch.state-dict :as state]))
