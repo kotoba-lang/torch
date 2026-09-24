@@ -1,5 +1,5 @@
 (ns torch.state-dict-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [num.array :as arr]
             [num.cpu :as cpu]
             [torch.model :as model]

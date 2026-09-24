@@ -1,5 +1,5 @@
 (ns torch.optim-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [num.array :as arr]
             [num.cpu :as cpu]
             [torch.model :as m]

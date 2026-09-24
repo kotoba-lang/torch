@@ -1,5 +1,5 @@
 (ns torch.model-registry-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [torch.model-registry :as registry]))
 
 (defn- fixture [budget events]

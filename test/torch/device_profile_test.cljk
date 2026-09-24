@@ -1,5 +1,5 @@
 (ns torch.device-profile-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [torch.device-profile :as device]))
 
 (deftest recognizes-and-validates-intel-arc-pro-b70

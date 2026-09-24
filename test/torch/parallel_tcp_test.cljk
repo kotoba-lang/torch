@@ -1,5 +1,5 @@
 (ns torch.parallel-tcp-test
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [torch.parallel :as parallel]
             [torch.parallel-tcp :as tcp]))
 

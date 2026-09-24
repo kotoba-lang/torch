@@ -4,7 +4,7 @@
   (matmul/bias/relu/softmax done from scratch, NOT by calling t/softmax's or
   nm/matmul's own machinery), matching this org's existing convention
   (num.contract/num.tensor-test) applied to the torch-clj/num boundary."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [num.array :as arr]
             [num.cpu :as cpu]
             [num.tensor :as t]
