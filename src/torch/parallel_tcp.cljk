@@ -1,6 +1,6 @@
 (ns torch.parallel-tcp
   "Bounded length-prefixed activation transport for tailnet/LAN ranks."
-  (:require [clojure.edn :as edn])
+  (:require [kotoba.lang.edn :as edn])
   (:import [java.io DataInputStream DataOutputStream]
            [java.net InetAddress ServerSocket Socket]
            [java.nio.charset StandardCharsets]))
