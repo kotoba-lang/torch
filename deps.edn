@@ -4,6 +4,9 @@
  ;; library propagates shapes and counts parameters; it never runs tensor math
  ;; (real execution is a host-injected IBackend port).
  :deps {
+        ;; kotoba.lang.error replaced clojure.lang.ExceptionInfo here (2026-09-25).
+        ;; An explicit floor: tools.deps takes the NEWEST sha it is shown.
+        io.github.kotoba-lang/error {:git/sha "838dec56c9a5b74f9eec825a2fb28bda157f8cd3"}
         ;; kotoba.bytes replaced UTF-8 .getBytes / String. here (2026-09-24). An explicit
         ;; floor: tools.deps takes the NEWEST sha it is shown.
         io.github.kotoba-lang/bytes {:git/sha "d5259f35ab7c4f5a66e63ca29ed4dcf7ba3f1ac5"}
@@ -16,7 +19,7 @@
         ;; floor: kotoba.lang.coll carries clojure.set's union/intersection/
         ;; difference/map-invert from 0ffd5f6, and tools.deps takes the NEWEST
         ;; sha it is shown.
-        io.github.kotoba-lang/coll {:git/sha "f74e248f0a07e8ae572885f50fab6bdb39dc24be"}
+        io.github.kotoba-lang/coll {:git/sha "85a124b943db2c068de25e1bc5eb51881d191a84"}
         ;; kotoba.lang.edn replaced clojure.edn here (2026-09-23). An explicit floor:
         ;; tools.deps takes the NEWEST sha it is shown, and kbb resolves git deps
         ;; only from nbb.edn, so every project file this repo has names it.

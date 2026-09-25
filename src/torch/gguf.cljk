@@ -1,7 +1,7 @@
 (ns torch.gguf
   "GGUF v2/v3 metadata and tensor loader with long file offsets."
   (:refer-clojure :exclude [load-file])
-  (:require [kotoba.lang.text :as str]
+  (:require [kotoba.lang.error :as kerror] [kotoba.lang.text :as str]
             [num.array :as arr]
             [num.dtype :as dtype]
             [num.quantized :as quantized]
@@ -362,7 +362,7 @@
       (let [{:keys [shape bytes]} (read-packed-tensor gguf name)]
         (try
           (quantized/table backend bytes shape (:type tensor))
-          (catch clojure.lang.ExceptionInfo error
+          (catch kerror/ExceptionInfo error
             ;; Allows torch to remain usable with an older pinned num while a
             ;; newly added packed format rolls forward; only Q5_0 has a dense
             ;; compatibility path here.
@@ -384,7 +384,7 @@
       (let [{:keys [shape bytes]} (read-packed-tensor gguf name)]
         (try
           (quantized/matrix backend bytes shape (:type tensor))
-          (catch clojure.lang.ExceptionInfo error
+          (catch kerror/ExceptionInfo error
             (if (= :q5-0 (:type tensor))
               (let [{[out in] :shape values :values} (read-tensor gguf name)
                     transposed (mapv (fn [i]

@@ -1,5 +1,5 @@
 (ns torch.gguf-test
-  (:require [kotoba.test :refer [deftest is testing]]
+  (:require [kotoba.lang.error :as kerror] [kotoba.test :refer [deftest is testing]]
             [num.array :as arr]
             [num.cpu :as cpu]
             [num.dtype :as dtype]
@@ -182,7 +182,7 @@
 (deftest quantized-tensors-require-complete-blocks-per-row
   (let [file (gguf/parse-bytes (q4-k-fixture))
         malformed (assoc-in file [:tensor-map "q4-k.weight" :shape] [2 128])]
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+    (is (thrown-with-msg? kerror/ExceptionInfo
                           #"row width must be divisible"
                           (gguf/read-tensor malformed "q4-k.weight")))))
 

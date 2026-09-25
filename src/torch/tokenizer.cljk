@@ -1,16 +1,14 @@
 (ns torch.tokenizer
   "Portable BPE tokenizer with GGUF-style `<0xHH>` UTF-8 byte fallback."
-  (:require [kotoba.lang.text :as str])
-  #?(:clj (:import [java.nio.charset StandardCharsets])))
+  (:require [kotoba.bytes :as kbytes] [kotoba.lang.text :as str]))
 
 (defn- utf8-bytes [s]
   #?(:clj (mapv #(bit-and (int %) 0xff)
-                (.getBytes ^String s StandardCharsets/UTF_8))
+                (kbytes/utf8-bytes ^String s))
      :cljs (vec (.encode (js/TextEncoder.) s))))
 
 (defn- bytes->utf8 [bytes]
-  #?(:clj (String. (byte-array (map #(unchecked-byte (int %)) bytes))
-                   StandardCharsets/UTF_8)
+  #?(:clj (kbytes/utf8-string (byte-array (map #(unchecked-byte (int %)) bytes)))
      :cljs (.decode (js/TextDecoder. "utf-8" #js {:fatal false})
                     (js/Uint8Array. (clj->js bytes)))))
 

@@ -1,5 +1,5 @@
 (ns torch.huggingface-test
-  (:require [json.data-json :as json]
+  (:require [kotoba.lang.error :as kerror] [json.data-json :as json]
             [kotoba.test :refer [deftest is]]
             [num.array :as arr]
             [num.cpu :as cpu]
@@ -118,7 +118,7 @@
                                (tensor "bad" [4 4])))
       (let [config (hf/load-config config-path)]
         (with-open [file (safe/open-file checkpoint)]
-          (is (thrown-with-msg? clojure.lang.ExceptionInfo #"shape mismatch"
+          (is (thrown-with-msg? kerror/ExceptionInfo #"shape mismatch"
                                 (hf/load-llama-weights file backend config)))))
       (finally
         (doseq [path [checkpoint config-path directory]]
@@ -134,7 +134,7 @@
         (is (= "Hi" (tokenizer/decode loaded [1 7])))
         (is (= #{0 1 2} (:special-ids loaded))))
       (write-json! path (assoc tokenizer-json "normalizer" {"type" "Lowercase"}))
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo
+      (is (thrown-with-msg? kerror/ExceptionInfo
                             #"unsupported tokenizer semantics"
                             (hf/load-tokenizer path)))
       (finally (Files/deleteIfExists path)))))
