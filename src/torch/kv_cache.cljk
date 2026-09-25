@@ -3,7 +3,8 @@
 
   Physical block contents belong to the runtime (CPU, Metal, etc.). This
   namespace owns block tables and refcounts and emits copy-on-write commands
-  when a shared partial prefix must be split before the next token is written.")
+  when a shared partial prefix must be split before the next token is written."
+  (:require [kotoba.lang.coll :as kcoll]))
 
 (defn pool
   "Create a pool of `block-count` physical blocks, each holding `block-size`
@@ -144,8 +145,7 @@
     (throw (ex-info "max-running must be a positive integer"
                     {:max-running max-running})))
   {:pool pool* :max-running max-running
-   :waiting #?(:clj clojure.lang.PersistentQueue/EMPTY
-               :cljs cljs.core/PersistentQueue.EMPTY)
+   :waiting kcoll/empty-queue
    :running {} :order []})
 
 (defn enqueue

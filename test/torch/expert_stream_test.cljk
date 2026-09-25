@@ -1,5 +1,5 @@
 (ns torch.expert-stream-test
-  (:require [kotoba.test :refer [deftest is]]
+  (:require [kotoba.lang.error :as kerror] [kotoba.test :refer [deftest is]]
             [torch.expert-stream :as stream])
   (:import [java.nio ByteBuffer]
            [java.nio.file Files OpenOption]
@@ -53,5 +53,5 @@
          (stream/split-placement {})))
   (is (= :metal (:torch/non-expert-buffer
                  (stream/split-placement {:gpu-layers 4}))))
-  (is (thrown? clojure.lang.ExceptionInfo
+  (is (thrown? kerror/ExceptionInfo
                (stream/split-placement {:expert-buffer :metal}))))

@@ -1,12 +1,11 @@
 (ns torch.continuous
   "Continuous request scheduling over shared per-layer paged KV runtimes."
-  (:require [torch.generate :as generate]
+  (:require [kotoba.lang.coll :as kcoll] [torch.generate :as generate]
             [torch.kv-cache :as kv]
             [torch.paged-runtime :as paged]))
 
 (def empty-queue
-  #?(:clj clojure.lang.PersistentQueue/EMPTY
-     :cljs cljs.core/PersistentQueue.EMPTY))
+  kcoll/empty-queue)
 
 (defn engine
   "Create an engine. `step-fn` receives `[token-id runtimes request-id]` and

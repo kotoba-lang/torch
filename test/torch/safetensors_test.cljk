@@ -1,5 +1,5 @@
 (ns torch.safetensors-test
-  (:require [kotoba.bytes :as kbytes] [json.data-json :as json]
+  (:require [kotoba.lang.error :as kerror] [kotoba.bytes :as kbytes] [json.data-json :as json]
             [kotoba.test :refer [deftest is]]
             [num.array :as arr]
             [num.cpu :as cpu]
@@ -100,7 +100,7 @@
         extra (assoc external "unused.weight" (arr/from-vec backend [1.0] [1]))
         checkpoint (write-f32-checkpoint extra)]
     (try
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"unexpected tensors"
+      (is (thrown-with-msg? kerror/ExceptionInfo #"unexpected tensors"
                             (safe/load-weights checkpoint backend model*)))
       (is (= 1 (count (safe/load-weights checkpoint backend model*
                                       {:strict? false}))))
@@ -166,12 +166,12 @@
         tensor (arr/from-vec backend [1.0] [1])]
     (try
       (write-index! index {"weight_map" {"x" "../outside.safetensors"}})
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"escapes index directory"
+      (is (thrown-with-msg? kerror/ExceptionInfo #"escapes index directory"
                             (safe/open-index index)))
       (safe/write-file! shard {"actual" tensor})
       (write-index! index
                     {"weight_map" {"declared" "model-00001-of-00001.safetensors"}})
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo
+      (is (thrown-with-msg? kerror/ExceptionInfo
                             #"index does not match shard contents"
                             (safe/open-index index)))
       (finally
@@ -189,10 +189,10 @@
                   {"__metadata__" {"not-a-string" 1}}
                   (byte-array 0))]
     (try
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"overlap or leave holes"
+      (is (thrown-with-msg? kerror/ExceptionInfo #"overlap or leave holes"
                             (safe/open-file overlap)))
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"overlap or leave holes"
+      (is (thrown-with-msg? kerror/ExceptionInfo #"overlap or leave holes"
                             (safe/open-file gap)))
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"invalid header metadata"
+      (is (thrown-with-msg? kerror/ExceptionInfo #"invalid header metadata"
                             (safe/open-file metadata)))
       (finally (delete-tree! [metadata gap overlap])))))
